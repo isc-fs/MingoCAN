@@ -1,8 +1,8 @@
 ![ISC Logo](http://iscracingteam.com/wp-content/uploads/2022/03/Picture5.jpg)
 
-# IFS08 - DV_AMI
+# IFS08 - CAN Flasher
 
-Embedded firmware for the **Autonomous Mission Indicator (AMI)** of the IFS08, developed on STM32H7 with micro-ROS.
+Host-side CAN flasher (Rust CLI) for programming the IFS08 STM32 CAN bootloader. Supports SLCAN, SocketCAN and PCAN adapters across Linux, macOS and Windows.
 
 ---
 
@@ -18,8 +18,8 @@ Embedded firmware for the **Autonomous Mission Indicator (AMI)** of the IFS08, d
    - Keep a copy of [GitHub's Git Cheat Sheet](https://services.github.com/kit/downloads/github-git-cheat-sheet.pdf) handy as a reference.
 
 3. Clone this repository to your machine:
-   - SSH: `git@github.com:isc-fs/IFS08-DV_AMI.git`
-   - HTTPS: `https://github.com/isc-fs/IFS08-DV_AMI.git`
+   - SSH: `git@github.com:isc-fs/can-flasher.git`
+   - HTTPS: `https://github.com/isc-fs/can-flasher.git`
 
 ---
 
