@@ -1,0 +1,294 @@
+//! In-process stub bootloader.
+//!
+//! A tiny `run` loop that pretends to be the STM32 CAN bootloader
+//! for the purposes of integration tests. Just enough protocol
+//! behaviour to drive a full host-side pipeline through ISO-TP
+//! segmentation + reassembly + opcode dispatch without hardware.
+//!
+//! ## Implemented opcodes (feat/4 scope)
+//!
+//! - `CMD_CONNECT` — replies with ACK echoing the host's protocol
+//!   version, flips a local "session active" flag.
+//! - `CMD_DISCONNECT` — replies with ACK, clears the session flag.
+//! - `CMD_DISCOVER` — replies with `[CMD_DISCOVER, node_id, major,
+//!   minor]` as `TYPE=DISCOVER`.
+//!
+//! Every other opcode earns `NACK(UNSUPPORTED)`. Later feat branches
+//! extend the stub as real subcommands land (feat/5 adds GET_HEALTH
+//! for the discover UI, feat/6 adds a flash pipeline, etc.).
+//!
+//! ## What the stub doesn't model
+//!
+//! - 30 s session watchdog — the real bootloader drops a stale
+//!   session; the stub keeps the latch until `CMD_DISCONNECT`.
+//! - NOTIFY_HEARTBEAT / NOTIFY_LOG / NOTIFY_LIVE_DATA streams.
+//! - Flash programming of any kind.
+//!
+//! These land as the features that need them do.
+
+use std::time::Duration;
+
+use tokio::sync::oneshot;
+use tracing::{debug, trace, warn};
+
+use crate::protocol::commands::{PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR};
+use crate::protocol::ids::{FrameId, MessageType};
+use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
+use crate::protocol::opcodes::{CommandOpcode, NackCode};
+use crate::protocol::CanFrame;
+
+use super::{CanBackend, Result, TransportError};
+
+/// How long we wait between frames before giving up the current read
+/// attempt and returning to the top of the loop. Short enough that
+/// a shutdown signal is picked up promptly, long enough that the
+/// loop is quiet while idle.
+const READ_SLICE: Duration = Duration::from_millis(50);
+
+/// Minimal stub bootloader. Spin it up in a tokio task; it runs
+/// until either the cancel handle fires or the underlying backend
+/// disconnects.
+pub struct StubDevice {
+    backend: Box<dyn CanBackend>,
+    node_id: u8,
+    reasm: Reassembler,
+    session_active: bool,
+    /// Message type carried by the last SF or FF seen. CFs ride as
+    /// `TYPE=DATA` per the bootloader's ISO-TP convention, so the
+    /// reassembler (which operates purely on frame payload bytes)
+    /// can't know the originating type — we capture it at the
+    /// frame-ID layer and consume it when the reassembly completes.
+    pending_msg_type: Option<MessageType>,
+}
+
+impl StubDevice {
+    /// Wrap a `CanBackend` as a stub device answering from `node_id`
+    /// (4-bit, 1..=14 — `0x0` is reserved for the host, `0xF` for
+    /// broadcast).
+    pub fn new(backend: Box<dyn CanBackend>, node_id: u8) -> Self {
+        debug_assert!(node_id != 0 && node_id != 0xF, "invalid stub node id");
+        Self {
+            backend,
+            node_id,
+            reasm: Reassembler::new(),
+            session_active: false,
+            pending_msg_type: None,
+        }
+    }
+
+    /// Run the dispatch loop. Terminates gracefully when `cancel`
+    /// fires or the backend disconnects; both cases return `Ok(())`.
+    /// Unexpected transport errors bubble up as-is.
+    pub async fn run(mut self, mut cancel: oneshot::Receiver<()>) -> Result<()> {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut cancel => {
+                    debug!(node = self.node_id, "stub device: cancel signalled, exiting");
+                    return Ok(());
+                }
+                frame = self.backend.recv(READ_SLICE) => {
+                    match frame {
+                        Ok(frame) => {
+                            if let Err(err) = self.handle_frame(frame).await {
+                                warn!(node = self.node_id, ?err, "stub device: handle_frame failed");
+                                // A transport error is terminal; anything
+                                // else we swallow and keep running.
+                                if matches!(err, TransportError::Disconnected) {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        Err(TransportError::Timeout(_)) => continue,
+                        Err(TransportError::Disconnected) => {
+                            debug!(node = self.node_id, "stub device: backend disconnected");
+                            return Ok(());
+                        }
+                        Err(other) => return Err(other),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_frame(&mut self, frame: CanFrame) -> Result<()> {
+        // Filter by the 11-bit ID: ignore frames addressed to a
+        // different node unless they're broadcast.
+        let id = match FrameId::decode(frame.id) {
+            Ok(id) => id,
+            Err(_) => {
+                trace!(raw_id = frame.id, "stub: dropping frame with bad ID");
+                return Ok(());
+            }
+        };
+        if !id.addressed_to(self.node_id) {
+            return Ok(());
+        }
+
+        // Capture the message type whenever the current frame carries
+        // it — i.e. when it's an SF (PCI high nibble 0) or FF (PCI
+        // high nibble 1). CFs (nibble 2) and FCs (nibble 3) ride as
+        // TYPE=DATA and would overwrite the real type if we took
+        // `id.message_type` unconditionally.
+        let payload_bytes = frame.payload();
+        if let Some(pci_hi) = payload_bytes.first().map(|b| b & 0xF0) {
+            if pci_hi == 0x00 || pci_hi == 0x10 {
+                self.pending_msg_type = Some(id.message_type);
+            }
+        }
+
+        // Feed the ISO-TP reassembler. `now_ms` is a synthetic clock
+        // — the stub doesn't run a timeout scheduler, the tick count
+        // is just used to drive the reassembler's internal
+        // bookkeeping.
+        let now_ms = static_ms();
+        let outcome = self.reasm.feed(payload_bytes, now_ms);
+
+        match outcome {
+            Ok(ReassembleOutcome::Ongoing) => Ok(()),
+            Ok(ReassembleOutcome::Complete(payload)) => {
+                let msg_type = self.pending_msg_type.take().unwrap_or(id.message_type);
+                self.dispatch(id.src, msg_type, &payload).await
+            }
+            Err(_err) => {
+                // The real bootloader emits NACK(TRANSPORT_*) here.
+                // For the stub we bail silently — tests that care
+                // about framing errors feed the reassembler directly.
+                self.pending_msg_type = None;
+                Ok(())
+            }
+        }
+    }
+
+    async fn dispatch(
+        &mut self,
+        peer: u8,
+        message_type: MessageType,
+        payload: &[u8],
+    ) -> Result<()> {
+        if message_type != MessageType::Cmd && message_type != MessageType::Discover {
+            // Stub only answers CMD / DISCOVER; other types are
+            // host-bound and shouldn't appear here.
+            return Ok(());
+        }
+
+        let opcode = match payload.first() {
+            Some(b) => *b,
+            None => {
+                trace!("stub: empty payload after reassembly");
+                return Ok(());
+            }
+        };
+
+        let decoded = CommandOpcode::try_from(opcode);
+        match decoded {
+            Ok(CommandOpcode::Connect) => self.handle_connect(peer, payload).await,
+            Ok(CommandOpcode::Disconnect) => self.handle_disconnect(peer).await,
+            Ok(CommandOpcode::Discover) => self.handle_discover(peer).await,
+            Ok(_) | Err(_) => self.send_nack(peer, opcode, NackCode::Unsupported).await,
+        }
+    }
+
+    // ---- Handlers ----
+
+    async fn handle_connect(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if payload.len() < 3 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::Connect.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let host_major = payload[1];
+        let host_minor = payload[2];
+        if host_major != PROTOCOL_VERSION_MAJOR {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::Connect.as_byte(),
+                    NackCode::ProtocolVersion,
+                )
+                .await;
+        }
+        self.session_active = true;
+        let resp = vec![
+            CommandOpcode::Connect.as_byte(),
+            PROTOCOL_VERSION_MAJOR,
+            PROTOCOL_VERSION_MINOR,
+        ];
+        let _ = host_minor; // future: honour optional feature flags from minor
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    async fn handle_disconnect(&mut self, peer: u8) -> Result<()> {
+        self.session_active = false;
+        let resp = vec![CommandOpcode::Disconnect.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    async fn handle_discover(&mut self, peer: u8) -> Result<()> {
+        let resp = vec![
+            CommandOpcode::Discover.as_byte(),
+            self.node_id,
+            PROTOCOL_VERSION_MAJOR,
+            PROTOCOL_VERSION_MINOR,
+        ];
+        self.send_message(peer, MessageType::Discover, &resp).await
+    }
+
+    async fn send_nack(&self, peer: u8, rejected_opcode: u8, code: NackCode) -> Result<()> {
+        let payload = [rejected_opcode, code.as_byte()];
+        self.send_message(peer, MessageType::Nack, &payload).await
+    }
+
+    /// Segment `payload` into ISO-TP frames and push each through
+    /// the backend, keeping the bootloader convention: FF keeps the
+    /// original TYPE, CFs travel as TYPE=DATA.
+    async fn send_message(
+        &self,
+        peer: u8,
+        message_type: MessageType,
+        payload: &[u8],
+    ) -> Result<()> {
+        let segmenter = match IsoTpSegmenter::new(payload) {
+            Ok(s) => s,
+            Err(err) => {
+                warn!(?err, "stub: segmenter rejected payload");
+                return Ok(());
+            }
+        };
+
+        let initial_id = FrameId::new(message_type, self.node_id, peer)
+            .expect("valid node ids")
+            .encode();
+        let cf_id = FrameId::new(MessageType::Data, self.node_id, peer)
+            .expect("valid node ids")
+            .encode();
+
+        for (idx, frame_bytes) in segmenter.enumerate() {
+            let id = if idx == 0 { initial_id } else { cf_id };
+            let frame = CanFrame {
+                id,
+                data: frame_bytes,
+                len: frame_bytes.len() as u8,
+            };
+            self.backend.send(frame).await?;
+        }
+        Ok(())
+    }
+}
+
+/// A monotonic "enough" millisecond counter used to feed the
+/// reassembler. We don't need wall-clock accuracy — the reassembler
+/// only compares timestamps for relative elapsed, and inside a single
+/// process tokio's `Instant` would give the same answer with more
+/// ceremony. `Instant::now()` via the std clock is fine here.
+fn static_ms() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
+    start.elapsed().as_millis() as u64
+}

@@ -1,25 +1,20 @@
-//! can-flasher — host-side CLI for the isc-fs STM32 CAN bootloader.
+//! can-flasher — host-side CLI entry point.
 //!
 //! This file wires `clap`'s parsed arguments up to the per-subcommand
-//! entry points in `cli::*`. It owns the tokio runtime, the tracing
-//! subscriber, and the top-level error-to-exit-code mapping — nothing
-//! else. Each subcommand is free to pull in whatever protocol /
-//! transport machinery it needs.
+//! entry points in [`can_flasher::cli`]. It owns the tokio runtime,
+//! the tracing subscriber, and the top-level error-to-exit-code
+//! mapping — nothing else.
 //!
-//! The skeleton landed in `feat/2-cargo-skeleton` deliberately stubs
-//! every subcommand to a "not implemented" bail. Later feat branches
-//! replace the stubs one at a time in the order defined by the
-//! roadmap.
+//! The module tree (`protocol`, `transport`, `cli`, `logging`) lives
+//! in `src/lib.rs` so both this binary and the integration tests
+//! under `tests/` reach it through the same `can_flasher::…` paths.
 
 use std::process::ExitCode;
 
 use clap::Parser;
 
-mod cli;
-mod logging;
-pub mod protocol;
-
-use cli::{Cli, Command};
+use can_flasher::cli::{self, Cli, Command};
+use can_flasher::logging;
 
 /// Exit codes. Mirrors the table in REQUIREMENTS.md — keep them in
 /// sync.
