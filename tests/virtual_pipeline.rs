@@ -1,254 +1,139 @@
-//! End-to-end integration test: the host drives a `VirtualBus`-paired
-//! [`StubDevice`] through the full ISO-TP + protocol stack.
+//! End-to-end integration test: the host [`Session`] drives a
+//! [`VirtualBus`]-paired [`StubDevice`] through the full ISO-TP +
+//! protocol stack.
 //!
-//! This is the first test that exercises every layer landed so far:
+//! Exercises every layer landed so far:
 //!
-//! - `protocol::ids` — build / decode 11-bit IDs
-//! - `protocol::isotp` — segment outgoing commands, reassemble incoming
-//!   responses
-//! - `protocol::commands` — payload builders
-//! - `protocol::responses` — parse what came back
-//! - `transport::CanBackend` — the trait itself
-//! - `transport::virtual_bus` — in-process loopback
-//! - `transport::stub_device` — minimum bootloader impl
+//! - `protocol::ids` / `protocol::isotp` / `protocol::commands` /
+//!   `protocol::responses` / `protocol::opcodes` (the wire format)
+//! - `transport::CanBackend` + `transport::virtual_bus` (in-process
+//!   loopback)
+//! - `transport::stub_device` (minimum bootloader impl)
+//! - `session::Session` (connect / send_command / broadcast /
+//!   disconnect / notification subscription)
 //!
-//! When a new real backend lands (SLCAN, SocketCAN, PCAN) the
-//! bootloader-side of this test stays the stub; the only thing that
-//! swaps is the adapter under the `CanBackend` on the host side.
+//! When a new real backend lands the bootloader-side of this test
+//! stays the stub; the only thing that swaps is the adapter under
+//! the `CanBackend` on the host side.
 
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 
 use can_flasher::protocol::commands::{
-    cmd_connect_self, cmd_disconnect, cmd_discover, cmd_flash_erase, PROTOCOL_VERSION_MAJOR,
-    PROTOCOL_VERSION_MINOR,
+    cmd_flash_erase, PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR,
 };
-use can_flasher::protocol::ids::{FrameId, MessageType};
-use can_flasher::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
+use can_flasher::protocol::ids::MessageType;
 use can_flasher::protocol::opcodes::{CommandOpcode, NackCode};
-use can_flasher::protocol::{CanFrame, Response, BROADCAST_NODE_ID, HOST_NODE_ID};
-use can_flasher::transport::{CanBackend, StubDevice, TransportError, VirtualBus};
+use can_flasher::protocol::Response;
+use can_flasher::session::{Session, SessionConfig, SessionError};
+use can_flasher::transport::{CanBackend, StubDevice, VirtualBus};
 
-const STUB_NODE_ID: u8 = 0x3;
-const FRAME_TIMEOUT: Duration = Duration::from_millis(200);
+const STUB_NODE: u8 = 0x3;
+const COLLECT_WINDOW: Duration = Duration::from_millis(150);
 
-/// Test-side "client" that owns a host backend, a reassembler, and
-/// enough glue to send a protocol message and wait for the matching
-/// reply. Not a public API — the real flasher builds its own higher-
-/// level session abstraction in feat/9.
-struct Client {
-    backend: Box<dyn CanBackend>,
-    reasm: Reassembler,
-    /// See StubDevice::pending_msg_type — CFs ride as TYPE=DATA on the
-    /// wire, so the message type has to be captured from the SF/FF.
-    pending_msg_type: Option<MessageType>,
-}
-
-impl Client {
-    fn new(backend: Box<dyn CanBackend>) -> Self {
-        Self {
-            backend,
-            reasm: Reassembler::with_timeout(1_000),
-            pending_msg_type: None,
-        }
-    }
-
-    /// Send an ISO-TP-segmented message with a chosen `MessageType`
-    /// on the ID.
-    async fn send_message(
-        &self,
-        message_type: MessageType,
-        dst: u8,
-        payload: &[u8],
-    ) -> Result<(), TransportError> {
-        let initial_id = FrameId::new(message_type, HOST_NODE_ID, dst)
-            .unwrap()
-            .encode();
-        let cf_id = FrameId::new(MessageType::Data, HOST_NODE_ID, dst)
-            .unwrap()
-            .encode();
-
-        let seg = IsoTpSegmenter::new(payload).expect("segment");
-        for (idx, frame_bytes) in seg.enumerate() {
-            let id = if idx == 0 { initial_id } else { cf_id };
-            let frame = CanFrame {
-                id,
-                data: frame_bytes,
-                len: frame_bytes.len() as u8,
-            };
-            self.backend.send(frame).await?;
-        }
-        Ok(())
-    }
-
-    /// Drain frames from the backend until the reassembler completes
-    /// a message or `deadline` elapses.
-    async fn recv_message(
-        &mut self,
-        deadline: Duration,
-    ) -> Result<(MessageType, Vec<u8>), TransportError> {
-        let start = std::time::Instant::now();
-        loop {
-            let remaining = deadline.checked_sub(start.elapsed()).unwrap_or_default();
-            if remaining.is_zero() {
-                return Err(TransportError::Timeout(deadline));
-            }
-            let frame = self.backend.recv(remaining).await?;
-            let id = FrameId::decode(frame.id).expect("valid id from stub");
-
-            // Capture the TYPE from SF (PCI 0x0_) and FF (PCI 0x1_);
-            // CFs (PCI 0x2_) ride as TYPE=DATA so taking id.message_type
-            // from those would lose the original type.
-            let payload_bytes = frame.payload();
-            if let Some(pci_hi) = payload_bytes.first().map(|b| b & 0xF0) {
-                if pci_hi == 0x00 || pci_hi == 0x10 {
-                    self.pending_msg_type = Some(id.message_type);
-                }
-            }
-
-            match self.reasm.feed(payload_bytes, tick_ms()) {
-                Ok(ReassembleOutcome::Ongoing) => continue,
-                Ok(ReassembleOutcome::Complete(bytes)) => {
-                    let msg_type = self.pending_msg_type.take().unwrap_or(id.message_type);
-                    return Ok((msg_type, bytes));
-                }
-                Err(err) => panic!("reassembler bailed: {err:?}"),
-            }
-        }
-    }
-}
-
-/// Synthetic monotonic ms — tokio timers tick inside the test.
-fn tick_ms() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static START: OnceLock<Instant> = OnceLock::new();
-    let start = *START.get_or_init(Instant::now);
-    start.elapsed().as_millis() as u64
-}
-
-/// Spin up a fresh bus, stub device, and host-side client. Returns
-/// the client and a cancel handle the test should fire on teardown.
-async fn setup() -> (Client, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+/// Build a fresh session over a Virtual bus with a running stub on
+/// the device side. Caller must drop `cancel` + await `handle` at
+/// the end of the test to tear down the stub cleanly.
+async fn setup() -> (Session, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
     let bus = VirtualBus::new();
-    let host_backend = Box::new(bus.host_backend());
-    let device_backend = Box::new(bus.device_backend());
-    // Leaking the bus keeps the channel endpoints alive for the
-    // lifetime of the test. In a real integration harness we'd keep
-    // the VirtualBus on the stack of the test fn.
-    std::mem::forget(bus);
+    let host = bus.host_backend();
+    let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+    drop(bus);
 
-    let stub = StubDevice::new(device_backend, STUB_NODE_ID);
+    let stub = StubDevice::new(device, STUB_NODE);
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
-        stub.run(cancel_rx).await.expect("stub run");
+        let _ = stub.run(cancel_rx).await;
     });
-    (Client::new(host_backend), cancel_tx, handle)
+
+    // Tight timings so tests finish quickly. Production defaults use
+    // 5 s keepalive / 500 ms command timeout; 250 ms / 200 ms here
+    // still exercises the same code paths without adding real
+    // latency to the test run.
+    let config = SessionConfig {
+        target_node: STUB_NODE,
+        keepalive_interval: Duration::from_millis(250),
+        command_timeout: Duration::from_millis(200),
+        host_major: PROTOCOL_VERSION_MAJOR,
+        host_minor: PROTOCOL_VERSION_MINOR,
+    };
+    let session = Session::attach(Box::new(host), config);
+    (session, cancel_tx, handle)
 }
 
-#[tokio::test]
-async fn connect_elicits_ack_with_protocol_version() {
-    let (mut client, cancel, handle) = setup().await;
-
-    client
-        .send_message(MessageType::Cmd, STUB_NODE_ID, &cmd_connect_self())
-        .await
-        .unwrap();
-
-    let (mt, payload) = client.recv_message(FRAME_TIMEOUT).await.unwrap();
-    assert_eq!(mt, MessageType::Ack);
-
-    match Response::parse(mt, &payload).unwrap() {
-        Response::Ack { opcode, payload } => {
-            assert_eq!(opcode, CommandOpcode::Connect.as_byte());
-            assert_eq!(
-                payload,
-                vec![PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR]
-            );
-        }
-        other => panic!("expected Ack, got {other:?}"),
-    }
-
-    drop(cancel);
+async fn teardown(
+    session: Session,
+    cancel: oneshot::Sender<()>,
+    handle: tokio::task::JoinHandle<()>,
+) {
+    let _ = session.disconnect().await;
+    let _ = cancel.send(());
     let _ = handle.await;
 }
 
 #[tokio::test]
+async fn connect_elicits_ack_with_protocol_version() {
+    let (session, cancel, handle) = setup().await;
+    let (major, minor) = session.connect().await.expect("connect");
+    assert_eq!(major, PROTOCOL_VERSION_MAJOR);
+    assert_eq!(minor, PROTOCOL_VERSION_MINOR);
+    assert!(session.is_connected());
+    teardown(session, cancel, handle).await;
+}
+
+#[tokio::test]
 async fn discover_broadcast_elicits_discover_reply() {
-    let (mut client, cancel, handle) = setup().await;
-
-    client
-        .send_message(MessageType::Discover, BROADCAST_NODE_ID, &cmd_discover())
+    let (session, cancel, handle) = setup().await;
+    let replies = session
+        .broadcast(
+            &can_flasher::protocol::commands::cmd_discover(),
+            MessageType::Discover,
+            COLLECT_WINDOW,
+        )
         .await
-        .unwrap();
-
-    let (mt, payload) = client.recv_message(FRAME_TIMEOUT).await.unwrap();
-    assert_eq!(mt, MessageType::Discover);
-    match Response::parse(mt, &payload).unwrap() {
+        .expect("broadcast");
+    assert_eq!(replies.len(), 1, "one stub → one reply");
+    match &replies[0] {
         Response::Discover {
             node_id,
             proto_major,
             proto_minor,
         } => {
-            assert_eq!(node_id, STUB_NODE_ID);
-            assert_eq!(proto_major, PROTOCOL_VERSION_MAJOR);
-            assert_eq!(proto_minor, PROTOCOL_VERSION_MINOR);
+            assert_eq!(*node_id, STUB_NODE);
+            assert_eq!(*proto_major, PROTOCOL_VERSION_MAJOR);
+            assert_eq!(*proto_minor, PROTOCOL_VERSION_MINOR);
         }
         other => panic!("expected Discover, got {other:?}"),
     }
-
-    drop(cancel);
-    let _ = handle.await;
+    teardown(session, cancel, handle).await;
 }
 
 #[tokio::test]
 async fn disconnect_clears_session_and_acks() {
-    let (mut client, cancel, handle) = setup().await;
-
-    // First connect so there's an active session to clear.
-    client
-        .send_message(MessageType::Cmd, STUB_NODE_ID, &cmd_connect_self())
-        .await
-        .unwrap();
-    let _ = client.recv_message(FRAME_TIMEOUT).await.unwrap();
-
-    // Now disconnect.
-    client
-        .send_message(MessageType::Cmd, STUB_NODE_ID, &cmd_disconnect())
-        .await
-        .unwrap();
-    let (mt, payload) = client.recv_message(FRAME_TIMEOUT).await.unwrap();
-    match Response::parse(mt, &payload).unwrap() {
-        Response::Ack { opcode, .. } => {
-            assert_eq!(opcode, CommandOpcode::Disconnect.as_byte());
-        }
-        other => panic!("expected Ack(Disconnect), got {other:?}"),
-    }
-
-    drop(cancel);
+    let (session, cancel, handle) = setup().await;
+    session.connect().await.expect("connect");
+    assert!(session.is_connected());
+    // `disconnect` consumes the session; re-check `is_connected`
+    // via `stub_quiet` instead — after disconnect the stub will
+    // NACK subsequent commands with nothing to say if we'd pushed
+    // one. For this test we just confirm disconnect returns Ok.
+    session.disconnect().await.expect("disconnect");
+    let _ = cancel.send(());
     let _ = handle.await;
 }
 
 #[tokio::test]
 async fn unknown_opcode_earns_nack_unsupported() {
-    let (mut client, cancel, handle) = setup().await;
+    let (session, cancel, handle) = setup().await;
+    session.connect().await.expect("connect");
 
-    // The stub only implements CONNECT / DISCONNECT / DISCOVER in
-    // feat/4 — FLASH_ERASE is still "not implemented" on the stub,
-    // which dispatches it to `NACK(UNSUPPORTED)`.
-    client
-        .send_message(
-            MessageType::Cmd,
-            STUB_NODE_ID,
-            &cmd_flash_erase(0x0802_0000, 0x20000),
-        )
-        .await
-        .unwrap();
-
-    let (mt, payload) = client.recv_message(FRAME_TIMEOUT).await.unwrap();
-    assert_eq!(mt, MessageType::Nack);
-    match Response::parse(mt, &payload).unwrap() {
+    // FLASH_ERASE isn't implemented by the stub — expect
+    // NACK(UNSUPPORTED). Also exercises the FF+CF path (9-byte
+    // payload).
+    let payload = cmd_flash_erase(0x0802_0000, 0x2_0000);
+    let resp = session.send_command(&payload).await.expect("send");
+    match resp {
         Response::Nack {
             rejected_opcode,
             code,
@@ -259,55 +144,77 @@ async fn unknown_opcode_earns_nack_unsupported() {
         other => panic!("expected Nack, got {other:?}"),
     }
 
-    drop(cancel);
-    let _ = handle.await;
+    teardown(session, cancel, handle).await;
 }
 
 #[tokio::test]
 async fn version_mismatch_earns_nack_protocol_version() {
-    let (mut client, cancel, handle) = setup().await;
+    let bus = VirtualBus::new();
+    let host = bus.host_backend();
+    let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+    drop(bus);
 
-    // Craft a CONNECT claiming major=99 — stub should NACK.
-    let bad_connect = vec![CommandOpcode::Connect.as_byte(), 99, 0];
-    client
-        .send_message(MessageType::Cmd, STUB_NODE_ID, &bad_connect)
-        .await
-        .unwrap();
+    let stub = StubDevice::new(device, STUB_NODE);
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let _ = stub.run(cancel_rx).await;
+    });
 
-    let (mt, payload) = client.recv_message(FRAME_TIMEOUT).await.unwrap();
-    assert_eq!(mt, MessageType::Nack);
-    match Response::parse(mt, &payload).unwrap() {
-        Response::Nack {
-            rejected_opcode,
-            code,
-        } => {
-            assert_eq!(rejected_opcode, CommandOpcode::Connect.as_byte());
-            assert_eq!(code, NackCode::ProtocolVersion);
-        }
-        other => panic!("expected Nack(ProtocolVersion), got {other:?}"),
-    }
+    // Claim a major version the stub doesn't recognise.
+    let config = SessionConfig {
+        target_node: STUB_NODE,
+        keepalive_interval: Duration::from_millis(250),
+        command_timeout: Duration::from_millis(200),
+        host_major: 99,
+        host_minor: 0,
+    };
+    let session = Session::attach(Box::new(host), config);
+    let err = session.connect().await.expect_err("bad-major connect");
+    assert!(
+        matches!(err, SessionError::ProtocolVersionMismatch { .. }),
+        "got {err:?}"
+    );
+    assert!(!session.is_connected());
 
-    drop(cancel);
+    drop(session);
+    let _ = cancel_tx.send(());
     let _ = handle.await;
 }
 
 #[tokio::test]
-async fn frame_addressed_to_other_node_is_ignored() {
-    let (mut client, cancel, handle) = setup().await;
+async fn command_addressed_to_other_node_times_out() {
+    // Build a session pointing at a node the stub isn't answering
+    // as. The stub's addressed_to filter drops our CONNECT; we see
+    // a CommandTimeout instead of a NACK.
+    let bus = VirtualBus::new();
+    let host = bus.host_backend();
+    let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+    drop(bus);
 
-    // Send CONNECT to node 0x5 instead of the stub's 0x3. No reply
-    // should come back — the stub's `addressed_to` check drops it.
-    client
-        .send_message(MessageType::Cmd, 0x5, &cmd_connect_self())
+    let stub = StubDevice::new(device, STUB_NODE);
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let _ = stub.run(cancel_rx).await;
+    });
+
+    let config = SessionConfig {
+        target_node: 0x5, // stub is 0x3, so 0x5 is silently dropped
+        keepalive_interval: Duration::from_millis(250),
+        command_timeout: Duration::from_millis(100),
+        host_major: PROTOCOL_VERSION_MAJOR,
+        host_minor: PROTOCOL_VERSION_MINOR,
+    };
+    let session = Session::attach(Box::new(host), config);
+    let err = session
+        .connect()
         .await
-        .unwrap();
+        .expect_err("routed-elsewhere connect");
+    match err {
+        SessionError::CommandTimeout(_) => {}
+        other => panic!("expected CommandTimeout, got {other:?}"),
+    }
 
-    let err = client
-        .recv_message(Duration::from_millis(50))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, TransportError::Timeout(_)));
-
-    drop(cancel);
+    drop(session);
+    let _ = cancel_tx.send(());
     let _ = handle.await;
 }

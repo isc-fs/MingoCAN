@@ -11,4 +11,5 @@
 pub mod cli;
 pub mod logging;
 pub mod protocol;
+pub mod session;
 pub mod transport;
