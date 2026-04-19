@@ -24,10 +24,10 @@ subcommand implementations (`discover`, `diagnose`, `config`, `verify`,
 | Subcommand | Status |
 |-----------|:------:|
 | `adapters` — list detected CAN adapters | ✅ live |
-| `discover` — scan the bus, print table of bootloader-mode devices | 🔜 `feat/10` |
-| `diagnose` — DTC / log / live-data / health / reset | 🔜 `feat/11` |
+| `discover` — scan the bus, print table of bootloader-mode devices | ✅ live |
+| `diagnose` — DTC / log / live-data / health / reset | ✅ live |
+| `config` — NVM read/write + option bytes + WRP apply | ✅ live |
 | `verify` — compare installed image against a binary | 🔜 `feat/12` |
-| `config` — NVM read/write + option bytes + WRP apply | 🔜 `feat/13` |
 | `replay` — record / replay CAN sessions for testing | 🔜 `feat/14` |
 | `flash` — program firmware end-to-end | 🔜 `feat/15`–`feat/17` |
 

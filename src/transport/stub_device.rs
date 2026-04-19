@@ -26,6 +26,7 @@
 //!
 //! These land as the features that need them do.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -35,9 +36,21 @@ use crate::protocol::commands::{PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR};
 use crate::protocol::ids::{FrameId, MessageType};
 use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
 use crate::protocol::opcodes::{CommandOpcode, NackCode};
+use crate::protocol::records::OB_APPLY_TOKEN;
 use crate::protocol::CanFrame;
 
 use super::{CanBackend, Result, TransportError};
+
+/// Upper bound on a single NVM value, per REQUIREMENTS.md § NVM
+/// store — matches the bootloader's `BL_NVM_MAX_VALUE_LEN` (20 B).
+const STUB_NVM_MAX_VALUE_LEN: usize = 20;
+
+/// Stub's synthetic option-byte snapshot — nothing WRP-protected,
+/// level-0 RDP, default BOR. Matches what a dev board out of the
+/// box would report.
+const STUB_OB_RDP_LEVEL: u8 = 0xAA; // OB_RDP_LEVEL_0
+const STUB_OB_BOR_LEVEL: u8 = 0x00;
+const STUB_OB_USER_CONFIG: u32 = 0x00FF_FAAD; // arbitrary realistic-looking value
 
 /// How long we wait between frames before giving up the current read
 /// attempt and returning to the top of the loop. Short enough that
@@ -59,6 +72,16 @@ pub struct StubDevice {
     /// can't know the originating type — we capture it at the
     /// frame-ID layer and consume it when the reassembly completes.
     pending_msg_type: Option<MessageType>,
+    /// In-memory NVM store. Real bootloader persists to sector 7;
+    /// stub keeps it RAM-only per run so integration tests get a
+    /// fresh KV space each time. Tombstoned entries get evicted
+    /// (map entry removed) so `NVM_READ` after erase surfaces
+    /// `NACK(NVM_NOT_FOUND)` as expected.
+    nvm: HashMap<u16, Vec<u8>>,
+    /// Current WRP sector bitmap. Real hardware OB flips this via
+    /// `OB_APPLY_WRP`; the stub mirrors the operation so subsequent
+    /// `OB_READ` reflects the applied mask. Reset to 0 on construction.
+    wrp_sector_mask: u32,
 }
 
 impl StubDevice {
@@ -73,6 +96,8 @@ impl StubDevice {
             reasm: Reassembler::new(),
             session_active: false,
             pending_msg_type: None,
+            nvm: HashMap::new(),
+            wrp_sector_mask: 0,
         }
     }
 
@@ -205,6 +230,10 @@ impl StubDevice {
                     .await
             }
             Ok(CommandOpcode::Reset) => self.handle_reset(peer, payload).await,
+            Ok(CommandOpcode::ObRead) => self.handle_ob_read(peer).await,
+            Ok(CommandOpcode::ObApplyWrp) => self.handle_ob_apply_wrp(peer, payload).await,
+            Ok(CommandOpcode::NvmRead) => self.handle_nvm_read(peer, payload).await,
+            Ok(CommandOpcode::NvmWrite) => self.handle_nvm_write(peer, payload).await,
             Ok(_) | Err(_) => self.send_nack(peer, opcode, NackCode::Unsupported).await,
         }
     }
@@ -347,6 +376,159 @@ impl StubDevice {
                 .await;
         }
         let resp = [opcode.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-less `CMD_OB_READ`. Returns a synthetic 16-byte
+    /// `bl_ob_status_t` reflecting the stub's current in-memory WRP
+    /// mask plus fixed RDP / BOR levels.
+    async fn handle_ob_read(&self, peer: u8) -> Result<()> {
+        // 16 bytes of bl_ob_status_t: wrp (4 LE) + user_config (4 LE)
+        // + rdp (1) + bor (1) + reserved (2) + reserved_ext (4 LE).
+        let mut record = [0u8; 16];
+        record[0..4].copy_from_slice(&self.wrp_sector_mask.to_le_bytes());
+        record[4..8].copy_from_slice(&STUB_OB_USER_CONFIG.to_le_bytes());
+        record[8] = STUB_OB_RDP_LEVEL;
+        record[9] = STUB_OB_BOR_LEVEL;
+        // bytes 10..12 and 12..16 stay 0 (reserved + reserved_ext).
+
+        let mut resp = Vec::with_capacity(1 + 16);
+        resp.push(CommandOpcode::ObRead.as_byte());
+        resp.extend_from_slice(&record);
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_OB_APPLY_WRP`. Validates the 4-byte
+    /// `BL_OB_APPLY_TOKEN` brick-safety prefix and the optional
+    /// 4-byte sector bitmap. On a good request the stub updates its
+    /// in-memory WRP mask (so a subsequent `OB_READ` sees it) and
+    /// ACKs. Real hardware would reset after the ACK drains; the
+    /// stub just updates state in place so tests can inspect the
+    /// result without reconnecting.
+    async fn handle_ob_apply_wrp(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::ObApplyWrp.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, token_le32, sector_bitmap_le32?]
+        if payload.len() < 1 + 4 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::ObApplyWrp.as_byte(),
+                    NackCode::ObWrongToken,
+                )
+                .await;
+        }
+        let token = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        if token != OB_APPLY_TOKEN {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::ObApplyWrp.as_byte(),
+                    NackCode::ObWrongToken,
+                )
+                .await;
+        }
+        // Optional sector bitmap; default to 0x01 (bootloader sector)
+        // to match the host helper's default.
+        let sector_bitmap = if payload.len() >= 1 + 4 + 4 {
+            u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]])
+        } else {
+            0x01
+        };
+        self.wrp_sector_mask |= sector_bitmap;
+
+        let resp = [CommandOpcode::ObApplyWrp.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_NVM_READ`. Looks up `key` in the in-memory
+    /// map; ACK payload is `[opcode, len, value…]` on hit,
+    /// `NACK(NVM_NOT_FOUND)` on miss.
+    async fn handle_nvm_read(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(peer, CommandOpcode::NvmRead.as_byte(), NackCode::BadSession)
+                .await;
+        }
+        if payload.len() < 1 + 2 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmRead.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let key = u16::from_le_bytes([payload[1], payload[2]]);
+        match self.nvm.get(&key) {
+            Some(value) => {
+                let mut resp = Vec::with_capacity(1 + 1 + value.len());
+                resp.push(CommandOpcode::NvmRead.as_byte());
+                resp.push(value.len() as u8);
+                resp.extend_from_slice(value);
+                self.send_message(peer, MessageType::Ack, &resp).await
+            }
+            None => {
+                self.send_nack(
+                    peer,
+                    CommandOpcode::NvmRead.as_byte(),
+                    NackCode::NvmNotFound,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Session-gated `CMD_NVM_WRITE`. `value_len == 0` is a
+    /// tombstone and removes the key. Values longer than
+    /// `STUB_NVM_MAX_VALUE_LEN` earn `NACK(UNSUPPORTED)`. Otherwise
+    /// the stub stores the value and ACKs.
+    async fn handle_nvm_write(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmWrite.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        if payload.len() < 1 + 2 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmWrite.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let key = u16::from_le_bytes([payload[1], payload[2]]);
+        let value = &payload[3..];
+        if value.len() > STUB_NVM_MAX_VALUE_LEN {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmWrite.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+
+        if value.is_empty() {
+            // Tombstone: drop the entry entirely so NVM_READ misses.
+            self.nvm.remove(&key);
+        } else {
+            self.nvm.insert(key, value.to_vec());
+        }
+
+        let resp = [CommandOpcode::NvmWrite.as_byte()];
         self.send_message(peer, MessageType::Ack, &resp).await
     }
 
