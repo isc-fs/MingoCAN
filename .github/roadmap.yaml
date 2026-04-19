@@ -1,0 +1,117 @@
+# Source of truth for ROADMAP.md.
+#
+# Edit this file (or close / reopen a tracking issue on GitHub) and the
+# `roadmap.yml` workflow will regenerate ROADMAP.md with updated status
+# badges and a fresh mermaid branch diagram. Do not hand-edit ROADMAP.md —
+# the workflow will overwrite any local changes.
+#
+# Schema:
+#   title:      H1 heading shown at the top of ROADMAP.md. Optional;
+#               falls back to a generic "Project roadmap".
+#   intro:      One-paragraph description shown under the heading.
+#               Optional; falls back to a generic paragraph.
+#   phases:     list of phase clusters. Each phase has a number, a title,
+#               a tag applied on dev→main when every branch in the phase
+#               has landed, and a list of planned feat/fix branches. Each
+#               branch has a `name` (exact git branch name) and a short
+#               `scope` sentence used as the commit label in the mermaid
+#               diagram. Two optional phase-level fields:
+#                 deferred: true  — mark the phase as paused. The table
+#                                   shows `⏸ deferred` for every branch
+#                                   in the phase (regardless of tracking
+#                                   issue state) and appends `(deferred)`
+#                                   to the phase title. The mermaid
+#                                   diagram skips the phase entirely so
+#                                   the branch flow reads cleanly through
+#                                   the last active phase.
+#                 note: "..."     — free-form one-liner rendered as a
+#                                   sub-line under the phase title in the
+#                                   roadmap table. Useful alongside
+#                                   `deferred: true` to explain why.
+#   sidequests: off-roadmap branches kept in the diagram for history
+#               (e.g. workflow tooling that doesn't map to a product
+#               phase). Rendered in the table but not in the main diagram
+#               lane.
+
+title: Flasher roadmap
+
+intro: |
+  Production roadmap for the `can-flasher` host-side CLI. Each phase is
+  a cluster of feat branches cut from `dev`; a milestone tag on `main`
+  closes the phase once every branch in it has merged. Branch status
+  badges (✅ / 🔄 / 🔜) are derived from each branch's tracking issue
+  state in GitHub Issues.
+
+  The canonical spec lives in [REQUIREMENTS.md](REQUIREMENTS.md); the
+  module-level architecture notes live in
+  [ARCHITECTURE.md](ARCHITECTURE.md). This file tracks delivery
+  sequencing against the bootloader counterpart at
+  [isc-fs/stm32-can-bootloader](https://github.com/isc-fs/stm32-can-bootloader).
+
+phases:
+  - number: 1
+    title: Spec + scaffolding
+    tag: v0.1.0-spec
+    branches:
+      - name: feat/1-requirements-v1
+        scope: Canonical REQUIREMENTS.md aligned with bootloader v1.0.0
+      - name: feat/2-cargo-skeleton
+        scope: Cargo manifest + seven clap subcommand stubs + CI matrix
+
+  - number: 2
+    title: Protocol + transport
+    tag: v0.2.0-transport
+    branches:
+      - name: feat/3-protocol-core
+        scope: ids / opcodes / ISO-TP / records / commands / responses
+      - name: feat/4-virtual-backend
+        scope: CanBackend trait + VirtualBus + StubDevice + integration test
+      - name: feat/5-slcan-backend
+        scope: CANable over serialport (all OSes)
+      - name: feat/6-socketcan-backend
+        scope: Linux SocketCAN; PCAN-on-Linux routes through same path
+      - name: feat/7-pcan-backend
+        scope: PCAN-Basic via libloading (Windows + macOS)
+
+  - number: 3
+    title: Session + adapters subcommand
+    tag: v0.3.0-session
+    branches:
+      - name: feat/8-adapter-detect
+        scope: adapters subcommand + --interface virtual CLI wiring
+      - name: feat/9-session-lifecycle
+        scope: Session type (CONNECT + keepalive + reconnect + notifications)
+
+  - number: 4
+    title: Remaining subcommands
+    tag: v0.4.0-subcommands
+    branches:
+      - name: feat/10-discover-subcommand
+        scope: CMD_DISCOVER + GET_FW_INFO / GET_HEALTH follow-up table
+      - name: feat/11-diagnose-subcommand
+        scope: read-dtc / clear-dtc / log / live-data / health / reset
+      - name: feat/12-verify-subcommand
+        scope: CMD_FLASH_VERIFY against a binary; exit 0/2 for CI
+      - name: feat/13-config-subcommand
+        scope: ob read / ob apply-wrp / nvm read / nvm write / nvm erase
+      - name: feat/14-replay-subcommand
+        scope: record / run against VirtualBackend (candump format)
+
+  - number: 5
+    title: Flash pipeline
+    tag: v1.0.0
+    branches:
+      - name: feat/15-firmware-loader
+        scope: ELF / Intel HEX / raw .bin parsing + address validation
+      - name: feat/16-flash-manager
+        scope: sector-aware erase + diff flash + per-sector CRC verify
+      - name: feat/17-flash-subcommand
+        scope: end-to-end `flash` wiring + FLASH_VERIFY commit + JUMP
+
+sidequests:
+  - title: Plantilla sync
+    note: Workflow bootstrapping pulled in from the template repository.
+          Not part of the product roadmap but kept here for branch history.
+    branches:
+      - feat/1-autoclose-on-dev-merge
+      - fix/1-workflow-titled-branches
