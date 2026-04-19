@@ -53,6 +53,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # `serialport` pulls in `libudev-sys` on Linux for USB port
+      # enumeration (the CANable / CANtact VID-PID filter in
+      # transport::slcan::detect). Ubuntu runners ship without the
+      # -dev header / pkg-config file, so cargo build fails out of
+      # the box. Installing it up front keeps CI green and matches
+      # the "no root at runtime" promise from REQUIREMENTS.md — the
+      # shared library (`libudev1`) is already present on every
+      # modern Ubuntu; this only adds the development headers.
+      - name: Install libudev-dev (Linux only)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   build-test:
@@ -66,5 +76,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # See comment in the clippy job — `serialport` needs libudev on
+      # Linux for USB enumeration.
+      - name: Install libudev-dev (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - run: cargo build --verbose
       - run: cargo test --verbose

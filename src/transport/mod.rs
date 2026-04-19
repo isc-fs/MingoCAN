@@ -28,9 +28,11 @@ use async_trait::async_trait;
 use crate::cli::InterfaceType;
 use crate::protocol::CanFrame;
 
+pub mod slcan;
 pub mod stub_device;
 pub mod virtual_bus;
 
+pub use slcan::{SlcanAdapterInfo, SlcanBackend};
 pub use stub_device::StubDevice;
 pub use virtual_bus::{VirtualBackend, VirtualBus};
 
@@ -133,14 +135,19 @@ pub trait CanBackend: Send + Sync {
 /// pointing at the feat branch that will implement it.
 pub fn open_backend(
     iface: InterfaceType,
-    _channel: Option<&str>,
-    _bitrate: u32,
+    channel: Option<&str>,
+    bitrate: u32,
 ) -> Result<Box<dyn CanBackend>> {
     match iface {
-        InterfaceType::Slcan => Err(TransportError::AdapterMissing {
-            name: "slcan",
-            reason: "not implemented yet — pending feat/5-slcan-backend".into(),
-        }),
+        InterfaceType::Slcan => {
+            let channel = channel.ok_or_else(|| TransportError::InvalidChannel {
+                channel: String::new(),
+                reason: "--channel required for --interface slcan (e.g. /dev/ttyACM0, \
+                          /dev/cu.usbmodemNNN, COM3)"
+                    .into(),
+            })?;
+            Ok(Box::new(slcan::SlcanBackend::open(channel, bitrate)?))
+        }
         InterfaceType::Socketcan => {
             // Future branches (feat/6) switch this arm to
             // `SocketCanBackend::open(channel)` on Linux and keep the
