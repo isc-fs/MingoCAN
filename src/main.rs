@@ -17,6 +17,7 @@ use clap::Parser;
 
 mod cli;
 mod logging;
+pub mod protocol;
 
 use cli::{Cli, Command};
 
