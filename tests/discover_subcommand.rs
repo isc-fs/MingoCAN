@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 use can_flasher::protocol::commands::{cmd_discover, cmd_get_fw_info, cmd_get_health};
 use can_flasher::protocol::ids::MessageType;
 use can_flasher::protocol::opcodes::NackCode;
+use can_flasher::protocol::records::HealthRecord;
 use can_flasher::protocol::Response;
 use can_flasher::session::{Session, SessionConfig};
 use can_flasher::transport::{CanBackend, StubDevice, VirtualBus};
@@ -65,12 +66,13 @@ async fn broadcast_discover_finds_stub() {
 }
 
 #[tokio::test]
-async fn stub_nacks_fw_info_and_health_with_unsupported() {
-    // Exercises the per-responder enrichment path: the stub doesn't
-    // implement GET_FW_INFO or GET_HEALTH, so send_command_to should
-    // return NACK(UNSUPPORTED). The discover subcommand maps those
-    // to fw_error / health_error; this test checks the NACK surfaces
-    // correctly at the session layer.
+async fn stub_nacks_fw_info_with_unsupported() {
+    // Exercises the degrade-gracefully path of discover's enrichment
+    // loop. The stub represents a bootloader with no app installed,
+    // so GET_FW_INFO returns NACK(UNSUPPORTED) (functionally
+    // equivalent to NoValidApp from the host's point of view). The
+    // discover subcommand maps this to fw_error; this test asserts
+    // the NACK surfaces correctly at the session layer.
     let (session, cancel, handle) = spawn_session_and_stub().await;
 
     let fw = session
@@ -82,13 +84,34 @@ async fn stub_nacks_fw_info_and_health_with_unsupported() {
         other => panic!("expected Nack for GET_FW_INFO against stub, got {other:?}"),
     }
 
-    let health = session
+    let _ = session.disconnect().await;
+    let _ = cancel.send(());
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn stub_answers_get_health_with_synthetic_record() {
+    // As of feat/11 the stub answers GET_HEALTH with a realistic
+    // 32-byte HealthRecord (uptime from the monotonic clock, reset
+    // cause POWER_ON, session flag reflecting internal state). This
+    // test confirms the wire format round-trips cleanly.
+    let (session, cancel, handle) = spawn_session_and_stub().await;
+
+    let resp = session
         .send_command_to(STUB_NODE, &cmd_get_health())
         .await
         .expect("GET_HEALTH");
-    match health {
-        Response::Nack { code, .. } => assert_eq!(code, NackCode::Unsupported),
-        other => panic!("expected Nack for GET_HEALTH against stub, got {other:?}"),
+    match resp {
+        Response::Ack { opcode, payload } => {
+            assert_eq!(opcode, 0x05, "GET_HEALTH ACK opcode");
+            let record = HealthRecord::parse(&payload).expect("parse HealthRecord");
+            // Fresh session — not connected. `session_active` should
+            // be false; reset cause should be POWER_ON (stub's
+            // latched default).
+            assert!(!record.session_active());
+            assert_eq!(record.reset_cause().map(|r| r.as_str()), Some("POWER_ON"),);
+        }
+        other => panic!("expected Ack for GET_HEALTH against stub, got {other:?}"),
     }
 
     let _ = session.disconnect().await;

@@ -185,6 +185,26 @@ impl StubDevice {
             Ok(CommandOpcode::Connect) => self.handle_connect(peer, payload).await,
             Ok(CommandOpcode::Disconnect) => self.handle_disconnect(peer).await,
             Ok(CommandOpcode::Discover) => self.handle_discover(peer).await,
+            Ok(CommandOpcode::GetHealth) => self.handle_get_health(peer).await,
+            Ok(CommandOpcode::DtcRead) => self.handle_dtc_read(peer).await,
+            Ok(CommandOpcode::DtcClear) => self.handle_dtc_clear(peer).await,
+            Ok(CommandOpcode::LogStreamStart) => {
+                self.handle_session_gated_ack(peer, CommandOpcode::LogStreamStart)
+                    .await
+            }
+            Ok(CommandOpcode::LogStreamStop) => {
+                self.handle_session_gated_ack(peer, CommandOpcode::LogStreamStop)
+                    .await
+            }
+            Ok(CommandOpcode::LiveDataStart) => {
+                self.handle_session_gated_ack(peer, CommandOpcode::LiveDataStart)
+                    .await
+            }
+            Ok(CommandOpcode::LiveDataStop) => {
+                self.handle_session_gated_ack(peer, CommandOpcode::LiveDataStop)
+                    .await
+            }
+            Ok(CommandOpcode::Reset) => self.handle_reset(peer, payload).await,
             Ok(_) | Err(_) => self.send_nack(peer, opcode, NackCode::Unsupported).await,
         }
     }
@@ -236,6 +256,98 @@ impl StubDevice {
             PROTOCOL_VERSION_MINOR,
         ];
         self.send_message(peer, MessageType::Discover, &resp).await
+    }
+
+    /// Synthetic `CMD_GET_HEALTH` reply. Produces a realistic-looking
+    /// 32-byte [`HealthRecord`]: uptime comes from the
+    /// [`static_ms`] monotonic clock, reset cause is latched at
+    /// `POWER_ON`, and the `flags` bitmask reflects the stub's
+    /// current `session_active` state. Matches `bl_health.h`'s layout
+    /// exactly so host-side parsers see the same bytes they would on
+    /// real hardware.
+    ///
+    /// [`HealthRecord`]: crate::protocol::records::HealthRecord
+    async fn handle_get_health(&self, peer: u8) -> Result<()> {
+        // HealthRecord::SIZE = 32. Lay the bytes out directly so the
+        // stub doesn't need to pull in encoder machinery for a record
+        // we only read on the host side.
+        let uptime_seconds: u32 = (static_ms() / 1000) as u32;
+        let reset_cause: u32 = 0x01; // BL_RESET_POWER_ON
+        let flags: u32 = if self.session_active { 0b01 } else { 0b00 };
+
+        let mut record = [0u8; 32];
+        record[0..4].copy_from_slice(&uptime_seconds.to_le_bytes());
+        record[4..8].copy_from_slice(&reset_cause.to_le_bytes());
+        record[8..12].copy_from_slice(&flags.to_le_bytes());
+        // flash_write_count, dtc_count, last_dtc_code, reserved[0..2] already 0
+
+        let mut resp = Vec::with_capacity(1 + 32);
+        resp.push(CommandOpcode::GetHealth.as_byte());
+        resp.extend_from_slice(&record);
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Empty DTC table: `[opcode, count_le16=0]`. Zero entries.
+    /// Matches the real bootloader's wire format for `CMD_DTC_READ`
+    /// when no faults have been logged.
+    async fn handle_dtc_read(&self, peer: u8) -> Result<()> {
+        let resp = [CommandOpcode::DtcRead.as_byte(), 0x00, 0x00];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated DTC clear. Returns `NACK(BAD_SESSION)` if the
+    /// caller hasn't run CONNECT first; ACKs a successful clear
+    /// otherwise. The stub's internal DTC list is already empty, so
+    /// "clear" is a no-op.
+    async fn handle_dtc_clear(&self, peer: u8) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::DtcClear.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        let resp = [CommandOpcode::DtcClear.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// `CMD_RESET` takes a 1-byte mode argument. ACK the command so
+    /// the host sees success; we don't actually reset the tokio task
+    /// (would kill the test harness). Real hardware would reboot
+    /// after emitting the ACK.
+    async fn handle_reset(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        // payload[0] is the opcode, payload[1] should be the mode.
+        if payload.len() < 2 {
+            return self
+                .send_nack(peer, CommandOpcode::Reset.as_byte(), NackCode::Unsupported)
+                .await;
+        }
+        // Validate the mode is 0..=3; anything else is an invalid arg.
+        if payload[1] > 3 {
+            return self
+                .send_nack(peer, CommandOpcode::Reset.as_byte(), NackCode::Unsupported)
+                .await;
+        }
+        let resp = [CommandOpcode::Reset.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Generic session-gated ACK handler. Used by `LOG_STREAM_*` and
+    /// `LIVE_DATA_*` which on real hardware start / stop notification
+    /// streams but here just accept the command so the host-side
+    /// subscribe path can be exercised. Actual stream emission is out
+    /// of scope for the stub today — hosts exercise it via real
+    /// bootloader traffic.
+    async fn handle_session_gated_ack(&self, peer: u8, opcode: CommandOpcode) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(peer, opcode.as_byte(), NackCode::BadSession)
+                .await;
+        }
+        let resp = [opcode.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
     }
 
     async fn send_nack(&self, peer: u8, rejected_opcode: u8, code: NackCode) -> Result<()> {
