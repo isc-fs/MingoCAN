@@ -28,12 +28,16 @@ use async_trait::async_trait;
 use crate::cli::InterfaceType;
 use crate::protocol::CanFrame;
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub mod pcan;
 pub mod slcan;
 #[cfg(target_os = "linux")]
 pub mod socketcan;
 pub mod stub_device;
 pub mod virtual_bus;
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub use pcan::{PcanAdapterInfo, PcanBackend};
 pub use slcan::{SlcanAdapterInfo, SlcanBackend};
 #[cfg(target_os = "linux")]
 pub use socketcan::{SocketCanAdapterInfo, SocketCanBackend};
@@ -191,13 +195,23 @@ pub fn open_backend(
                 })?;
                 Ok(Box::new(socketcan::SocketCanBackend::open(channel)?))
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            {
+                let channel = channel.ok_or_else(|| TransportError::InvalidChannel {
+                    channel: String::new(),
+                    reason: "--channel required for --interface pcan (e.g. \
+                              PCAN_USBBUS1)"
+                        .into(),
+                })?;
+                Ok(Box::new(pcan::PcanBackend::open(channel, bitrate)?))
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
             {
                 let _ = (channel, bitrate);
                 Err(TransportError::AdapterMissing {
                     name: "pcan",
-                    reason: "not implemented yet — pending feat/7-pcan-backend \
-                             (PCAN-Basic SDK on Windows / macOS)"
+                    reason: "PCAN is supported on Linux (via SocketCAN + peak_usb), \
+                             Windows, and macOS only"
                         .into(),
                 })
             }

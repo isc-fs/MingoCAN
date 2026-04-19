@@ -44,6 +44,16 @@ tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sy
 [target.'cfg(target_os = "linux")'.dependencies]
 socketcan = { version = "3.5", features = ["tokio"] }
 
+# Windows + macOS dependencies. PCAN-Basic is loaded at runtime via
+# libloading so the flasher binary compiles and runs on machines
+# without the SDK installed — a missing library surfaces as a clean
+# "adapter unavailable" error rather than a startup crash. On Linux
+# PCAN adapters are exposed through the peak_usb kernel module and
+# read as ordinary SocketCAN interfaces, so libloading isn't needed
+# there.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+libloading = "0.8"
+
 # Release profile: default opt-level=3, single codegen unit for better
 # LTO, stripped symbols. Keeps the single-static-binary promise small.
 [profile.release]
