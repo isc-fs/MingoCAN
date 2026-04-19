@@ -38,6 +38,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [dev-dependencies]
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
+# Linux-only dependencies. SocketCAN talks to the kernel's AF_CAN
+# stack directly; on macOS and Windows the same --interface choices
+# fall back to SLCAN / PCAN, so the crate isn't pulled in at all.
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan = { version = "3.5", features = ["tokio"] }
+
 # Release profile: default opt-level=3, single codegen unit for better
 # LTO, stripped symbols. Keeps the single-static-binary promise small.
 [profile.release]

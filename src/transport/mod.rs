@@ -29,10 +29,14 @@ use crate::cli::InterfaceType;
 use crate::protocol::CanFrame;
 
 pub mod slcan;
+#[cfg(target_os = "linux")]
+pub mod socketcan;
 pub mod stub_device;
 pub mod virtual_bus;
 
 pub use slcan::{SlcanAdapterInfo, SlcanBackend};
+#[cfg(target_os = "linux")]
+pub use socketcan::{SocketCanAdapterInfo, SocketCanBackend};
 pub use stub_device::StubDevice;
 pub use virtual_bus::{VirtualBackend, VirtualBus};
 
@@ -149,19 +153,55 @@ pub fn open_backend(
             Ok(Box::new(slcan::SlcanBackend::open(channel, bitrate)?))
         }
         InterfaceType::Socketcan => {
-            // Future branches (feat/6) switch this arm to
-            // `SocketCanBackend::open(channel)` on Linux and keep the
-            // error here on non-Linux builds.
-            Err(TransportError::AdapterMissing {
-                name: "socketcan",
-                reason: "not implemented yet — pending feat/6-socketcan-backend (Linux only)"
-                    .into(),
-            })
+            #[cfg(target_os = "linux")]
+            {
+                let channel = channel.ok_or_else(|| TransportError::InvalidChannel {
+                    channel: String::new(),
+                    reason: "--channel required for --interface socketcan (e.g. can0, \
+                              vcan0)"
+                        .into(),
+                })?;
+                Ok(Box::new(socketcan::SocketCanBackend::open(channel)?))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (channel, bitrate);
+                Err(TransportError::AdapterMissing {
+                    name: "socketcan",
+                    reason: "SocketCAN is Linux-only — use --interface slcan or \
+                             --interface pcan on macOS / Windows"
+                        .into(),
+                })
+            }
         }
-        InterfaceType::Pcan => Err(TransportError::AdapterMissing {
-            name: "pcan",
-            reason: "not implemented yet — pending feat/7-pcan-backend".into(),
-        }),
+        InterfaceType::Pcan => {
+            #[cfg(target_os = "linux")]
+            {
+                // On Linux the `peak_usb` kernel module exposes PCAN
+                // adapters as SocketCAN interfaces, so --interface pcan
+                // and --interface socketcan land on the same code
+                // path — the user still picks a SocketCAN channel
+                // name (usually `can0`).
+                let channel = channel.ok_or_else(|| TransportError::InvalidChannel {
+                    channel: String::new(),
+                    reason: "--channel required for --interface pcan on Linux; use \
+                              the SocketCAN interface name the peak_usb module \
+                              exposed (e.g. can0)"
+                        .into(),
+                })?;
+                Ok(Box::new(socketcan::SocketCanBackend::open(channel)?))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (channel, bitrate);
+                Err(TransportError::AdapterMissing {
+                    name: "pcan",
+                    reason: "not implemented yet — pending feat/7-pcan-backend \
+                             (PCAN-Basic SDK on Windows / macOS)"
+                        .into(),
+                })
+            }
+        }
         InterfaceType::Virtual => Err(TransportError::AdapterMissing {
             name: "virtual",
             reason: "CLI entry point pending — construct a VirtualBus + StubDevice directly \
