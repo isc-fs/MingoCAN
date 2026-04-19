@@ -82,6 +82,12 @@ pub struct StubDevice {
     /// `OB_APPLY_WRP`; the stub mirrors the operation so subsequent
     /// `OB_READ` reflects the applied mask. Reset to 0 on construction.
     wrp_sector_mask: u32,
+    /// If set, `CMD_FLASH_VERIFY` only ACKs when the submitted
+    /// `(crc, size, version)` triple matches exactly. `None` means
+    /// "accept whatever the host sends" — useful for happy-path
+    /// tests where we just want to confirm the wire round-trip
+    /// without pretending to have a specific installed image.
+    expected_verify: Option<(u32, u32, u32)>,
 }
 
 impl StubDevice {
@@ -98,7 +104,17 @@ impl StubDevice {
             pending_msg_type: None,
             nvm: HashMap::new(),
             wrp_sector_mask: 0,
+            expected_verify: None,
         }
+    }
+
+    /// Configure the `CMD_FLASH_VERIFY` gate. `Some((crc, size,
+    /// version))` means the stub ACKs only that exact triple and
+    /// NACKs anything else with `CrcMismatch`. `None` (the default)
+    /// ACKs any well-formed verify request — useful when a test just
+    /// cares about the wire path and not the semantics.
+    pub fn set_expected_verify(&mut self, expected: Option<(u32, u32, u32)>) {
+        self.expected_verify = expected;
     }
 
     /// Run the dispatch loop. Terminates gracefully when `cancel`
@@ -234,6 +250,7 @@ impl StubDevice {
             Ok(CommandOpcode::ObApplyWrp) => self.handle_ob_apply_wrp(peer, payload).await,
             Ok(CommandOpcode::NvmRead) => self.handle_nvm_read(peer, payload).await,
             Ok(CommandOpcode::NvmWrite) => self.handle_nvm_write(peer, payload).await,
+            Ok(CommandOpcode::FlashVerify) => self.handle_flash_verify(peer, payload).await,
             Ok(_) | Err(_) => self.send_nack(peer, opcode, NackCode::Unsupported).await,
         }
     }
@@ -529,6 +546,57 @@ impl StubDevice {
         }
 
         let resp = [CommandOpcode::NvmWrite.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_FLASH_VERIFY`. Args on the wire are
+    /// `[expected_crc_le32, expected_size_le32, expected_version_le32]`
+    /// (after the opcode byte). Behaviour:
+    ///
+    /// - If `self.expected_verify` is `None`, the stub ACKs any
+    ///   well-formed request. Happy-path tests just want to confirm
+    ///   the wire round-trip, not simulate an installed image.
+    /// - If `self.expected_verify` is `Some(exp)`, the stub ACKs
+    ///   only when the submitted triple equals `exp`, otherwise
+    ///   `NACK(CRC_MISMATCH)`. Tests set this via
+    ///   `StubDevice::set_expected_verify` before `run` is called.
+    async fn handle_flash_verify(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashVerify.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, crc_le32, size_le32, version_le32]
+        if payload.len() < 1 + 12 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashVerify.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let crc = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let size = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+        let version = u32::from_le_bytes([payload[9], payload[10], payload[11], payload[12]]);
+
+        if let Some(expected) = self.expected_verify {
+            if (crc, size, version) != expected {
+                return self
+                    .send_nack(
+                        peer,
+                        CommandOpcode::FlashVerify.as_byte(),
+                        NackCode::CrcMismatch,
+                    )
+                    .await;
+            }
+        }
+
+        let resp = [CommandOpcode::FlashVerify.as_byte()];
         self.send_message(peer, MessageType::Ack, &resp).await
     }
 

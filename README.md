@@ -27,7 +27,7 @@ subcommand implementations (`discover`, `diagnose`, `config`, `verify`,
 | `discover` — scan the bus, print table of bootloader-mode devices | ✅ live |
 | `diagnose` — DTC / log / live-data / health / reset | ✅ live |
 | `config` — NVM read/write + option bytes + WRP apply | ✅ live |
-| `verify` — compare installed image against a binary | 🔜 `feat/12` |
+| `verify` — compare installed image against a binary | ✅ live |
 | `replay` — record / replay CAN sessions for testing | 🔜 `feat/14` |
 | `flash` — program firmware end-to-end | 🔜 `feat/15`–`feat/17` |
 
