@@ -1,0 +1,14 @@
+# Pin the Rust toolchain channel for this project.
+#
+# `stable` keeps us on whatever current stable ships — rustup installs
+# it on first use. CI and local builds see the same compiler. The
+# `rust-version` field in Cargo.toml is the MSRV we commit to; this
+# channel defaults to something newer than that.
+#
+# Override locally with `rustup override set nightly` if you ever need
+# to experiment — the override is not checked into git.
+
+[toolchain]
+channel    = "stable"
+components = ["rustfmt", "clippy"]
+profile    = "default"

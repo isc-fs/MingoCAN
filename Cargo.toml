@@ -1,0 +1,43 @@
+[package]
+name        = "can-flasher"
+version     = "0.1.0"
+edition     = "2021"
+rust-version = "1.95"
+description = "Host-side CAN flasher for the isc-fs STM32 CAN bootloader"
+license     = "MIT"
+repository  = "https://github.com/isc-fs/can-flasher"
+readme      = "README.md"
+keywords    = ["can", "stm32", "bootloader", "flasher", "canbus"]
+categories  = ["command-line-utilities", "embedded"]
+
+# Binaries the release pipeline ships. `can-flasher` is the single
+# binary produced in v1; future auxiliaries (e.g. a daemon / bus
+# monitor) land here as additional [[bin]] entries.
+[[bin]]
+name = "can-flasher"
+path = "src/main.rs"
+
+# ---- Runtime dependencies ----
+#
+# Kept minimal in feat/2 — only what the CLI skeleton needs. Transport
+# crates (serialport, socketcan, libloading) land with their respective
+# backend branches; protocol crates (crc, object, ihex) land with the
+# firmware loader; output crates (rusqlite, tabled, indicatif) land as
+# the features that use them do.
+
+[dependencies]
+anyhow             = "1.0"
+clap               = { version = "4.5", features = ["derive", "wrap_help"] }
+tokio              = { version = "1.40", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+
+# Release profile: default opt-level=3, single codegen unit for better
+# LTO, stripped symbols. Keeps the single-static-binary promise small.
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+panic         = "abort"
