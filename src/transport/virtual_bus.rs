@@ -143,6 +143,100 @@ impl CanBackend for VirtualBackend {
     }
 }
 
+// ---- CLI-facing convenience: Virtual + StubDevice in one wrapper ----
+
+/// A `VirtualBus` paired with a running [`StubDevice`] on the device
+/// side. The host-facing [`CanBackend`] methods delegate to the
+/// underlying [`VirtualBackend`]; on drop the stub task is cancelled
+/// via a `oneshot` handle so there's no orphan task when the caller
+/// finishes.
+///
+/// This is the shape `open_backend(InterfaceType::Virtual, …)` hands
+/// back to the CLI. Integration tests that want more control (e.g.
+/// a custom stub or multiple backends per bus) construct the
+/// [`VirtualBus`] + [`StubDevice`] by hand like `tests/virtual_pipeline.rs`
+/// already does.
+pub struct StubLoopback {
+    host: VirtualBackend,
+    // Kept inside Mutex<Option<…>> so Drop can take() them without
+    // moving out of self. The cancel signal fires regardless of
+    // whether the JoinHandle is awaited — tokio's task cleanup
+    // handles the rest.
+    cancel: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    _stub_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    description: String,
+}
+
+impl StubLoopback {
+    /// Build a new loopback. The stub is spawned on the current
+    /// tokio runtime and runs until the returned value is dropped.
+    /// Must be called from within a tokio runtime context —
+    /// `tokio::spawn` panics otherwise.
+    pub fn new(node_id: u8) -> Result<Self> {
+        use crate::transport::StubDevice;
+
+        let bus = VirtualBus::new();
+        let host = bus.host_backend();
+        let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+        // Dropping `bus` here is safe: both endpoints hold cloned
+        // channel handles (Arc-wrapped receivers, cloned senders),
+        // so the channels stay alive for the life of the endpoints.
+
+        let stub = StubDevice::new(device, node_id);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            // Errors from the stub run loop are swallowed — they're
+            // logged inside `StubDevice::run` and the CLI can't do
+            // much about them. Clean shutdown (Ok) and backend
+            // disconnect (Ok) are both expected outcomes.
+            let _ = stub.run(cancel_rx).await;
+        });
+
+        Ok(Self {
+            host,
+            cancel: std::sync::Mutex::new(Some(cancel_tx)),
+            _stub_handle: std::sync::Mutex::new(Some(handle)),
+            description: format!("virtual bus + in-process stub bootloader (node 0x{node_id:X})"),
+        })
+    }
+}
+
+impl Drop for StubLoopback {
+    fn drop(&mut self) {
+        if let Ok(mut cancel) = self.cancel.lock() {
+            if let Some(tx) = cancel.take() {
+                // Best-effort: the stub's cancel receiver might
+                // already be dropped if the backend disconnect tripped
+                // the early-exit path. Either way the task exits
+                // cleanly.
+                let _ = tx.send(());
+            }
+        }
+        // The JoinHandle is left to self-detach; no blocking join
+        // because Drop is called on a sync context and we can't
+        // .await here.
+    }
+}
+
+#[async_trait]
+impl CanBackend for StubLoopback {
+    async fn send(&self, frame: CanFrame) -> Result<()> {
+        self.host.send(frame).await
+    }
+
+    async fn recv(&self, timeout: Duration) -> Result<CanFrame> {
+        self.host.recv(timeout).await
+    }
+
+    async fn set_bitrate(&self, nominal_bps: u32) -> Result<()> {
+        self.host.set_bitrate(nominal_bps).await
+    }
+
+    fn description(&self) -> String {
+        self.description.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

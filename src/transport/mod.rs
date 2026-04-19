@@ -42,7 +42,7 @@ pub use slcan::{SlcanAdapterInfo, SlcanBackend};
 #[cfg(target_os = "linux")]
 pub use socketcan::{SocketCanAdapterInfo, SocketCanBackend};
 pub use stub_device::StubDevice;
-pub use virtual_bus::{VirtualBackend, VirtualBus};
+pub use virtual_bus::{StubLoopback, VirtualBackend, VirtualBus};
 
 /// Every way the transport layer can fail.
 ///
@@ -135,12 +135,8 @@ pub trait CanBackend: Send + Sync {
 /// Router: pick the right backend for the given `--interface` /
 /// `--channel` combination and return it as a `Box<dyn CanBackend>`.
 ///
-/// In `feat/4` the only implemented variant is
-/// [`InterfaceType::Virtual`], which returns a paired
-/// `(host_backend, device_stub_task)` via [`open_virtual_with_stub`].
-/// `open_backend` itself covers the production path — every non-
-/// virtual arm currently returns [`TransportError::AdapterMissing`]
-/// pointing at the feat branch that will implement it.
+/// Must be called from within a tokio runtime context — the virtual
+/// arm spawns a [`StubDevice`] task via `tokio::spawn`.
 pub fn open_backend(
     iface: InterfaceType,
     channel: Option<&str>,
@@ -216,12 +212,18 @@ pub fn open_backend(
                 })
             }
         }
-        InterfaceType::Virtual => Err(TransportError::AdapterMissing {
-            name: "virtual",
-            reason: "CLI entry point pending — construct a VirtualBus + StubDevice directly \
-                     from integration tests, or wait for feat/8 to wire --interface virtual \
-                     through to a stub bootloader"
-                .into(),
-        }),
+        InterfaceType::Virtual => {
+            // `--channel` is ignored for the virtual bus; whatever
+            // string the user passes just identifies their test
+            // scenario in the audit log. `--bitrate` is similarly
+            // advisory (a virtual bus has no wire rate).
+            let _ = (channel, bitrate);
+            // The stub answers from node 0x3 — pick a non-host,
+            // non-broadcast ID so routing behaves like a real device.
+            // Can be made configurable later if a `--node-id` use
+            // case shows up.
+            const STUB_NODE_ID: u8 = 0x3;
+            Ok(Box::new(virtual_bus::StubLoopback::new(STUB_NODE_ID)?))
+        }
     }
 }
