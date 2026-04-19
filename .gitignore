@@ -1,48 +1,51 @@
-# Prerequisites
-*.d
+# ---- Rust ----
+# Cargo build artefacts (single binary crate; no workspace yet).
+/target/
+**/*.rs.bk
 
-# Object files
+# ---- IDE / editor ----
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- OS cruft ----
+.DS_Store
+Thumbs.db
+
+# ---- C toolchain leftovers ----
+# The plantilla template this repo was forked from targeted firmware
+# (see isc-fs/stm32-can-bootloader) and ignored C artefacts here. Kept
+# so a contributor sharing a workspace across both repos doesn't stage
+# the wrong thing.
+*.d
 *.o
 *.ko
 *.obj
 *.elf
-
-# Linker output
 *.ilk
 *.map
 *.exp
-
-# Precompiled Headers
 *.gch
 *.pch
-
-# Libraries
 *.lib
 *.a
 *.la
 *.lo
-
-# Shared objects (inc. Windows DLLs)
 *.dll
 *.so
 *.so.*
 *.dylib
-
-# Executables
 *.exe
 *.out
 *.app
 *.i*86
 *.x86_64
 *.hex
-
-# Debug files
 *.dSYM/
 *.su
 *.idb
 *.pdb
-
-# Kernel Module Compile Results
 *.mod*
 *.cmd
 .tmp_versions/

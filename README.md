@@ -1,25 +1,219 @@
 ![ISC Logo](http://iscracingteam.com/wp-content/uploads/2022/03/Picture5.jpg)
 
-# IFS08 - CAN Flasher
+# IFS08 · can-flasher
 
-Host-side CAN flasher (Rust CLI) for programming the IFS08 STM32 CAN bootloader. Supports SLCAN, SocketCAN and PCAN adapters across Linux, macOS and Windows.
+Host-side CAN flasher for the [isc-fs/stm32-can-bootloader](https://github.com/isc-fs/stm32-can-bootloader).
+Single static Rust binary that runs on Linux, macOS and Windows; speaks
+the bootloader's classic-CAN protocol through SLCAN adapters
+(CANable), SocketCAN (Linux) or PCAN-Basic (Windows / macOS).
+
+- **Spec**: [REQUIREMENTS.md](REQUIREMENTS.md)
+- **Architecture**: [ARCHITECTURE.md](ARCHITECTURE.md)
+- **Delivery roadmap**: [ROADMAP.md](ROADMAP.md)
 
 ---
 
-## Getting started
+## Status
 
-1. Create a GitHub account if you don't have one yet.
-2. Download and install [GitHub Desktop](https://desktop.github.com/) (beginner) or [Git CLI](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git) (advanced).
+In active development — targeting **v1.0.0** alongside the bootloader.
+Adapter enumeration and the in-process virtual pipeline are live;
+subcommand implementations (`discover`, `diagnose`, `config`, `verify`,
+`flash`, `replay`) are landing one branch at a time per
+[ROADMAP.md](ROADMAP.md).
 
-   - If this is your first time using GitHub Desktop, make sure to read the [User Manual](https://help.github.com/desktop/guides/).
-   - If this is your first time using Git, start with a tutorial. There are many available online:
-     - [Git Tutorial](https://git-scm.com/docs/gittutorial)
-     - [Atlassian Git Tutorial](https://www.atlassian.com/git/tutorials/)
-   - Keep a copy of [GitHub's Git Cheat Sheet](https://services.github.com/kit/downloads/github-git-cheat-sheet.pdf) handy as a reference.
+| Subcommand | Status |
+|-----------|:------:|
+| `adapters` — list detected CAN adapters | ✅ live |
+| `discover` — scan the bus, print table of bootloader-mode devices | 🔜 `feat/10` |
+| `diagnose` — DTC / log / live-data / health / reset | 🔜 `feat/11` |
+| `verify` — compare installed image against a binary | 🔜 `feat/12` |
+| `config` — NVM read/write + option bytes + WRP apply | 🔜 `feat/13` |
+| `replay` — record / replay CAN sessions for testing | 🔜 `feat/14` |
+| `flash` — program firmware end-to-end | 🔜 `feat/15`–`feat/17` |
 
-3. Clone this repository to your machine:
-   - SSH: `git@github.com:isc-fs/can-flasher.git`
-   - HTTPS: `https://github.com/isc-fs/can-flasher.git`
+---
+
+## Quick start
+
+### From source
+
+```bash
+# One-time: install Rust (stable channel)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Linux only: install libudev + pkg-config for USB port enumeration
+sudo apt-get install libudev-dev pkg-config
+
+# Build
+git clone https://github.com/isc-fs/can-flasher.git
+cd can-flasher
+cargo build --release
+
+# Run — the binary ends up at target/release/can-flasher
+./target/release/can-flasher --help
+```
+
+### First command
+
+```bash
+# Enumerate detectable adapters
+can-flasher adapters
+
+# Example output on a macOS workstation with nothing plugged in:
+# SLCAN serial ports:
+#   (none detected)
+#
+# PCAN devices:
+#   (none detected — PCAN-Basic library may be missing)
+#
+# SocketCAN interfaces:
+#   (SocketCAN is Linux-only)
+```
+
+With a CANable plugged in:
+
+```bash
+can-flasher adapters
+# SLCAN serial ports:
+#   /dev/ttyACM0   CANable 2.0 (USB 1d50:606f)
+```
+
+Machine-readable output:
+
+```bash
+can-flasher adapters --json | jq
+# {
+#   "slcan":     [ { "channel": "/dev/ttyACM0", "description": "CANable 2.0 (…)",
+#                    "vid": "0x1d50", "pid": "0x606f" } ],
+#   "socketcan": [],
+#   "pcan":      []
+# }
+```
+
+### No-hardware smoke test
+
+Every subcommand can be pointed at an in-process stub bootloader via
+`--interface virtual`. Useful for CI or trying things out on a laptop
+with no CANable plugged in. Details in
+[REQUIREMENTS.md § Virtual / replay backend](REQUIREMENTS.md#virtual--replay-backend).
+
+---
+
+## Per-OS adapter setup
+
+Depending on which `--interface` you plan to use:
+
+### CANable / SLCAN (all OSes)
+
+| OS | Setup |
+|---|---|
+| Linux | `sudo usermod -aG dialout $USER` (log out + back in). Device appears as `/dev/ttyACM0` or `/dev/ttyUSB0`. |
+| macOS | No driver needed. Device appears as `/dev/cu.usbmodemNNN`. |
+| Windows | No driver needed (CDC ACM). Device appears as `COM3`, `COM4`, etc. |
+
+### SocketCAN (Linux only)
+
+```bash
+# Bring up a real CAN interface
+sudo ip link set can0 up type can bitrate 500000
+
+# Or a virtual one for testing without hardware
+sudo modprobe vcan
+sudo ip link add dev vcan0 type vcan
+sudo ip link set up vcan0
+```
+
+### PCAN-Basic (Windows / macOS)
+
+Download and install the PCAN-Basic SDK from
+[peak-system.com/Software-APIs.305.0.html](https://www.peak-system.com/Software-APIs.305.0.html).
+The flasher loads the shared library at runtime; on Linux PCAN
+adapters appear under SocketCAN via the `peak_usb` kernel module so
+the SDK isn't needed there.
+
+---
+
+## Command reference
+
+```
+can-flasher [OPTIONS] <COMMAND>
+
+Commands:
+  flash       Flash firmware to a device
+  verify      Verify flash contents against a binary without writing
+  discover    Scan the bus and list all bootloader-mode devices
+  diagnose    Read/clear DTCs, stream logs, stream live data, session health
+  config      Read/write device configuration (NVM) and option bytes (WRP)
+  replay      Record or replay a CAN session (testing)
+  adapters    List detected CAN adapters on this machine
+
+Global Options:
+  -i, --interface <TYPE>    CAN backend: slcan | socketcan | pcan | virtual
+  -c, --channel <CHANNEL>   Adapter channel (format depends on OS and backend)
+  -b, --bitrate <BPS>       Nominal CAN bitrate [default: 500000]
+      --node-id <ID>        Target node ID hex or decimal [default: broadcast]
+      --timeout <MS>        Per-frame timeout in ms [default: 500]
+      --json                Machine-readable JSON output on stdout
+      --log <PATH>          Append session to audit log (SQLite)
+      --verbose             Trace-level logging
+      --operator <NAME>     Override operator name in audit log
+```
+
+Each subcommand has its own `--help` with detailed arguments. Pending
+subcommands return a "not implemented" message naming the feat branch
+that'll implement them — so you can always see what's still blocking.
+
+Full flag reference + JSON schemas + exit code table:
+[REQUIREMENTS.md § CLI interface](REQUIREMENTS.md#cli-interface) and
+[§ Output and CI integration](REQUIREMENTS.md#output-and-ci-integration).
+
+---
+
+## Development
+
+### Toolchain
+
+Pinned to the stable channel via `rust-toolchain.toml`; rustup auto-
+installs the right version on first `cargo` invocation. Current MSRV
+is **1.95**. `rustfmt` and `clippy` ship in the default profile.
+
+### Common commands
+
+```bash
+cargo build                              # debug build
+cargo build --release                    # optimised build (LTO, strip)
+cargo test                               # full suite (lib + integration + doc)
+cargo fmt                                # auto-format
+cargo clippy --all-targets -- -D warnings  # lints as errors
+```
+
+### Test coverage
+
+Three test flavours all run under `cargo test`:
+
+- **Unit tests** in each module's `#[cfg(test)] mod tests { … }` — the
+  bulk of the coverage (~90 % of tests). Pure functions, parsers,
+  encoders.
+- **Integration test** in `tests/virtual_pipeline.rs` — spins up the
+  `VirtualBus` + `StubDevice` + `Session` and round-trips commands
+  through the full stack.
+- **Doc tests** in `///` blocks — currently one example in
+  `protocol::commands`.
+
+Hardware-in-the-loop (real CANable / SocketCAN / PCAN adapters) is
+not part of CI; it's covered by the manual smoke-test workflow.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every push to `dev` / `main` and
+every PR into them:
+
+- `rustfmt --check`
+- `clippy --all-targets --all-features -- -D warnings`
+- `build + test` matrix: Linux / macOS / Windows
+
+Docs-only changes (README / REQUIREMENTS / ARCHITECTURE / ROADMAP)
+skip CI via path filters — no runner minutes for comment tweaks.
 
 ---
 
@@ -27,126 +221,83 @@ Host-side CAN flasher (Rust CLI) for programming the IFS08 STM32 CAN bootloader.
 
 ### Main branches
 
-The repository has two permanent branches:
-
-**`main`** is the production branch. It contains only validated code that can be flashed onto the car. Never work directly on it.
-
-**`dev`** is the development branch. It is the integration point where everyone's work comes together. Never work directly on it either — all changes arrive through a feature branch.
-
 ```
-main  ──────────────────●──────────────────────●──▶  (validated releases only)
+main  ──────────────────●──────────────────────●──▶  validated releases only
                         ↑                      ↑
-dev   ──────●───●───●───●───●───●───●───●───●──●──▶  (continuous integration)
+dev   ──────●───●───●───●───●───●───●───●───●──●──▶  continuous integration
             ↑   ↑       ↑   ↑   ↑       ↑   ↑
           feat/1 fix/1 feat/2 fix/2   feat/3 fix/3
 ```
 
-### Feature branches
+`main` carries validated, tagged releases (`v0.x.0-…`, culminating
+at `v1.0.0`). `dev` is where feat / fix branches integrate. Nobody
+commits directly to either.
 
-All work — whether a new feature or a bug fix — is done on a **feature branch** created from `dev`. When the work is ready, a Pull Request is opened toward `dev`, reviewed, merged, and the branch is deleted.
-
-There are two branch types, each with its own independent numeric counter:
+### Branch naming
 
 ```
-feat/<n>   →  new functionality  (feat/1, feat/2, feat/3 ...)
-fix/<n>    →  bug fix            (fix/1,  fix/2,  fix/3  ...)
+feat/<n>-<short-title>   new functionality  (feat/9-session-lifecycle, …)
+fix/<n>-<short-title>    bug or doc fix      (fix/1-workflow-titled-branches, …)
 ```
 
-The `feat` and `fix` counters are independent: `feat/2` and `fix/2` can exist at the same time with no conflict.
+`feat` and `fix` have independent counters — `feat/2` and `fix/2`
+can coexist. The short kebab-case title is mandatory so the purpose
+is visible at a glance.
 
-### Tracking branch history
+### Tracking issues
 
-Feature branches are deleted after merging to keep the repository clean. The history of each branch is preserved in **GitHub Issues**.
+Every branch auto-creates a GitHub Issue on its first push (via
+`.github/workflows/branch-issue.yml`):
 
-Every branch has one associated issue. The issue carries a **label** (`feat` or `fix`) and its title includes the branch number, for example: `[feat/3] Add CAN broadcast for mission state`. When the branch is merged and deleted, the issue is closed — becoming a permanent record of all the work done.
+- Title: `[feat/N-short-title]` or `[fix/N-short-title]`
+- Label: `feat` or `fix`
+- Body: populated from the first commit's message
 
-To see which branches are currently active: filter issues by label and status `open`.
-To browse the full history: filter by label and status `closed`.
-The number for the next branch of each type is the last closed issue of that type plus one.
+The issue closes automatically when the PR merges into `dev` (via
+`.github/workflows/close-on-dev-merge.yml`). Closed issues form the
+permanent history of the project — grepping them is how future
+contributors see what's been done.
 
-> Example: if the last closed issue with label `feat` is `[feat/4] ...`, the next feature branch will be `feat/5`.
+### Roadmap
+
+[`ROADMAP.md`](ROADMAP.md) is **auto-generated** from
+`.github/roadmap.yaml` by `.github/scripts/render_roadmap.py`. The
+workflow runs on every push to `dev` and commits the regenerated
+file if anything changed. Branch status badges come from the
+tracking-issue state, so closed issues flip `🔜 planned` →
+`✅ done` automatically.
+
+Don't hand-edit `ROADMAP.md` — update the YAML instead.
+
+### Typical workflow
+
+```bash
+# 1. Make sure dev is current
+git checkout dev && git pull origin dev
+
+# 2. Cut a branch (use the next feat/fix number + a short kebab title)
+git checkout -b feat/10-discover-subcommand
+
+# 3. Work, commit, push
+git commit -m "short description"
+git push origin feat/10-discover-subcommand
+
+# 4. Open PR against dev (use `Closes #<issue>` in the body so the
+#    tracking issue auto-closes on merge)
+gh pr create --base dev --title "..." --body "Closes #NN …"
+
+# 5. Squash-merge after review; the tracking issue closes itself
+```
+
+Phase boundaries (every few merged branches) trigger a `dev → main`
+**merge commit** (not squash) + a milestone tag + a GitHub Release.
+The roadmap table tracks which tag closes each phase.
 
 ---
 
-## Automation
+## Licence
 
-The repository includes a GitHub Actions workflow that manages tracking issues automatically. No setup is required — it works for every developer as soon as they create a branch.
-
-### Automatic issue creation
-
-When a `feat/*` or `fix/*` branch is pushed to GitHub, the workflow automatically opens an issue with:
-
-- The corresponding `[feat/N]` or `[fix/N]` title
-- The correct label (`feat` or `fix`)
-- A template with sections for describing the work and adding notes
-- The name of the developer who created the branch
-
-### Wrong number warning
-
-If the branch number is not the next expected one (either too low or too high), the issue will display a warning indicating the correct number and asking the developer to delete and recreate the branch with the right name.
-
-### Auto-fill description from first commit
-
-When the developer makes their first commit and pushes it, the workflow automatically updates the *"What does this branch do?"* section of the issue with that commit message.
-
-- If the developer manually edits the issue before pushing their first commit, the workflow will not overwrite the description.
-- The description is only updated once — subsequent commits do not modify the issue.
-
----
-
-## Step-by-step workflow
-
-### 1. Create the branch
-
-```bash
-# Make sure you are on an up-to-date dev
-git checkout dev
-git pull origin dev
-
-# Create your branch using the next available number for its type
-# (last closed issue of that type + 1)
-git checkout -b feat/5    # or fix/3, depending on that type's counter
-```
-
-> To find the right number: go to **Issues → filter by label `feat` or `fix` → sort by newest** and read the last number.
-
-### 2. Push the branch
-
-```bash
-git push origin feat/5
-```
-
-The tracking issue will be opened automatically on GitHub within seconds.
-
-### 3. Work and commit
-
-```bash
-# Make your changes and commit with a clear, descriptive message
-git add .
-git commit -m "short description of what this commit does"
-
-# Push the changes
-git push origin feat/5
-```
-
-The message of your **first commit** will be used to automatically fill in the issue description.
-
-### 4. Open a Pull Request
-
-When the work is ready, open a Pull Request on GitHub from your branch toward `dev`. In the PR description write `Closes #<issue-number>` so the issue closes automatically when the PR is merged.
-
-Before requesting a review, check that:
-- The code compiles with no errors or warnings
-- You have tested the change on the bench if applicable
-- The PR targets `dev`, not `main`
-
-### 5. Review and merge
-
-Another team member will review the PR. Once approved, it is merged into `dev` and the branch is deleted. The issue will be closed as a permanent record.
-
-### 6. Merging into main
-
-When `dev` holds a set of validated changes that are ready for the car, a responsible team member opens a Pull Request from `dev` into `main`. This only happens after full firmware validation (HIL/bench).
+MIT, see [`Cargo.toml`](Cargo.toml).
 
 ---
 
