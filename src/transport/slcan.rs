@@ -302,10 +302,12 @@ impl SlcanBackend {
         // difference between a mid-burst TX stall of ~1 ms (kernel
         // scheduler) and ~500 ms (reader holding the std mutex
         // across macOS's termios 100 ms minimum read timeout).
-        let mut reader_port = port.try_clone().map_err(|e| TransportError::InvalidChannel {
-            channel: channel.to_string(),
-            reason: format!("could not clone serial port for reader: {e}"),
-        })?;
+        let mut reader_port = port
+            .try_clone()
+            .map_err(|e| TransportError::InvalidChannel {
+                channel: channel.to_string(),
+                reason: format!("could not clone serial port for reader: {e}"),
+            })?;
 
         // Reader uses the short timeout (shutdown latency); writer
         // keeps a longer default since it only blocks in the open

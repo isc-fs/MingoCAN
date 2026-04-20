@@ -17,6 +17,7 @@ pub mod diagnose;
 pub mod discover;
 pub mod flash;
 pub mod replay;
+pub mod send_raw;
 pub mod verify;
 
 // ---- Typed exit-code hints ----
@@ -109,6 +110,10 @@ pub enum Command {
 
     /// Record or replay a CAN session (testing)
     Replay(replay::ReplayArgs),
+
+    /// Send one raw CAN frame — generic primitive for app-level
+    /// commands (e.g. running-app reboot-to-BL, bench probes)
+    SendRaw(send_raw::SendRawArgs),
 
     /// List detected CAN adapters on this machine
     Adapters,

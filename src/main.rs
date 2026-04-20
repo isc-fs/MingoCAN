@@ -77,6 +77,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Diagnose(args) => cli::diagnose::run(args, &cli.global).await,
         Command::Config(args) => cli::config::run(args, &cli.global).await,
         Command::Replay(args) => cli::replay::run(args, &cli.global).await,
+        Command::SendRaw(args) => cli::send_raw::run(args, &cli.global).await,
         Command::Adapters => cli::adapters::run(&cli.global).await,
     }
 }
