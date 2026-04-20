@@ -27,7 +27,7 @@ sequencing against the bootloader counterpart at
 | 2 | Protocol + transport | ✅ done `feat/3-protocol-core` · ✅ done `feat/4-virtual-backend` · ✅ done `feat/5-slcan-backend` · ✅ done `feat/6-socketcan-backend` · ✅ done `feat/7-pcan-backend` | `v0.2.0-transport` |
 | 3 | Session + adapters subcommand | ✅ done `feat/8-adapter-detect` · ✅ done `feat/9-session-lifecycle` | `v0.3.0-session` |
 | 4 | Remaining subcommands | ✅ done `feat/10-discover-subcommand` · ✅ done `feat/11-diagnose-subcommand` · ✅ done `feat/12-verify-subcommand` · ✅ done `feat/13-config-subcommand` · ✅ done `feat/14-replay-subcommand` | `v0.4.0-subcommands` |
-| 5 | Flash pipeline | ✅ done `feat/15-firmware-loader` · ✅ done `feat/16-flash-manager` · 🔜 planned `feat/17-flash-subcommand` | `v1.0.0` |
+| 5 | Flash pipeline | ✅ done `feat/15-firmware-loader` · ✅ done `feat/16-flash-manager` · ✅ done `feat/17-flash-subcommand` | `v1.0.0` |
 | — | Plantilla sync _(sidequest)_ | ✅ done `feat/1-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` | — |
 
 ## Branch diagram
@@ -126,7 +126,7 @@ gitGraph
     checkout dev
     merge feat/16-flash-manager
     branch feat/17-flash-subcommand
-    commit id: "○ end-to-end `flash` wiring + FLASH_VERIFY commit + JUMP"
+    commit id: "✔ end-to-end `flash` wiring + FLASH_VERIFY commit + JUMP"
     checkout dev
     merge feat/17-flash-subcommand
     checkout main
