@@ -16,10 +16,8 @@ the bootloader's classic-CAN protocol through SLCAN adapters
 ## Status
 
 In active development — targeting **v1.0.0** alongside the bootloader.
-Adapter enumeration and the in-process virtual pipeline are live;
-subcommand implementations (`discover`, `diagnose`, `config`, `verify`,
-`flash`, `replay`) are landing one branch at a time per
-[ROADMAP.md](ROADMAP.md).
+Six of seven subcommands are live; the flash pipeline (`feat/15`–
+`feat/17`) is the last stretch per [ROADMAP.md](ROADMAP.md).
 
 | Subcommand | Status |
 |-----------|:------:|
@@ -28,7 +26,7 @@ subcommand implementations (`discover`, `diagnose`, `config`, `verify`,
 | `diagnose` — DTC / log / live-data / health / reset | ✅ live |
 | `config` — NVM read/write + option bytes + WRP apply | ✅ live |
 | `verify` — compare installed image against a binary | ✅ live |
-| `replay` — record / replay CAN sessions for testing | 🔜 `feat/14` |
+| `replay` — record / replay CAN sessions for testing | ✅ live |
 | `flash` — program firmware end-to-end | 🔜 `feat/15`–`feat/17` |
 
 ---
@@ -159,9 +157,10 @@ Global Options:
       --operator <NAME>     Override operator name in audit log
 ```
 
-Each subcommand has its own `--help` with detailed arguments. Pending
-subcommands return a "not implemented" message naming the feat branch
-that'll implement them — so you can always see what's still blocking.
+Each subcommand has its own `--help` with detailed arguments. `flash`
+is the remaining stub and returns a "not implemented" message naming
+the feat branch that will implement it — so you can always see what's
+still blocking.
 
 Full flag reference + JSON schemas + exit code table:
 [REQUIREMENTS.md § CLI interface](REQUIREMENTS.md#cli-interface) and
