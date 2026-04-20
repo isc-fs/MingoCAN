@@ -15,21 +15,19 @@ the bootloader's classic-CAN protocol through SLCAN adapters
 
 ## Status
 
-In active development — targeting **v1.0.0** alongside the bootloader.
-Adapter enumeration and the in-process virtual pipeline are live;
-subcommand implementations (`discover`, `diagnose`, `config`, `verify`,
-`flash`, `replay`) are landing one branch at a time per
-[ROADMAP.md](ROADMAP.md).
+**v1.0.0** — all 7 subcommands are live and the full host-side
+flasher is feature-complete against the v1.0.0 bootloader contract.
+See [ROADMAP.md](ROADMAP.md) for phase-by-phase history.
 
 | Subcommand | Status |
 |-----------|:------:|
 | `adapters` — list detected CAN adapters | ✅ live |
-| `discover` — scan the bus, print table of bootloader-mode devices | 🔜 `feat/10` |
-| `diagnose` — DTC / log / live-data / health / reset | 🔜 `feat/11` |
-| `verify` — compare installed image against a binary | 🔜 `feat/12` |
-| `config` — NVM read/write + option bytes + WRP apply | 🔜 `feat/13` |
-| `replay` — record / replay CAN sessions for testing | 🔜 `feat/14` |
-| `flash` — program firmware end-to-end | 🔜 `feat/15`–`feat/17` |
+| `discover` — scan the bus, print table of bootloader-mode devices | ✅ live |
+| `diagnose` — DTC / log / live-data / health / reset | ✅ live |
+| `config` — NVM read/write + option bytes + WRP apply | ✅ live |
+| `verify` — compare installed image against a binary | ✅ live |
+| `replay` — record / replay CAN sessions for testing | ✅ live |
+| `flash` — program firmware end-to-end | ✅ live |
 
 ---
 
@@ -159,9 +157,9 @@ Global Options:
       --operator <NAME>     Override operator name in audit log
 ```
 
-Each subcommand has its own `--help` with detailed arguments. Pending
-subcommands return a "not implemented" message naming the feat branch
-that'll implement them — so you can always see what's still blocking.
+Each subcommand has its own `--help` with detailed arguments. The
+audit-log (`--log`) plumbing is stubbed — the flag parses but the
+SQLite sink is deferred to post-v1 per ROADMAP.md.
 
 Full flag reference + JSON schemas + exit code table:
 [REQUIREMENTS.md § CLI interface](REQUIREMENTS.md#cli-interface) and

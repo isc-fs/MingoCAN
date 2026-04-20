@@ -19,6 +19,60 @@ pub mod flash;
 pub mod replay;
 pub mod verify;
 
+// ---- Typed exit-code hints ----
+
+/// Marker error type a subcommand attaches to its `anyhow::Error` so
+/// `main` can pick a specific exit code from the REQUIREMENTS.md
+/// table instead of falling back to 99. Wrap with
+/// [`exit_err`] / [`bail_exit!`] at the subcommand layer; `main`'s
+/// `map_error_to_exit_code` walks the error chain looking for this
+/// type via `downcast_ref`.
+///
+/// Numeric values match `ExitCodeValue` in `main.rs`; keep the two
+/// tables in sync when new codes land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ExitCodeHint {
+    #[error("flash or write error")]
+    FlashError,
+    #[error("verification mismatch")]
+    VerifyMismatch,
+    #[error("protection violation (address in BL sector)")]
+    ProtectionViolation,
+    #[error("device not found / timeout")]
+    DeviceNotFound,
+    #[error("WRP not applied")]
+    WrpNotApplied,
+    #[error("input file error")]
+    InputFileError,
+    #[error("adapter not found or SDK missing")]
+    AdapterMissing,
+}
+
+impl ExitCodeHint {
+    /// Byte-valued exit code this hint maps to.
+    pub const fn exit_code(self) -> u8 {
+        match self {
+            Self::FlashError => 1,
+            Self::VerifyMismatch => 2,
+            Self::ProtectionViolation => 3,
+            Self::DeviceNotFound => 4,
+            Self::WrpNotApplied => 7,
+            Self::InputFileError => 8,
+            Self::AdapterMissing => 9,
+        }
+    }
+}
+
+/// Build an `anyhow::Error` that carries an [`ExitCodeHint`] plus a
+/// human-readable message. The hint sits at the root of the chain;
+/// the message wraps it via `context` so `Display` prints the
+/// message first ("installed image differs…") and the hint second
+/// ("verification mismatch"). `main::map_error_to_exit_code` walks
+/// the chain via `downcast_ref::<ExitCodeHint>` and picks the code.
+pub fn exit_err(hint: ExitCodeHint, message: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::Error::new(hint).context(message.to_string())
+}
+
 // ---- Top-level ----
 
 #[derive(Debug, Parser)]

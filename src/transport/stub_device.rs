@@ -26,18 +26,60 @@
 //!
 //! These land as the features that need them do.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tracing::{debug, trace, warn};
 
+use crate::firmware::{BL_APP_BASE, BL_APP_END, BL_APP_MAX_SIZE, BL_SECTOR_SIZE};
 use crate::protocol::commands::{PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR};
 use crate::protocol::ids::{FrameId, MessageType};
 use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
 use crate::protocol::opcodes::{CommandOpcode, NackCode};
+use crate::protocol::records::OB_APPLY_TOKEN;
 use crate::protocol::CanFrame;
 
 use super::{CanBackend, Result, TransportError};
+
+/// Upper bound on a single NVM value, per REQUIREMENTS.md § NVM
+/// store — matches the bootloader's `BL_NVM_MAX_VALUE_LEN` (20 B).
+const STUB_NVM_MAX_VALUE_LEN: usize = 20;
+
+/// STM32H7 FLASHWORD size — 32 B. `CMD_FLASH_WRITE` addresses must
+/// be FLASHWORD-aligned; the real HAL rejects misaligned writes and
+/// so does the stub.
+const STUB_FLASHWORD_SIZE: u32 = 32;
+
+/// Alignment policy used by `StubDevice::validate_flash_range`.
+/// Kept module-local — the real bootloader enforces these per-opcode
+/// too, but the host tool doesn't need to know the taxonomy.
+#[derive(Clone, Copy, Debug)]
+enum StubRangePolicy {
+    /// No alignment requirement (e.g. `CMD_FLASH_READ_CRC` accepts
+    /// arbitrary ranges — the bootloader's CRC routine walks bytes).
+    Unaligned,
+    /// Start address + length must be FLASHWORD (32 B) aligned —
+    /// `CMD_FLASH_WRITE` contract.
+    FlashwordAligned,
+    /// Start address + length must be sector (128 KB) aligned —
+    /// `CMD_FLASH_ERASE` contract.
+    SectorAligned,
+}
+
+/// Maximum `CMD_FLASH_WRITE` payload (data bytes, excluding opcode +
+/// address). Classic CAN ISO-TP allows up to 280 B reassembled; the
+/// host tool caps writes at 256 B per REQUIREMENTS § Write chunk
+/// size. Stub enforces the same ceiling so an over-large write
+/// surfaces as a clean NACK rather than an assertion failure.
+const STUB_FLASH_WRITE_MAX: usize = 256;
+
+/// Stub's synthetic option-byte snapshot — nothing WRP-protected,
+/// level-0 RDP, default BOR. Matches what a dev board out of the
+/// box would report.
+const STUB_OB_RDP_LEVEL: u8 = 0xAA; // OB_RDP_LEVEL_0
+const STUB_OB_BOR_LEVEL: u8 = 0x00;
+const STUB_OB_USER_CONFIG: u32 = 0x00FF_FAAD; // arbitrary realistic-looking value
 
 /// How long we wait between frames before giving up the current read
 /// attempt and returning to the top of the loop. Short enough that
@@ -59,6 +101,36 @@ pub struct StubDevice {
     /// can't know the originating type — we capture it at the
     /// frame-ID layer and consume it when the reassembly completes.
     pending_msg_type: Option<MessageType>,
+    /// In-memory NVM store. Real bootloader persists to sector 7;
+    /// stub keeps it RAM-only per run so integration tests get a
+    /// fresh KV space each time. Tombstoned entries get evicted
+    /// (map entry removed) so `NVM_READ` after erase surfaces
+    /// `NACK(NVM_NOT_FOUND)` as expected.
+    nvm: HashMap<u16, Vec<u8>>,
+    /// Current WRP sector bitmap. Real hardware OB flips this via
+    /// `OB_APPLY_WRP`; the stub mirrors the operation so subsequent
+    /// `OB_READ` reflects the applied mask. Reset to 0 on construction.
+    wrp_sector_mask: u32,
+    /// If set, `CMD_FLASH_VERIFY` only ACKs when the submitted
+    /// `(crc, size, version)` triple matches exactly. `None` means
+    /// "accept whatever the host sends" — useful for happy-path
+    /// tests where we just want to confirm the wire round-trip
+    /// without pretending to have a specific installed image.
+    expected_verify: Option<(u32, u32, u32)>,
+    /// Synthetic flash buffer covering `BL_APP_BASE..=BL_APP_END`
+    /// (768 KB). Default 0xFF — matches erased flash. Mutated by
+    /// `CMD_FLASH_ERASE` (fills 0xFF) and `CMD_FLASH_WRITE` (copies
+    /// the supplied bytes in). Sector 0 and sector 7 (metadata) are
+    /// *not* represented — both are off-limits to the flash pipeline
+    /// and any request touching them earns `NACK(PROTECTED_ADDR)`
+    /// via range validation before we reach the buffer.
+    flash_buffer: Vec<u8>,
+    /// Per-sector CRC override. If the entry for sector `N` is
+    /// `Some`, `CMD_FLASH_READ_CRC` over that sector's full range
+    /// returns the overridden value instead of the computed one.
+    /// Used exclusively by tests that need to fake a post-write
+    /// CRC mismatch — real bootloader CRC is always honest.
+    flash_crc_overrides: HashMap<u8, u32>,
 }
 
 impl StubDevice {
@@ -73,6 +145,43 @@ impl StubDevice {
             reasm: Reassembler::new(),
             session_active: false,
             pending_msg_type: None,
+            nvm: HashMap::new(),
+            wrp_sector_mask: 0,
+            expected_verify: None,
+            flash_buffer: vec![0xFF; BL_APP_MAX_SIZE as usize],
+            flash_crc_overrides: HashMap::new(),
+        }
+    }
+
+    /// Configure the `CMD_FLASH_VERIFY` gate. `Some((crc, size,
+    /// version))` means the stub ACKs only that exact triple and
+    /// NACKs anything else with `CrcMismatch`. `None` (the default)
+    /// ACKs any well-formed verify request — useful when a test just
+    /// cares about the wire path and not the semantics.
+    pub fn set_expected_verify(&mut self, expected: Option<(u32, u32, u32)>) {
+        self.expected_verify = expected;
+    }
+
+    /// Snapshot the current flash buffer (`BL_APP_BASE..=BL_APP_END`).
+    /// Integration tests read this after a `FlashManager::run` to
+    /// confirm the stub ended up with the same bytes the host
+    /// composed.
+    pub fn flash_snapshot(&self) -> &[u8] {
+        &self.flash_buffer
+    }
+
+    /// Override the CRC the stub returns for reads covering exactly
+    /// sector `sector`'s whole range. `None` clears the override so
+    /// real CRCs flow again. Used by tests that need to simulate a
+    /// post-write CRC mismatch without corrupting the buffer itself.
+    pub fn set_flash_crc_override(&mut self, sector: u8, crc: Option<u32>) {
+        match crc {
+            Some(value) => {
+                self.flash_crc_overrides.insert(sector, value);
+            }
+            None => {
+                self.flash_crc_overrides.remove(&sector);
+            }
         }
     }
 
@@ -185,6 +294,35 @@ impl StubDevice {
             Ok(CommandOpcode::Connect) => self.handle_connect(peer, payload).await,
             Ok(CommandOpcode::Disconnect) => self.handle_disconnect(peer).await,
             Ok(CommandOpcode::Discover) => self.handle_discover(peer).await,
+            Ok(CommandOpcode::GetHealth) => self.handle_get_health(peer).await,
+            Ok(CommandOpcode::DtcRead) => self.handle_dtc_read(peer).await,
+            Ok(CommandOpcode::DtcClear) => self.handle_dtc_clear(peer).await,
+            Ok(CommandOpcode::LogStreamStart) => {
+                self.handle_session_gated_ack(peer, CommandOpcode::LogStreamStart)
+                    .await
+            }
+            Ok(CommandOpcode::LogStreamStop) => {
+                self.handle_session_gated_ack(peer, CommandOpcode::LogStreamStop)
+                    .await
+            }
+            Ok(CommandOpcode::LiveDataStart) => {
+                self.handle_session_gated_ack(peer, CommandOpcode::LiveDataStart)
+                    .await
+            }
+            Ok(CommandOpcode::LiveDataStop) => {
+                self.handle_session_gated_ack(peer, CommandOpcode::LiveDataStop)
+                    .await
+            }
+            Ok(CommandOpcode::Reset) => self.handle_reset(peer, payload).await,
+            Ok(CommandOpcode::Jump) => self.handle_jump(peer, payload).await,
+            Ok(CommandOpcode::ObRead) => self.handle_ob_read(peer).await,
+            Ok(CommandOpcode::ObApplyWrp) => self.handle_ob_apply_wrp(peer, payload).await,
+            Ok(CommandOpcode::NvmRead) => self.handle_nvm_read(peer, payload).await,
+            Ok(CommandOpcode::NvmWrite) => self.handle_nvm_write(peer, payload).await,
+            Ok(CommandOpcode::FlashErase) => self.handle_flash_erase(peer, payload).await,
+            Ok(CommandOpcode::FlashWrite) => self.handle_flash_write(peer, payload).await,
+            Ok(CommandOpcode::FlashReadCrc) => self.handle_flash_read_crc(peer, payload).await,
+            Ok(CommandOpcode::FlashVerify) => self.handle_flash_verify(peer, payload).await,
             Ok(_) | Err(_) => self.send_nack(peer, opcode, NackCode::Unsupported).await,
         }
     }
@@ -236,6 +374,575 @@ impl StubDevice {
             PROTOCOL_VERSION_MINOR,
         ];
         self.send_message(peer, MessageType::Discover, &resp).await
+    }
+
+    /// Synthetic `CMD_GET_HEALTH` reply. Produces a realistic-looking
+    /// 32-byte [`HealthRecord`]: uptime comes from the
+    /// [`static_ms`] monotonic clock, reset cause is latched at
+    /// `POWER_ON`, and the `flags` bitmask reflects the stub's
+    /// current `session_active` state. Matches `bl_health.h`'s layout
+    /// exactly so host-side parsers see the same bytes they would on
+    /// real hardware.
+    ///
+    /// [`HealthRecord`]: crate::protocol::records::HealthRecord
+    async fn handle_get_health(&self, peer: u8) -> Result<()> {
+        // HealthRecord::SIZE = 32. Lay the bytes out directly so the
+        // stub doesn't need to pull in encoder machinery for a record
+        // we only read on the host side.
+        let uptime_seconds: u32 = (static_ms() / 1000) as u32;
+        let reset_cause: u32 = 0x01; // BL_RESET_POWER_ON
+        let flags: u32 = if self.session_active { 0b01 } else { 0b00 };
+
+        let mut record = [0u8; 32];
+        record[0..4].copy_from_slice(&uptime_seconds.to_le_bytes());
+        record[4..8].copy_from_slice(&reset_cause.to_le_bytes());
+        record[8..12].copy_from_slice(&flags.to_le_bytes());
+        // flash_write_count, dtc_count, last_dtc_code, reserved[0..2] already 0
+
+        let mut resp = Vec::with_capacity(1 + 32);
+        resp.push(CommandOpcode::GetHealth.as_byte());
+        resp.extend_from_slice(&record);
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Empty DTC table: `[opcode, count_le16=0]`. Zero entries.
+    /// Matches the real bootloader's wire format for `CMD_DTC_READ`
+    /// when no faults have been logged.
+    async fn handle_dtc_read(&self, peer: u8) -> Result<()> {
+        let resp = [CommandOpcode::DtcRead.as_byte(), 0x00, 0x00];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated DTC clear. Returns `NACK(BAD_SESSION)` if the
+    /// caller hasn't run CONNECT first; ACKs a successful clear
+    /// otherwise. The stub's internal DTC list is already empty, so
+    /// "clear" is a no-op.
+    async fn handle_dtc_clear(&self, peer: u8) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::DtcClear.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        let resp = [CommandOpcode::DtcClear.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// `CMD_RESET` takes a 1-byte mode argument. ACK the command so
+    /// the host sees success; we don't actually reset the tokio task
+    /// (would kill the test harness). Real hardware would reboot
+    /// after emitting the ACK.
+    async fn handle_reset(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        // payload[0] is the opcode, payload[1] should be the mode.
+        if payload.len() < 2 {
+            return self
+                .send_nack(peer, CommandOpcode::Reset.as_byte(), NackCode::Unsupported)
+                .await;
+        }
+        // Validate the mode is 0..=3; anything else is an invalid arg.
+        if payload[1] > 3 {
+            return self
+                .send_nack(peer, CommandOpcode::Reset.as_byte(), NackCode::Unsupported)
+                .await;
+        }
+        let resp = [CommandOpcode::Reset.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// `CMD_JUMP` takes a 4-byte little-endian target address. Real
+    /// hardware ACKs and then jumps to the application reset vector;
+    /// the stub just ACKs so host-side flash pipelines (feat/17)
+    /// don't error out on the post-flash JUMP. We don't validate
+    /// the address — the host tool always sends `BL_APP_BASE` and
+    /// the bootloader itself decides whether to honour it.
+    async fn handle_jump(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        if payload.len() < 5 {
+            return self
+                .send_nack(peer, CommandOpcode::Jump.as_byte(), NackCode::Unsupported)
+                .await;
+        }
+        let resp = [CommandOpcode::Jump.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Generic session-gated ACK handler. Used by `LOG_STREAM_*` and
+    /// `LIVE_DATA_*` which on real hardware start / stop notification
+    /// streams but here just accept the command so the host-side
+    /// subscribe path can be exercised. Actual stream emission is out
+    /// of scope for the stub today — hosts exercise it via real
+    /// bootloader traffic.
+    async fn handle_session_gated_ack(&self, peer: u8, opcode: CommandOpcode) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(peer, opcode.as_byte(), NackCode::BadSession)
+                .await;
+        }
+        let resp = [opcode.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-less `CMD_OB_READ`. Returns a synthetic 16-byte
+    /// `bl_ob_status_t` reflecting the stub's current in-memory WRP
+    /// mask plus fixed RDP / BOR levels.
+    async fn handle_ob_read(&self, peer: u8) -> Result<()> {
+        // 16 bytes of bl_ob_status_t: wrp (4 LE) + user_config (4 LE)
+        // + rdp (1) + bor (1) + reserved (2) + reserved_ext (4 LE).
+        let mut record = [0u8; 16];
+        record[0..4].copy_from_slice(&self.wrp_sector_mask.to_le_bytes());
+        record[4..8].copy_from_slice(&STUB_OB_USER_CONFIG.to_le_bytes());
+        record[8] = STUB_OB_RDP_LEVEL;
+        record[9] = STUB_OB_BOR_LEVEL;
+        // bytes 10..12 and 12..16 stay 0 (reserved + reserved_ext).
+
+        let mut resp = Vec::with_capacity(1 + 16);
+        resp.push(CommandOpcode::ObRead.as_byte());
+        resp.extend_from_slice(&record);
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_OB_APPLY_WRP`. Validates the 4-byte
+    /// `BL_OB_APPLY_TOKEN` brick-safety prefix and the optional
+    /// 4-byte sector bitmap. On a good request the stub updates its
+    /// in-memory WRP mask (so a subsequent `OB_READ` sees it) and
+    /// ACKs. Real hardware would reset after the ACK drains; the
+    /// stub just updates state in place so tests can inspect the
+    /// result without reconnecting.
+    async fn handle_ob_apply_wrp(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::ObApplyWrp.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, token_le32, sector_bitmap_le32?]
+        if payload.len() < 1 + 4 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::ObApplyWrp.as_byte(),
+                    NackCode::ObWrongToken,
+                )
+                .await;
+        }
+        let token = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        if token != OB_APPLY_TOKEN {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::ObApplyWrp.as_byte(),
+                    NackCode::ObWrongToken,
+                )
+                .await;
+        }
+        // Optional sector bitmap; default to 0x01 (bootloader sector)
+        // to match the host helper's default.
+        let sector_bitmap = if payload.len() >= 1 + 4 + 4 {
+            u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]])
+        } else {
+            0x01
+        };
+        self.wrp_sector_mask |= sector_bitmap;
+
+        let resp = [CommandOpcode::ObApplyWrp.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_NVM_READ`. Looks up `key` in the in-memory
+    /// map; ACK payload is `[opcode, len, value…]` on hit,
+    /// `NACK(NVM_NOT_FOUND)` on miss.
+    async fn handle_nvm_read(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(peer, CommandOpcode::NvmRead.as_byte(), NackCode::BadSession)
+                .await;
+        }
+        if payload.len() < 1 + 2 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmRead.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let key = u16::from_le_bytes([payload[1], payload[2]]);
+        match self.nvm.get(&key) {
+            Some(value) => {
+                let mut resp = Vec::with_capacity(1 + 1 + value.len());
+                resp.push(CommandOpcode::NvmRead.as_byte());
+                resp.push(value.len() as u8);
+                resp.extend_from_slice(value);
+                self.send_message(peer, MessageType::Ack, &resp).await
+            }
+            None => {
+                self.send_nack(
+                    peer,
+                    CommandOpcode::NvmRead.as_byte(),
+                    NackCode::NvmNotFound,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Session-gated `CMD_NVM_WRITE`. `value_len == 0` is a
+    /// tombstone and removes the key. Values longer than
+    /// `STUB_NVM_MAX_VALUE_LEN` earn `NACK(UNSUPPORTED)`. Otherwise
+    /// the stub stores the value and ACKs.
+    async fn handle_nvm_write(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmWrite.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        if payload.len() < 1 + 2 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmWrite.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let key = u16::from_le_bytes([payload[1], payload[2]]);
+        let value = &payload[3..];
+        if value.len() > STUB_NVM_MAX_VALUE_LEN {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmWrite.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+
+        if value.is_empty() {
+            // Tombstone: drop the entry entirely so NVM_READ misses.
+            self.nvm.remove(&key);
+        } else {
+            self.nvm.insert(key, value.to_vec());
+        }
+
+        let resp = [CommandOpcode::NvmWrite.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_FLASH_ERASE`. Args on the wire are
+    /// `[opcode, start_le32, length_le32]`. Erases the requested
+    /// range to 0xFF in the synthetic flash buffer.
+    ///
+    /// Validation:
+    ///
+    /// - Session must be active → `NACK(BAD_SESSION)`.
+    /// - Start + length must both be sector-aligned (128 KB) and
+    ///   land fully inside `BL_APP_BASE..=BL_APP_END` →
+    ///   `NACK(PROTECTED_ADDR)` on sector-0 / metadata overlap,
+    ///   `NACK(OUT_OF_BOUNDS)` otherwise.
+    async fn handle_flash_erase(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashErase.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, start_le32, length_le32] → 9 bytes
+        if payload.len() < 9 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashErase.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let start = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let length = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+
+        if let Err(code) = self.validate_flash_range(start, length, StubRangePolicy::SectorAligned)
+        {
+            return self
+                .send_nack(peer, CommandOpcode::FlashErase.as_byte(), code)
+                .await;
+        }
+
+        let off = (start - BL_APP_BASE) as usize;
+        let end_off = off + length as usize;
+        self.flash_buffer[off..end_off].fill(0xFF);
+        trace!(
+            start = format!("0x{start:08X}"),
+            length,
+            "stub: flash erase"
+        );
+
+        let resp = [CommandOpcode::FlashErase.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_FLASH_WRITE`. Args on the wire are
+    /// `[opcode, addr_le32, data…]`. Copies `data` into the flash
+    /// buffer at `addr`.
+    ///
+    /// Validation:
+    /// - Session must be active → `NACK(BAD_SESSION)`.
+    /// - Address must be FLASHWORD-aligned (32 B) and the full range
+    ///   must fit in the app region → `NACK(PROTECTED_ADDR)` /
+    ///   `NACK(OUT_OF_BOUNDS)`.
+    /// - Data length ≤ 256 B → else `NACK(UNSUPPORTED)`.
+    /// - Every target byte must currently read `0xFF` (erased). The
+    ///   real HAL raises a programming error on non-erased writes; we
+    ///   surface that as `NACK(FLASH_HW)` so the FlashManager
+    ///   engine can react the same way it would on hardware.
+    async fn handle_flash_write(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashWrite.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, addr_le32, data…] → at least 5 bytes
+        if payload.len() < 5 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashWrite.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let addr = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let data = &payload[5..];
+
+        if data.len() > STUB_FLASH_WRITE_MAX {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashWrite.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+
+        if let Err(code) =
+            self.validate_flash_range(addr, data.len() as u32, StubRangePolicy::FlashwordAligned)
+        {
+            return self
+                .send_nack(peer, CommandOpcode::FlashWrite.as_byte(), code)
+                .await;
+        }
+
+        let off = (addr - BL_APP_BASE) as usize;
+        let slot = &mut self.flash_buffer[off..off + data.len()];
+        if slot.iter().any(|&b| b != 0xFF) {
+            // Real HAL surfaces a programming error; mirror with
+            // FlashHw so the manager can treat the two identically.
+            return self
+                .send_nack(peer, CommandOpcode::FlashWrite.as_byte(), NackCode::FlashHw)
+                .await;
+        }
+        slot.copy_from_slice(data);
+        trace!(
+            addr = format!("0x{addr:08X}"),
+            len = data.len(),
+            "stub: flash write"
+        );
+
+        let resp = [CommandOpcode::FlashWrite.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_FLASH_READ_CRC`. Args on the wire are
+    /// `[opcode, addr_le32, length_le32]`. Computes CRC-32/ISO-HDLC
+    /// over the given range in the synthetic flash buffer and replies
+    /// with `ACK [opcode, crc_le32]`.
+    ///
+    /// When a per-sector override is registered via
+    /// `set_flash_crc_override` and the requested range covers
+    /// exactly that sector's span, the overridden CRC is returned
+    /// instead of the real one — tests exercising the mismatch path
+    /// use this to fake a corrupt sector after a successful write.
+    async fn handle_flash_read_crc(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashReadCrc.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, addr_le32, length_le32] → 9 bytes
+        if payload.len() < 9 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashReadCrc.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let addr = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let length = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+
+        if let Err(code) = self.validate_flash_range(addr, length, StubRangePolicy::Unaligned) {
+            return self
+                .send_nack(peer, CommandOpcode::FlashReadCrc.as_byte(), code)
+                .await;
+        }
+
+        // Override path: if the range lines up exactly with a
+        // configured sector, return the injected CRC. The range
+        // check matches FlashManager's per-sector diff request
+        // shape (sector base addr + BL_SECTOR_SIZE).
+        let crc = if let Some(sector) = Self::sector_of_exact_range(addr, length) {
+            if let Some(&fake) = self.flash_crc_overrides.get(&sector) {
+                fake
+            } else {
+                self.compute_flash_crc(addr, length)
+            }
+        } else {
+            self.compute_flash_crc(addr, length)
+        };
+
+        let mut resp = Vec::with_capacity(5);
+        resp.push(CommandOpcode::FlashReadCrc.as_byte());
+        resp.extend_from_slice(&crc.to_le_bytes());
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    fn compute_flash_crc(&self, addr: u32, length: u32) -> u32 {
+        let off = (addr - BL_APP_BASE) as usize;
+        let end_off = off + length as usize;
+        crate::firmware::crc32(&self.flash_buffer[off..end_off])
+    }
+
+    /// Helper: returns `Some(N)` iff `(addr, length)` names sector N
+    /// exactly (base-aligned + sector-sized). Used to decide whether
+    /// a CRC override applies to the current read.
+    fn sector_of_exact_range(addr: u32, length: u32) -> Option<u8> {
+        if length != BL_SECTOR_SIZE {
+            return None;
+        }
+        let relative = addr.checked_sub(BL_APP_BASE)?;
+        if !relative.is_multiple_of(BL_SECTOR_SIZE) {
+            return None;
+        }
+        // Sectors 1..=6 are the app region; sector 0 isn't reachable
+        // through this helper since BL_APP_BASE already skips it.
+        Some((relative / BL_SECTOR_SIZE) as u8 + 1)
+    }
+
+    /// Validate a `(addr, length)` pair against the app-region
+    /// envelope and the requested alignment. Returns the
+    /// `NackCode` the handler should emit on failure.
+    fn validate_flash_range(
+        &self,
+        addr: u32,
+        length: u32,
+        policy: StubRangePolicy,
+    ) -> std::result::Result<(), NackCode> {
+        if length == 0 {
+            return Err(NackCode::OutOfBounds);
+        }
+        // Alignment checks — split so the caller can pick
+        // flashword (write) vs sector (erase) vs none (CRC read).
+        match policy {
+            StubRangePolicy::Unaligned => {}
+            StubRangePolicy::FlashwordAligned => {
+                if !addr.is_multiple_of(STUB_FLASHWORD_SIZE)
+                    || !length.is_multiple_of(STUB_FLASHWORD_SIZE)
+                {
+                    return Err(NackCode::OutOfBounds);
+                }
+            }
+            StubRangePolicy::SectorAligned => {
+                let relative = match addr.checked_sub(BL_APP_BASE) {
+                    Some(v) => v,
+                    None => return Err(NackCode::ProtectedAddr),
+                };
+                if !relative.is_multiple_of(BL_SECTOR_SIZE)
+                    || !length.is_multiple_of(BL_SECTOR_SIZE)
+                {
+                    return Err(NackCode::OutOfBounds);
+                }
+            }
+        }
+        // Range envelope.
+        let end = addr.checked_add(length).ok_or(NackCode::OutOfBounds)?;
+        if addr < BL_APP_BASE {
+            // Below the app region — overlaps sector 0 or lower.
+            return Err(NackCode::ProtectedAddr);
+        }
+        if end > BL_APP_END + 1 {
+            return Err(NackCode::ProtectedAddr);
+        }
+        Ok(())
+    }
+
+    /// Session-gated `CMD_FLASH_VERIFY`. Args on the wire are
+    /// `[expected_crc_le32, expected_size_le32, expected_version_le32]`
+    /// (after the opcode byte). Behaviour:
+    ///
+    /// - If `self.expected_verify` is `None`, the stub ACKs any
+    ///   well-formed request. Happy-path tests just want to confirm
+    ///   the wire round-trip, not simulate an installed image.
+    /// - If `self.expected_verify` is `Some(exp)`, the stub ACKs
+    ///   only when the submitted triple equals `exp`, otherwise
+    ///   `NACK(CRC_MISMATCH)`. Tests set this via
+    ///   `StubDevice::set_expected_verify` before `run` is called.
+    async fn handle_flash_verify(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashVerify.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, crc_le32, size_le32, version_le32]
+        if payload.len() < 1 + 12 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashVerify.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let crc = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let size = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+        let version = u32::from_le_bytes([payload[9], payload[10], payload[11], payload[12]]);
+
+        if let Some(expected) = self.expected_verify {
+            if (crc, size, version) != expected {
+                return self
+                    .send_nack(
+                        peer,
+                        CommandOpcode::FlashVerify.as_byte(),
+                        NackCode::CrcMismatch,
+                    )
+                    .await;
+            }
+        }
+
+        let resp = [CommandOpcode::FlashVerify.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
     }
 
     async fn send_nack(&self, peer: u8, rejected_opcode: u8, code: NackCode) -> Result<()> {

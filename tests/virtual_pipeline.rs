@@ -20,11 +20,9 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 
-use can_flasher::protocol::commands::{
-    cmd_flash_erase, PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR,
-};
+use can_flasher::protocol::commands::{PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR};
 use can_flasher::protocol::ids::MessageType;
-use can_flasher::protocol::opcodes::{CommandOpcode, NackCode};
+use can_flasher::protocol::opcodes::NackCode;
 use can_flasher::protocol::Response;
 use can_flasher::session::{Session, SessionConfig, SessionError};
 use can_flasher::transport::{CanBackend, StubDevice, VirtualBus};
@@ -128,17 +126,22 @@ async fn unknown_opcode_earns_nack_unsupported() {
     let (session, cancel, handle) = setup().await;
     session.connect().await.expect("connect");
 
-    // FLASH_ERASE isn't implemented by the stub — expect
-    // NACK(UNSUPPORTED). Also exercises the FF+CF path (9-byte
-    // payload).
-    let payload = cmd_flash_erase(0x0802_0000, 0x2_0000);
+    // Opcode 0x20 isn't defined in `CommandOpcode`, so the stub's
+    // dispatch takes the `Err(_) → NACK(UNSUPPORTED)` fallthrough.
+    // Ride it on a 9-byte payload so ISO-TP segments into FF + CF
+    // and we still exercise the multi-frame reassembly path.
+    // (Previous iterations used `cmd_flash_erase` and `cmd_jump`,
+    // but both now have real stub handlers; an undefined byte is
+    // the only thing guaranteed to take the fallthrough.)
+    let mut payload = vec![0u8; 9];
+    payload[0] = 0x20; // undefined opcode
     let resp = session.send_command(&payload).await.expect("send");
     match resp {
         Response::Nack {
             rejected_opcode,
             code,
         } => {
-            assert_eq!(rejected_opcode, CommandOpcode::FlashErase.as_byte());
+            assert_eq!(rejected_opcode, 0x20);
             assert_eq!(code, NackCode::Unsupported);
         }
         other => panic!("expected Nack, got {other:?}"),

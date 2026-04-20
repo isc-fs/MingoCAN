@@ -13,34 +13,21 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use can_flasher::cli::{self, Cli, Command};
+use can_flasher::cli::{self, Cli, Command, ExitCodeHint};
 use can_flasher::logging;
 
-/// Exit codes. Mirrors the table in REQUIREMENTS.md — keep them in
-/// sync.
+/// Top-level exit codes. Mirrors the table in REQUIREMENTS.md —
+/// keep in sync with [`ExitCodeHint`] in `cli/mod.rs`.
 ///
-/// All variants except `Ok` and `GenericError` are reserved for
-/// structured-error downcasting that lands with the first real
-/// subcommand implementation. `#[expect(dead_code)]` is the
-/// forward-looking form: clippy will flag it as soon as a variant
-/// starts being constructed, reminding us to drop the attribute.
+/// Subcommands that want a specific exit code attach a matching
+/// `ExitCodeHint` to their `anyhow::Error` via `cli::exit_err`;
+/// everything else falls back to `GenericError` (99). Codes `5` and
+/// `6` are reserved for Phase-5 security work (signature fail,
+/// replay counter reject).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug)]
-#[expect(
-    dead_code,
-    reason = "reserved exit-code variants, wired up per-subcommand from feat/3 onward"
-)]
 enum ExitCodeValue {
     Ok = 0,
-    FlashError = 1,
-    VerifyMismatch = 2,
-    ProtectionViolation = 3,
-    DeviceNotFound = 4,
-    // 5 (signature failed) — reserved for v2 / Phase-5.
-    // 6 (replay counter) — reserved for v2 / Phase-5.
-    WrpNotApplied = 7,
-    InputFileError = 8,
-    AdapterMissing = 9,
     GenericError = 99,
 }
 
@@ -77,7 +64,7 @@ fn main() -> ExitCode {
             // to attach progressively richer explanations as the call
             // stack deepens; printing the whole chain preserves that.
             eprintln!("error: {err:#}");
-            map_error_to_exit_code(&err).into()
+            map_error_to_exit_code(&err)
         }
     }
 }
@@ -94,14 +81,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-/// Map an `anyhow::Error` to one of the exit codes from
-/// REQUIREMENTS.md. Until the subcommands attach structured error
-/// types (v2-ish), every error lands as `GenericError`. The table is
-/// already in place so later branches can attach a downcastable
-/// `FlasherError` and have the exit code line up automatically.
-fn map_error_to_exit_code(_err: &anyhow::Error) -> ExitCodeValue {
-    // TODO(feat/3+): downcast to typed error variants and return the
-    // specific code. Keeping this as a single-arm today so the
-    // behaviour is obvious in the skeleton.
-    ExitCodeValue::GenericError
+/// Walk the error chain looking for an [`ExitCodeHint`] marker. If
+/// found, return its mapped exit code; otherwise fall back to
+/// `GenericError` (99). This is how subcommands request a specific
+/// exit code without the CLI layer owning a per-subcommand error
+/// taxonomy.
+fn map_error_to_exit_code(err: &anyhow::Error) -> ExitCode {
+    for cause in err.chain() {
+        if let Some(hint) = cause.downcast_ref::<ExitCodeHint>() {
+            return ExitCode::from(hint.exit_code());
+        }
+    }
+    ExitCodeValue::GenericError.into()
 }

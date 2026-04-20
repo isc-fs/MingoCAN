@@ -305,6 +305,26 @@ impl Session {
         self.send_raw(payload, MessageType::Cmd).await
     }
 
+    /// Like [`Session::send_command`] but sends to `dst` instead of
+    /// the session's configured `target_node`. Used by `discover`:
+    /// after a broadcast collects replies from multiple nodes, each
+    /// responder gets follow-up `GET_FW_INFO` / `GET_HEALTH` pings
+    /// routed individually without reattaching the session.
+    ///
+    /// The broader session state (keepalive, reconnect-on-BAD_SESSION,
+    /// notification routing) is unaffected — this is purely a
+    /// per-call destination override.
+    pub async fn send_command_to(&self, dst: u8, payload: &[u8]) -> Result<Response, SessionError> {
+        let _guard = self.inner.command_lock.lock().await;
+        self.send_frames(payload, MessageType::Cmd, dst).await?;
+        let mut rx = self.inner.reply_rx.lock().await;
+        match timeout(self.config.command_timeout, rx.recv()).await {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => Err(SessionError::RxClosed),
+            Err(_) => Err(SessionError::CommandTimeout(self.config.command_timeout)),
+        }
+    }
+
     /// Like [`Session::send_command`], but for session-gated opcodes:
     /// on `NACK(BAD_SESSION)`, reconnect and retry the command once.
     /// If the retry still fails (or the reconnect fails) the error
@@ -736,8 +756,11 @@ mod tests {
     async fn send_command_to_unknown_opcode_returns_nack() {
         let (session, cancel, handle) = spawn_session_and_stub().await;
         session.connect().await.unwrap();
-        // FLASH_ERASE isn't implemented by the stub — it'll NACK(UNSUPPORTED).
-        let payload = crate::protocol::commands::cmd_flash_erase(0x0802_0000, 0x2_0000);
+        // Opcode 0x20 isn't defined in `CommandOpcode` — the stub's
+        // dispatch takes the `Err(_) → NACK(UNSUPPORTED)` branch.
+        // (Every defined opcode has a stub handler now; testing the
+        // "unknown opcode" fallthrough means reaching for a raw byte.)
+        let payload = vec![0x20u8];
         let resp = session.send_command(&payload).await.unwrap();
         match resp {
             Response::Nack { code, .. } => assert_eq!(code, NackCode::Unsupported),
