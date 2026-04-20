@@ -26,7 +26,7 @@ sequencing against the bootloader counterpart at
 | 1 | Spec + scaffolding | ✅ done `feat/1-requirements-v1` · ✅ done `feat/2-cargo-skeleton` | `v0.1.0-spec` |
 | 2 | Protocol + transport | ✅ done `feat/3-protocol-core` · ✅ done `feat/4-virtual-backend` · ✅ done `feat/5-slcan-backend` · ✅ done `feat/6-socketcan-backend` · ✅ done `feat/7-pcan-backend` | `v0.2.0-transport` |
 | 3 | Session + adapters subcommand | ✅ done `feat/8-adapter-detect` · ✅ done `feat/9-session-lifecycle` | `v0.3.0-session` |
-| 4 | Remaining subcommands | ✅ done `feat/10-discover-subcommand` · ✅ done `feat/11-diagnose-subcommand` · ✅ done `feat/12-verify-subcommand` · ✅ done `feat/13-config-subcommand` · 🔜 planned `feat/14-replay-subcommand` | `v0.4.0-subcommands` |
+| 4 | Remaining subcommands | ✅ done `feat/10-discover-subcommand` · ✅ done `feat/11-diagnose-subcommand` · ✅ done `feat/12-verify-subcommand` · ✅ done `feat/13-config-subcommand` · ✅ done `feat/14-replay-subcommand` | `v0.4.0-subcommands` |
 | 5 | Flash pipeline | 🔜 planned `feat/15-firmware-loader` · 🔜 planned `feat/16-flash-manager` · 🔜 planned `feat/17-flash-subcommand` | `v1.0.0` |
 | — | Plantilla sync _(sidequest)_ | ✅ done `feat/1-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` | — |
 
@@ -109,7 +109,7 @@ gitGraph
     checkout dev
     merge feat/13-config-subcommand
     branch feat/14-replay-subcommand
-    commit id: "○ record / run against VirtualBackend (candump format)"
+    commit id: "✔ record / run against VirtualBackend (candump format)"
     checkout dev
     merge feat/14-replay-subcommand
     checkout main
