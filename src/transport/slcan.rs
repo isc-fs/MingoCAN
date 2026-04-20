@@ -96,10 +96,21 @@ const RX_QUEUE_DEPTH: usize = 256;
 
 // ---- USB VID/PID hints for the `adapters` subcommand ----
 
+/// Canonical CANable (normaldotcom/canable-fw slcan build, flashed
+/// by the official canable.io updater onto CANable 1.x boards).
 const USB_VID_CANABLE: u16 = 0x1D50;
 const USB_PID_CANABLE: u16 = 0x606F;
+
+/// CANtact Pro — FTDI-based SLCAN adapter.
 const USB_VID_CANTACT: u16 = 0x0403;
 const USB_PID_CANTACT: u16 = 0x6015;
+
+/// normaldotcom/canable-fw slcan build as shipped by **Protofusion
+/// Labs** (CANable 2.0 retail). Wire protocol is identical; only the
+/// USB descriptor differs from the canonical CANable. Discovered in
+/// the wild on an IFS08 dev bench; see fix/5-slcan-canable-forks.
+const USB_VID_PROTOFUSION_CANABLE: u16 = 0xAD50;
+const USB_PID_PROTOFUSION_CANABLE: u16 = 0x60C4;
 
 /// Best-effort description of an enumerated SLCAN candidate.
 #[derive(Debug, Clone)]
@@ -122,11 +133,7 @@ pub fn detect() -> Vec<SlcanAdapterInfo> {
         .filter_map(|p| {
             match &p.port_type {
                 SerialPortType::UsbPort(usb) => {
-                    let is_known = matches!(
-                        (usb.vid, usb.pid),
-                        (USB_VID_CANABLE, USB_PID_CANABLE) | (USB_VID_CANTACT, USB_PID_CANTACT),
-                    );
-                    if !is_known {
+                    if !looks_like_slcan(usb.vid, usb.pid, usb.product.as_deref()) {
                         return None;
                     }
                     let description = slcan_description_for(&p.port_name, usb);
@@ -145,6 +152,31 @@ pub fn detect() -> Vec<SlcanAdapterInfo> {
         .collect()
 }
 
+/// Decide whether a USB serial port looks like a SLCAN adapter.
+/// Two signals, tried in order:
+///
+/// 1. **Known VID/PID pair** — canonical CANable, CANtact, or the
+///    Protofusion Labs CANable fork. Fast path, no allocation.
+/// 2. **Product-name substring match** on `"canable"` / `"cantact"`
+///    (case-insensitive) — catches future forks whose VID/PID we
+///    haven't catalogued yet. Users with a brand-new clone still
+///    get a working `adapters` listing; the backend doesn't care
+///    about VID/PID, it just opens the port.
+///
+/// Conservative enough that a random CDC-ACM serial port (Arduino,
+/// USB modem, …) doesn't pollute the list; generous enough that a
+/// new firmware fork works out of the box.
+fn looks_like_slcan(vid: u16, pid: u16, product: Option<&str>) -> bool {
+    match (vid, pid) {
+        (USB_VID_CANABLE, USB_PID_CANABLE)
+        | (USB_VID_CANTACT, USB_PID_CANTACT)
+        | (USB_VID_PROTOFUSION_CANABLE, USB_PID_PROTOFUSION_CANABLE) => return true,
+        _ => {}
+    }
+    let name = product.unwrap_or("").to_ascii_lowercase();
+    name.contains("canable") || name.contains("cantact")
+}
+
 fn slcan_description_for(channel: &str, usb: &serialport::UsbPortInfo) -> String {
     let product = usb.product.as_deref().unwrap_or("");
     let manufacturer = usb.manufacturer.as_deref().unwrap_or("");
@@ -153,7 +185,8 @@ fn slcan_description_for(channel: &str, usb: &serialport::UsbPortInfo) -> String
         (false, true) => manufacturer.to_string(),
         (true, false) => product.to_string(),
         _ => match (usb.vid, usb.pid) {
-            (USB_VID_CANABLE, USB_PID_CANABLE) => "CANable".to_string(),
+            (USB_VID_CANABLE, USB_PID_CANABLE)
+            | (USB_VID_PROTOFUSION_CANABLE, USB_PID_PROTOFUSION_CANABLE) => "CANable".to_string(),
             (USB_VID_CANTACT, USB_PID_CANTACT) => "CANtact".to_string(),
             _ => "SLCAN adapter".to_string(),
         },
@@ -750,5 +783,115 @@ mod tests {
         assert!(bitrate_command(33_333).is_none());
         assert!(bitrate_command(250_001).is_none());
         assert!(bitrate_command(0).is_none());
+    }
+
+    // ---- Detection filter ----
+
+    #[test]
+    fn looks_like_slcan_accepts_canonical_canable() {
+        assert!(looks_like_slcan(
+            USB_VID_CANABLE,
+            USB_PID_CANABLE,
+            Some("CANable"),
+        ));
+    }
+
+    #[test]
+    fn looks_like_slcan_accepts_canonical_cantact() {
+        assert!(looks_like_slcan(
+            USB_VID_CANTACT,
+            USB_PID_CANTACT,
+            Some("CANtact Pro"),
+        ));
+    }
+
+    #[test]
+    fn looks_like_slcan_accepts_protofusion_labs_canable_fork() {
+        // The Protofusion Labs / normaldotcom CANable build — same
+        // slcan protocol, different USB descriptor. This is the
+        // variant that triggered fix/5; the literal product name
+        // is the one the CANable 2.0 we tested on actually emits.
+        assert!(looks_like_slcan(
+            USB_VID_PROTOFUSION_CANABLE,
+            USB_PID_PROTOFUSION_CANABLE,
+            Some("CANable 9fddea4 github_com_norm"),
+        ));
+    }
+
+    #[test]
+    fn looks_like_slcan_accepts_unknown_vid_pid_with_canable_in_product_name() {
+        // Future fork with yet another VID/PID but the brand name
+        // still in the descriptor. Better to show it than hide it —
+        // the backend opens the port regardless of VID/PID.
+        assert!(looks_like_slcan(
+            0x1234,
+            0x5678,
+            Some("Random CANable Clone v7"),
+        ));
+        assert!(looks_like_slcan(0x0000, 0x0000, Some("Some CANtact Mk2")));
+    }
+
+    #[test]
+    fn looks_like_slcan_is_case_insensitive_on_product_name() {
+        assert!(looks_like_slcan(0x0000, 0x0000, Some("canable")));
+        assert!(looks_like_slcan(0x0000, 0x0000, Some("CANABLE")));
+        assert!(looks_like_slcan(0x0000, 0x0000, Some("CANtAcT")));
+    }
+
+    #[test]
+    fn looks_like_slcan_rejects_unrelated_usb_serial_device() {
+        // Arduino / ESP / generic modem with no CANable hint —
+        // don't pollute the list.
+        assert!(!looks_like_slcan(0x2341, 0x0043, Some("Arduino Uno")));
+        assert!(!looks_like_slcan(0x0000, 0x0000, None));
+        assert!(!looks_like_slcan(0x0000, 0x0000, Some("USB Modem ACM")));
+    }
+
+    // ---- Description formatter ----
+
+    fn usb_info(
+        vid: u16,
+        pid: u16,
+        manufacturer: Option<&str>,
+        product: Option<&str>,
+    ) -> serialport::UsbPortInfo {
+        serialport::UsbPortInfo {
+            vid,
+            pid,
+            serial_number: None,
+            manufacturer: manufacturer.map(str::to_string),
+            product: product.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn description_labels_protofusion_labs_canable_cleanly() {
+        // With both strings present the formatter takes the
+        // "{manufacturer} {product}" path — verify it doesn't mangle
+        // the Protofusion descriptor.
+        let usb = usb_info(
+            USB_VID_PROTOFUSION_CANABLE,
+            USB_PID_PROTOFUSION_CANABLE,
+            Some("Protofusion Labs"),
+            Some("CANable 9fddea4 github_com_norm"),
+        );
+        let desc = slcan_description_for("/dev/cu.usbmodem1101", &usb);
+        assert!(desc.starts_with("Protofusion Labs CANable"), "got: {desc}");
+        assert!(desc.contains("USB ad50:60c4"), "got: {desc}");
+    }
+
+    #[test]
+    fn description_falls_back_to_canable_label_when_strings_missing() {
+        // USB descriptor with no product/manufacturer strings —
+        // the Protofusion VID/PID should still yield "CANable" not
+        // the generic "SLCAN adapter".
+        let usb = usb_info(
+            USB_VID_PROTOFUSION_CANABLE,
+            USB_PID_PROTOFUSION_CANABLE,
+            None,
+            None,
+        );
+        let desc = slcan_description_for("/dev/cu.usbmodem1101", &usb);
+        assert!(desc.starts_with("CANable"), "got: {desc}");
     }
 }
