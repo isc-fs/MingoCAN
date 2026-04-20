@@ -82,16 +82,22 @@ use super::{CanBackend, Result, TransportError};
 const SERIAL_BAUD: u32 = 2_000_000;
 
 /// How long each reader-side serial read blocks before returning
-/// with `ErrorKind::TimedOut`. **Critical latency knob**: the reader
-/// thread holds the serial port's std mutex while `port.read()` is
-/// blocked, so any concurrent TX from the async `send()` path has
-/// to wait up to this long for the reader to release the lock.
-/// 1 ms is aggressive but safe — the kernel buffers received bytes
-/// while the reader is off the mutex, so we're never in danger of
-/// missing a frame. The reader thread wakes ~1000 times/second
-/// when the bus is quiet, which is negligible CPU for the latency
-/// win (~50 ms → ~1 ms of TX-vs-RX interleave stall, per frame).
-const READ_TIMEOUT: Duration = Duration::from_millis(1);
+/// with `ErrorKind::TimedOut`. Since we split the port into
+/// independent reader/writer handles via `try_clone` at open time,
+/// the reader's read no longer contends with the writer's write —
+/// so this can be a comfortable value without hurting TX latency.
+/// We still keep it short (50 ms) so shutdown / cancellation is
+/// responsive.
+const READ_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Minimum interval between successive TX frames. See `send()` for
+/// why: we're feeding SLCAN-over-USB faster than the CANable can
+/// actually emit on the bus (100 µs serial-write vs 230 µs classic
+/// CAN wire time), which overflows the adapter's TX buffer on
+/// multi-frame ISO-TP bursts. 1 ms pacing puts us at ~1 kHz TX rate,
+/// comfortably below the 4 kHz bus ceiling and below any reasonable
+/// CANable firmware's drain rate.
+const PACING_INTERVAL: Duration = Duration::from_millis(1);
 
 /// How long the open sequence waits to see an adapter's command
 /// response (`\r` for success, `\x07` for failure). Two kinds of
@@ -226,8 +232,20 @@ fn slcan_description_for(channel: &str, usb: &serialport::UsbPortInfo) -> String
 
 /// Opens a serial port, drives the SLCAN open handshake, and spawns
 /// a reader thread that decodes incoming frames into a Tokio channel.
+///
+/// **Port split**: at open time we call [`SerialPort::try_clone`] to
+/// produce two independent handles to the same underlying USB serial
+/// device. The reader thread owns one handle (reads only); the
+/// writer uses the other (writes only, behind a std mutex to
+/// serialise concurrent `send()` tasks). Before this split, both
+/// directions competed for a single mutex, and the reader's blocking
+/// `read()` — which on macOS has ~100 ms termios granularity
+/// regardless of the configured timeout — would starve the writer
+/// mid-ISO-TP burst for hundreds of ms. On a multi-frame flash
+/// write that stalled the CFs past the bootloader's 1 s reassembly
+/// deadline, producing spurious `NACK(TRANSPORT_TIMEOUT)` errors.
 pub struct SlcanBackend {
-    port: Arc<StdMutex<Box<dyn SerialPort>>>,
+    writer_port: Arc<StdMutex<Box<dyn SerialPort>>>,
     rx: Arc<TokioMutex<mpsc::Receiver<CanFrame>>>,
     shutdown: Arc<AtomicBool>,
     reader_handle: StdMutex<Option<thread::JoinHandle<()>>>,
@@ -274,19 +292,36 @@ impl SlcanBackend {
         debug!(channel, "SLCAN open: opening channel");
         send_command_and_wait_ack(&mut *port, "O\r")?;
 
-        // Switch to the short reader timeout now that the handshake is done.
-        port.set_timeout(READ_TIMEOUT)
+        // Split the port into independent reader/writer handles.
+        // `try_clone` returns a new OS file descriptor pointing at the
+        // same underlying USB serial device. The kernel serialises
+        // read/write syscalls on the device internally, so it's safe
+        // for the reader thread to block in `read()` while a concurrent
+        // `write_all()` runs on the writer handle — they no longer
+        // serialise through a user-space mutex. This is the
+        // difference between a mid-burst TX stall of ~1 ms (kernel
+        // scheduler) and ~500 ms (reader holding the std mutex
+        // across macOS's termios 100 ms minimum read timeout).
+        let mut reader_port = port.try_clone().map_err(|e| TransportError::InvalidChannel {
+            channel: channel.to_string(),
+            reason: format!("could not clone serial port for reader: {e}"),
+        })?;
+
+        // Reader uses the short timeout (shutdown latency); writer
+        // keeps a longer default since it only blocks in the open
+        // handshake path which has its own deadline.
+        reader_port
+            .set_timeout(READ_TIMEOUT)
             .map_err(|e| TransportError::InvalidChannel {
                 channel: channel.to_string(),
-                reason: format!("could not set read timeout: {e}"),
+                reason: format!("could not set reader timeout: {e}"),
             })?;
 
         let description = format!("SLCAN on {channel} @ {nominal_bps} bps");
-        let port = Arc::new(StdMutex::new(port));
+        let writer_port = Arc::new(StdMutex::new(port));
         let shutdown = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel(RX_QUEUE_DEPTH);
 
-        let reader_port = Arc::clone(&port);
         let reader_shutdown = Arc::clone(&shutdown);
         let reader_handle = thread::Builder::new()
             .name("slcan-reader".into())
@@ -294,7 +329,7 @@ impl SlcanBackend {
             .map_err(|e| TransportError::Other(format!("spawn reader thread: {e}")))?;
 
         Ok(Self {
-            port,
+            writer_port,
             rx: Arc::new(TokioMutex::new(rx)),
             shutdown,
             reader_handle: StdMutex::new(Some(reader_handle)),
@@ -306,8 +341,14 @@ impl SlcanBackend {
 #[async_trait]
 impl CanBackend for SlcanBackend {
     async fn send(&self, frame: CanFrame) -> Result<()> {
+        trace!(
+            id = format!("0x{:03X}", frame.id),
+            len = frame.len,
+            data = format!("{:02X?}", frame.payload()),
+            "slcan TX"
+        );
         let encoded = encode_frame(&frame)?;
-        let port = Arc::clone(&self.port);
+        let port = Arc::clone(&self.writer_port);
 
         // Serial I/O is blocking; hand it to the blocking pool so we
         // don't stall the async runtime.
@@ -315,15 +356,10 @@ impl CanBackend for SlcanBackend {
         // No explicit `port.flush()` after `write_all`: on macOS
         // USB-serial, `flush()` calls `tcdrain()` which waits for
         // the kernel output buffer to fully drain over the USB OUT
-        // endpoint (1–4 ms per USB frame × however many endpoint
-        // polls it takes to ship our bytes — often 10–50 ms per
-        // call in practice). `write_all` already pushes the bytes
-        // into the kernel buffer; the USB driver will deliver them
-        // over the wire asynchronously. The only case where flush
-        // would matter is if the process exits immediately after
-        // send — but for our workflow every send is followed by a
-        // recv for the reply, so we'd block on the reply long after
-        // the kernel has shipped the TX.
+        // endpoint (often 10–50 ms per call in practice). For our
+        // workflow every send is followed by a recv for the reply,
+        // so the kernel has ample time to ship the TX before we
+        // need the reply.
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut port = port
                 .lock()
@@ -332,7 +368,26 @@ impl CanBackend for SlcanBackend {
             Ok(())
         })
         .await
-        .map_err(|e| TransportError::Other(format!("spawn_blocking join failed: {e}")))?
+        .map_err(|e| TransportError::Other(format!("spawn_blocking join failed: {e}")))??;
+
+        // Inter-frame pacing. On a 500 kbps CAN bus each 8-byte
+        // classic frame takes ~230 µs wire time; at 2 Mbps serial we
+        // can push a `t...\r` command in ~100 µs, i.e. faster than
+        // the CANable can transmit it onto the bus. Without pacing,
+        // bursts of ≥ ~8 frames (e.g. the CFs of a 64-byte
+        // `CMD_FLASH_WRITE`) overflow the CANable's internal TX
+        // buffer and get silently dropped, which manifests on the
+        // bootloader side as an ISO-TP reassembly timeout
+        // (`NACK(TRANSPORT_TIMEOUT)`).
+        //
+        // A 1 ms sleep between frames caps host TX rate at ~1 kHz —
+        // well below bus wire rate (~4 kHz for 8-byte classic CAN at
+        // 500 kbps) but slow enough that CANables with conservative
+        // buffering never drop. One-off commands pay 1 ms we'd
+        // barely notice; bursts (the CFs of a multi-frame command)
+        // scale linearly, which is the price for reliability.
+        tokio::time::sleep(PACING_INTERVAL).await;
+        Ok(())
     }
 
     async fn recv(&self, timeout: Duration) -> Result<CanFrame> {
@@ -348,7 +403,7 @@ impl CanBackend for SlcanBackend {
         let bitrate_cmd = bitrate_command(nominal_bps).ok_or_else(|| {
             TransportError::Other(format!("unsupported bitrate {nominal_bps} bps"))
         })?;
-        let port = Arc::clone(&self.port);
+        let port = Arc::clone(&self.writer_port);
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut port = port
                 .lock()
@@ -373,7 +428,7 @@ impl Drop for SlcanBackend {
         self.shutdown.store(true, Ordering::SeqCst);
         // Best-effort: tell the adapter to close the CAN side. If the
         // mutex is poisoned we skip — nothing productive left to do.
-        if let Ok(mut port) = self.port.lock() {
+        if let Ok(mut port) = self.writer_port.lock() {
             let _ = port.write_all(b"C\r");
         }
         if let Ok(mut handle) = self.reader_handle.lock() {
@@ -528,7 +583,7 @@ fn bitrate_command(nominal_bps: u32) -> Option<&'static str> {
 // ---- Reader thread ----
 
 fn reader_loop(
-    port: Arc<StdMutex<Box<dyn SerialPort>>>,
+    mut port: Box<dyn SerialPort>,
     tx: mpsc::Sender<CanFrame>,
     shutdown: Arc<AtomicBool>,
 ) {
@@ -541,16 +596,10 @@ fn reader_loop(
             return;
         }
 
-        let read_result = {
-            let mut port = match port.lock() {
-                Ok(p) => p,
-                Err(_) => {
-                    warn!("slcan reader: port mutex poisoned, exiting");
-                    return;
-                }
-            };
-            port.read(&mut scratch)
-        };
+        // No mutex around the port any more: the reader owns an
+        // independent `try_clone` handle, so this blocking read
+        // cannot starve concurrent writes.
+        let read_result = port.read(&mut scratch);
 
         match read_result {
             Ok(0) => continue, // No bytes available; loop back and re-check shutdown.
@@ -559,6 +608,12 @@ fn reader_loop(
                     if byte == b'\r' {
                         match parse_line(&line_buf) {
                             Ok(SlcanLine::Frame(frame)) => {
+                                trace!(
+                                    id = format!("0x{:03X}", frame.id),
+                                    len = frame.len,
+                                    data = format!("{:02X?}", frame.payload()),
+                                    "slcan RX"
+                                );
                                 if tx.blocking_send(frame).is_err() {
                                     // Receiver dropped — backend is gone.
                                     return;

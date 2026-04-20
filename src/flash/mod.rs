@@ -58,7 +58,7 @@ pub const FLASHWORD_SIZE: u32 = 32;
 /// Default bytes per `CMD_FLASH_WRITE` payload. Matches
 /// REQUIREMENTS.md § Write chunk size — 256 B, i.e. one ISO-TP
 /// FF + ~37 CFs at 8-byte frames on classic CAN.
-pub const DEFAULT_WRITE_CHUNK: usize = 256;
+pub const DEFAULT_WRITE_CHUNK: usize = 128;
 
 /// Tunable knobs for a single [`FlashManager::run`] invocation.
 ///
@@ -663,7 +663,7 @@ mod tests {
         assert!(!cfg.dry_run);
         assert!(cfg.verify_after);
         assert!(cfg.final_commit);
-        assert_eq!(cfg.write_chunk_size, 256);
+        assert_eq!(cfg.write_chunk_size, DEFAULT_WRITE_CHUNK);
     }
 
     #[test]
