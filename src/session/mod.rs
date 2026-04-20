@@ -756,12 +756,11 @@ mod tests {
     async fn send_command_to_unknown_opcode_returns_nack() {
         let (session, cancel, handle) = spawn_session_and_stub().await;
         session.connect().await.unwrap();
-        // `CMD_JUMP` isn't implemented by the stub — any opcode the
-        // stub doesn't route takes the `NACK(UNSUPPORTED)` fallthrough.
-        // (FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC used to hit the
-        // same path but gained real handlers in feat/16, so the test
-        // has to pick a still-unimplemented opcode.)
-        let payload = crate::protocol::commands::cmd_jump(0x0802_0000);
+        // Opcode 0x20 isn't defined in `CommandOpcode` — the stub's
+        // dispatch takes the `Err(_) → NACK(UNSUPPORTED)` branch.
+        // (Every defined opcode has a stub handler now; testing the
+        // "unknown opcode" fallthrough means reaching for a raw byte.)
+        let payload = vec![0x20u8];
         let resp = session.send_command(&payload).await.unwrap();
         match resp {
             Response::Nack { code, .. } => assert_eq!(code, NackCode::Unsupported),

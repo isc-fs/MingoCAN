@@ -314,6 +314,7 @@ impl StubDevice {
                     .await
             }
             Ok(CommandOpcode::Reset) => self.handle_reset(peer, payload).await,
+            Ok(CommandOpcode::Jump) => self.handle_jump(peer, payload).await,
             Ok(CommandOpcode::ObRead) => self.handle_ob_read(peer).await,
             Ok(CommandOpcode::ObApplyWrp) => self.handle_ob_apply_wrp(peer, payload).await,
             Ok(CommandOpcode::NvmRead) => self.handle_nvm_read(peer, payload).await,
@@ -448,6 +449,22 @@ impl StubDevice {
                 .await;
         }
         let resp = [CommandOpcode::Reset.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// `CMD_JUMP` takes a 4-byte little-endian target address. Real
+    /// hardware ACKs and then jumps to the application reset vector;
+    /// the stub just ACKs so host-side flash pipelines (feat/17)
+    /// don't error out on the post-flash JUMP. We don't validate
+    /// the address — the host tool always sends `BL_APP_BASE` and
+    /// the bootloader itself decides whether to honour it.
+    async fn handle_jump(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        if payload.len() < 5 {
+            return self
+                .send_nack(peer, CommandOpcode::Jump.as_byte(), NackCode::Unsupported)
+                .await;
+        }
+        let resp = [CommandOpcode::Jump.as_byte()];
         self.send_message(peer, MessageType::Ack, &resp).await
     }
 

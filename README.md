@@ -15,9 +15,9 @@ the bootloader's classic-CAN protocol through SLCAN adapters
 
 ## Status
 
-In active development — targeting **v1.0.0** alongside the bootloader.
-Six of seven subcommands are live; the flash pipeline (`feat/15`–
-`feat/17`) is the last stretch per [ROADMAP.md](ROADMAP.md).
+**v1.0.0** — all 7 subcommands are live and the full host-side
+flasher is feature-complete against the v1.0.0 bootloader contract.
+See [ROADMAP.md](ROADMAP.md) for phase-by-phase history.
 
 | Subcommand | Status |
 |-----------|:------:|
@@ -27,7 +27,7 @@ Six of seven subcommands are live; the flash pipeline (`feat/15`–
 | `config` — NVM read/write + option bytes + WRP apply | ✅ live |
 | `verify` — compare installed image against a binary | ✅ live |
 | `replay` — record / replay CAN sessions for testing | ✅ live |
-| `flash` — program firmware end-to-end | 🔜 `feat/15`–`feat/17` |
+| `flash` — program firmware end-to-end | ✅ live |
 
 ---
 
@@ -157,10 +157,9 @@ Global Options:
       --operator <NAME>     Override operator name in audit log
 ```
 
-Each subcommand has its own `--help` with detailed arguments. `flash`
-is the remaining stub and returns a "not implemented" message naming
-the feat branch that will implement it — so you can always see what's
-still blocking.
+Each subcommand has its own `--help` with detailed arguments. The
+audit-log (`--log`) plumbing is stubbed — the flag parses but the
+SQLite sink is deferred to post-v1 per ROADMAP.md.
 
 Full flag reference + JSON schemas + exit code table:
 [REQUIREMENTS.md § CLI interface](REQUIREMENTS.md#cli-interface) and
