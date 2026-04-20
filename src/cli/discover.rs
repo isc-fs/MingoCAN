@@ -108,7 +108,11 @@ pub async fn run(args: DiscoverArgs, global: &GlobalFlags) -> Result<()> {
 
     let broadcast_window = Duration::from_millis(u64::from(args.timeout_ms));
     let replies = session
-        .broadcast(&cmd_discover(), MessageType::Discover, broadcast_window)
+        .broadcast(
+            &cmd_discover(),
+            MessageType::DiscoverRequest,
+            broadcast_window,
+        )
         .await
         .context("broadcasting CMD_DISCOVER")?;
 

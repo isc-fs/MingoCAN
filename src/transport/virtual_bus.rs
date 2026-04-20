@@ -243,8 +243,13 @@ mod tests {
     use crate::protocol::FrameId;
     use crate::protocol::MessageType;
 
-    fn make_frame(message_type: MessageType, dst: u8, payload: &[u8]) -> CanFrame {
-        let id = FrameId::from_host(message_type, dst).unwrap().encode();
+    fn host_to_node_frame(dst: u8, payload: &[u8]) -> CanFrame {
+        let id = FrameId::from_host(dst).unwrap().encode();
+        CanFrame::new(id, payload).unwrap()
+    }
+
+    fn node_to_host_frame(src: u8, payload: &[u8]) -> CanFrame {
+        let id = FrameId::from_node(src).unwrap().encode();
         CanFrame::new(id, payload).unwrap()
     }
 
@@ -254,7 +259,8 @@ mod tests {
         let host = bus.host_backend();
         let device = bus.device_backend();
 
-        let frame = make_frame(MessageType::Cmd, 0x3, &[0x01, 0, 1]);
+        // SF CMD to node 0x3: [PCI_SF|len=3, MSG_CMD=0x00, opcode=0x01, arg=0x01]
+        let frame = host_to_node_frame(0x3, &[0x03, MessageType::Cmd.as_byte(), 0x01, 0x01]);
         host.send(frame).await.unwrap();
 
         let got = device.recv(Duration::from_millis(100)).await.unwrap();
@@ -267,7 +273,8 @@ mod tests {
         let host = bus.host_backend();
         let device = bus.device_backend();
 
-        let frame = make_frame(MessageType::Ack, 0x0, &[0x01, 0, 1]);
+        // SF ACK from node 0x3: [PCI_SF|len=2, MSG_ACK=0x01, opcode=0x01]
+        let frame = node_to_host_frame(0x3, &[0x02, MessageType::Ack.as_byte(), 0x01]);
         device.send(frame).await.unwrap();
 
         let got = host.recv(Duration::from_millis(100)).await.unwrap();
@@ -293,7 +300,7 @@ mod tests {
         // device_rx Arc. Without either holding on, the mpsc receiver
         // goes away and host send fails.
         drop(bus);
-        let frame = make_frame(MessageType::Cmd, 0x3, &[]);
+        let frame = host_to_node_frame(0x3, &[]);
         let err = host.send(frame).await.unwrap_err();
         assert!(matches!(err, TransportError::Disconnected));
     }
@@ -304,8 +311,8 @@ mod tests {
         let host = bus.host_backend();
         let device = bus.device_backend();
 
-        let f1 = make_frame(MessageType::Cmd, 0x3, &[0x01]);
-        let f2 = make_frame(MessageType::Cmd, 0x3, &[0x02]);
+        let f1 = host_to_node_frame(0x3, &[0x01]);
+        let f2 = host_to_node_frame(0x3, &[0x02]);
         host.send(f1).await.unwrap();
         host.send(f2).await.unwrap();
 
@@ -319,7 +326,7 @@ mod tests {
         let host = bus.host_backend();
         let _device = bus.device_backend();
 
-        let frame = make_frame(MessageType::Cmd, 0x3, &[0x01]);
+        let frame = host_to_node_frame(0x3, &[0x01]);
         host.send(frame).await.unwrap();
 
         // Host's own send should not echo back into its recv. We wait

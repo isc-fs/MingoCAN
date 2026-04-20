@@ -86,7 +86,7 @@ async fn discover_broadcast_elicits_discover_reply() {
     let replies = session
         .broadcast(
             &can_flasher::protocol::commands::cmd_discover(),
-            MessageType::Discover,
+            MessageType::DiscoverRequest,
             COLLECT_WINDOW,
         )
         .await

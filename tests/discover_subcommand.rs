@@ -55,7 +55,7 @@ async fn broadcast_discover_finds_stub() {
     let replies = session
         .broadcast(
             &cmd_discover(),
-            MessageType::Discover,
+            MessageType::DiscoverRequest,
             Duration::from_millis(150),
         )
         .await

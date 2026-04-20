@@ -68,7 +68,7 @@ use crate::protocol::commands::{
 use crate::protocol::ids::{FrameId, MessageType};
 use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
 use crate::protocol::opcodes::{CommandOpcode, NackCode};
-use crate::protocol::{CanFrame, Response, BROADCAST_NODE_ID, HOST_NODE_ID};
+use crate::protocol::{CanFrame, Response, BROADCAST_NODE_ID};
 use crate::transport::{CanBackend, TransportError};
 
 /// Everything this layer can fail with. Wraps the lower-level
@@ -454,20 +454,25 @@ impl Session {
         message_type: MessageType,
         dst: u8,
     ) -> Result<(), SessionError> {
-        let segmenter = IsoTpSegmenter::new(payload).map_err(|e| {
+        // New wire format (fix/12): the ID no longer carries the
+        // message type — it's prepended as the first byte of the
+        // payload. Every frame (FF + CFs) shares the same
+        // host→node ID; the PCI byte tells the receiver which frame
+        // of the ISO-TP sequence it's looking at.
+        let mut framed = Vec::with_capacity(1 + payload.len());
+        framed.push(message_type.as_byte());
+        framed.extend_from_slice(payload);
+
+        let segmenter = IsoTpSegmenter::new(&framed).map_err(|e| {
             SessionError::Transport(TransportError::Other(format!(
                 "session: payload rejected by segmenter: {e}"
             )))
         })?;
-        let initial_id = FrameId::new(message_type, HOST_NODE_ID, dst)
-            .expect("valid node ids")
-            .encode();
-        let cf_id = FrameId::new(MessageType::Data, HOST_NODE_ID, dst)
-            .expect("valid node ids")
+        let id = FrameId::from_host(dst)
+            .expect("dst fits in 4 bits")
             .encode();
 
-        for (idx, frame_bytes) in segmenter.enumerate() {
-            let id = if idx == 0 { initial_id } else { cf_id };
+        for frame_bytes in segmenter {
             let frame = CanFrame {
                 id,
                 data: frame_bytes,
@@ -564,20 +569,22 @@ async fn keepalive_tick(
     let _guard = inner.command_lock.lock().await;
     let payload = cmd_get_health();
 
-    let segmenter = IsoTpSegmenter::new(&payload).map_err(|e| {
+    // Mirrors `send_frames` — prepend msg_type, single ID for FF+CFs.
+    let mut framed = Vec::with_capacity(1 + payload.len());
+    framed.push(MessageType::Cmd.as_byte());
+    framed.extend_from_slice(&payload);
+
+    let segmenter = IsoTpSegmenter::new(&framed).map_err(|e| {
         SessionError::Transport(TransportError::Other(format!(
             "keepalive: payload rejected by segmenter: {e}"
         )))
     })?;
-    let id = FrameId::new(MessageType::Cmd, HOST_NODE_ID, inner.target_node)
-        .expect("valid node ids")
+    let id = FrameId::from_host(inner.target_node)
+        .expect("target_node fits in 4 bits")
         .encode();
-    let cf_id = FrameId::new(MessageType::Data, HOST_NODE_ID, inner.target_node)
-        .expect("valid node ids")
-        .encode();
-    for (idx, bytes) in segmenter.enumerate() {
+    for bytes in segmenter {
         let frame = CanFrame {
-            id: if idx == 0 { id } else { cf_id },
+            id,
             data: bytes,
             len: bytes.len() as u8,
         };
@@ -599,11 +606,10 @@ async fn rx_task(
     backend: Arc<dyn CanBackend>,
     reply_tx: mpsc::Sender<Response>,
     notification_tx: broadcast::Sender<Response>,
-    node_id: u8,
+    _node_id: u8,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut reasm = Reassembler::new();
-    let mut pending_msg_type: Option<MessageType> = None;
     let mut tick_start = Instant::now();
     let tick_ms = move || tick_start.elapsed().as_millis() as u64;
     // Re-borrow because closures that capture mutable state can't
@@ -629,31 +635,52 @@ async fn rx_task(
             }
         };
 
+        // Drop frames with an invalid or not-for-us ID. Under the
+        // Proposal-A layout, the host only cares about NodeToHost
+        // frames (direction bit set). Host-originated frames on the
+        // bus (our own TX echo) and malformed IDs get silently
+        // dropped here.
         let id = match FrameId::decode(frame.id) {
             Ok(id) => id,
             Err(_) => continue,
         };
-        if !id.addressed_to(HOST_NODE_ID) && !id.addressed_to(node_id) {
-            // Frame isn't for us — a real CAN bus filters by arbitration,
-            // virtual backends we talk to don't. Drop it here so the
-            // reassembler doesn't see interleaved traffic.
+        if !matches!(
+            id.direction,
+            crate::protocol::ids::FrameDirection::NodeToHost
+        ) {
+            // Either our own TX echo (HostToNode) or a malformed
+            // frame; the reassembler should never see these.
             continue;
         }
 
         let payload = frame.payload();
-        if let Some(pci_hi) = payload.first().map(|b| b & 0xF0) {
-            if pci_hi == 0x00 || pci_hi == 0x10 {
-                pending_msg_type = Some(id.message_type);
-            }
-        }
 
         match reasm.feed(payload, tick_ms()) {
             Ok(ReassembleOutcome::Ongoing) => continue,
             Ok(ReassembleOutcome::Complete(bytes)) => {
-                let msg_type = pending_msg_type.take().unwrap_or(id.message_type);
-                match Response::parse(msg_type, &bytes) {
+                // Every reassembled SF/FF message starts with the
+                // msg_type byte (fix/12 wire format). Decode it,
+                // then hand the remaining bytes to the response
+                // parser. An empty reassembly is a bug; log and drop.
+                if bytes.is_empty() {
+                    warn!("session rx: empty reassembly — dropping");
+                    continue;
+                }
+                let msg_type = match MessageType::from_byte(bytes[0]) {
+                    Ok(mt) => mt,
+                    Err(err) => {
+                        warn!(
+                            ?err,
+                            byte = bytes[0],
+                            "session rx: unknown msg_type — dropping"
+                        );
+                        continue;
+                    }
+                };
+                let inner_bytes = &bytes[1..];
+                match Response::parse(msg_type, inner_bytes) {
                     Ok(Response::Notify { .. }) => {
-                        let response = Response::parse(msg_type, &bytes).unwrap();
+                        let response = Response::parse(msg_type, inner_bytes).unwrap();
                         // Lagged subscribers get RecvError::Lagged on
                         // their next recv; we don't treat overflow as
                         // an error here.
@@ -673,7 +700,6 @@ async fn rx_task(
             }
             Err(err) => {
                 warn!(?err, "session rx: reassembler error; resetting");
-                pending_msg_type = None;
             }
         }
     }
@@ -776,7 +802,11 @@ mod tests {
         let (session, cancel, handle) = spawn_session_and_stub().await;
         let payload = crate::protocol::commands::cmd_discover();
         let replies = session
-            .broadcast(&payload, MessageType::Discover, Duration::from_millis(150))
+            .broadcast(
+                &payload,
+                MessageType::DiscoverRequest,
+                Duration::from_millis(150),
+            )
             .await
             .unwrap();
         assert_eq!(replies.len(), 1, "one stub means one discover reply");
