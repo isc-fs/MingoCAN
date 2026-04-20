@@ -86,9 +86,23 @@ const SERIAL_BAUD: u32 = 2_000_000;
 /// this long, bounding the TX path's worst-case wait.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// How long the open sequence waits for the adapter to acknowledge
-/// a command (`\r`) or error (`\x07`). Plenty for USB latency.
-const COMMAND_ACK_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long the open sequence waits to see an adapter's command
+/// response (`\r` for success, `\x07` for failure). Two kinds of
+/// real-world slcan firmware:
+///
+/// - **"Chatty"**: replies to every command with `\r` or `\x07`.
+///   The canonical slcan spec (LAWICEL AB) mandates this.
+/// - **"Silent"**: silently accepts `C` / `S<N>` / `O` with no
+///   reply. The `normaldotcom/canable-fw` firmware shipped on
+///   CANable 2.0 boards is in this camp, as are several other
+///   popular forks.
+///
+/// We treat silence as success (the firmware isn't standards-pure
+/// but the commands still take effect) and `\x07` as failure.
+/// This timeout bounds how long we'll wait for a *possible* reply
+/// before concluding the firmware is silent; short enough to keep
+/// open-time snappy, long enough to tolerate USB-FS scheduling.
+const COMMAND_ACK_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// RX queue depth. Sized for the worst-case burst of a full `DTC_READ`
 /// multi-frame reply (~92 CFs at 8 bytes) plus some safety margin.
@@ -570,21 +584,39 @@ fn reader_loop(
 fn send_command_and_wait_ack(port: &mut dyn SerialPort, command: &str) -> Result<()> {
     port.write_all(command.as_bytes())?;
     port.flush()?;
-    wait_for_ack(port, command)
+    wait_for_ack(port, command, COMMAND_ACK_TIMEOUT)
 }
 
-fn wait_for_ack(port: &mut dyn SerialPort, command: &str) -> Result<()> {
-    let deadline = std::time::Instant::now() + COMMAND_ACK_TIMEOUT;
+/// Wait for a command response, tolerating silent-success firmware.
+///
+/// Returns:
+/// - `Ok(())` on `\r` (explicit success) **or** on timeout (silent
+///   firmware — see the `COMMAND_ACK_TIMEOUT` doc-comment).
+/// - `Err(...)` on `\x07` (the adapter explicitly rejected the
+///   command) or on an I/O error other than `TimedOut`.
+///
+/// Stale bytes (anything that isn't `\r` or `\x07`) are ignored —
+/// they're typically leftover response bytes from a previous
+/// command that straddled our `drain()` window.
+///
+/// Generic over `R: Read` so the unit tests can swap in a
+/// `std::io::Cursor` without standing up a full `SerialPort` mock.
+/// Real call sites pass `&mut *port` where `port: Box<dyn SerialPort>`
+/// — `SerialPort: Read` makes the coercion free.
+fn wait_for_ack<R: Read + ?Sized>(reader: &mut R, command: &str, timeout: Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
     let mut byte = [0u8; 1];
     loop {
         if std::time::Instant::now() >= deadline {
-            return Err(TransportError::Other(format!(
-                "SLCAN: no ACK for command '{}' within {:?}",
-                command.trim_end_matches('\r'),
-                COMMAND_ACK_TIMEOUT
-            )));
+            // Silent success — the firmware doesn't ACK this command
+            // variant. See the `COMMAND_ACK_TIMEOUT` doc-comment for
+            // background. If the command actually failed, later
+            // traffic on the bus will tell us (e.g. the `discover`
+            // broadcast returning nothing → caller retries or
+            // surfaces a timeout at the session layer).
+            return Ok(());
         }
-        match port.read(&mut byte) {
+        match reader.read(&mut byte) {
             Ok(0) => continue,
             Ok(_) => match byte[0] {
                 b'\r' => return Ok(()),
@@ -893,5 +925,70 @@ mod tests {
         );
         let desc = slcan_description_for("/dev/cu.usbmodem1101", &usb);
         assert!(desc.starts_with("CANable"), "got: {desc}");
+    }
+
+    // ---- wait_for_ack: silent-firmware tolerance ----
+
+    /// Short timeout so the silent-success test doesn't slow the
+    /// suite down — we only need enough time to prove the deadline
+    /// branch fires.
+    const TEST_ACK_TIMEOUT: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn wait_for_ack_succeeds_on_carriage_return() {
+        let mut src = std::io::Cursor::new(b"\r".to_vec());
+        wait_for_ack(&mut src, "S6\r", TEST_ACK_TIMEOUT).expect("CR should be success");
+    }
+
+    #[test]
+    fn wait_for_ack_fails_on_bel_byte() {
+        // 0x07 is the BEL (alarm bell) byte — the canonical slcan
+        // "command rejected" response.
+        let mut src = std::io::Cursor::new(vec![0x07u8]);
+        let err = wait_for_ack(&mut src, "S6\r", TEST_ACK_TIMEOUT).expect_err("BEL → error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rejected command 'S6'"),
+            "error should name the rejected command, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wait_for_ack_treats_silent_source_as_success() {
+        // Empty cursor → every read returns Ok(0) → the deadline
+        // branch fires and we return Ok. This is the
+        // normaldotcom/canable-fw firmware behaviour the fix is
+        // targeting.
+        let mut src = std::io::Cursor::new(Vec::<u8>::new());
+        let before = std::time::Instant::now();
+        wait_for_ack(&mut src, "S6\r", TEST_ACK_TIMEOUT)
+            .expect("silent firmware should be treated as success");
+        let elapsed = before.elapsed();
+        // Sanity-check we actually waited for the timeout — if
+        // Ok came back immediately the logic would be wrong in
+        // the opposite direction (accepting success on EOF instead
+        // of timeout).
+        assert!(
+            elapsed >= TEST_ACK_TIMEOUT,
+            "wait_for_ack returned too early: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn wait_for_ack_ignores_stale_bytes_before_cr() {
+        // A previous command left response bytes in the buffer;
+        // the CR of the current command eventually arrives.
+        let mut src = std::io::Cursor::new(b"stale bytes\r".to_vec());
+        wait_for_ack(&mut src, "O\r", TEST_ACK_TIMEOUT)
+            .expect("stale bytes should be ignored until CR");
+    }
+
+    #[test]
+    fn wait_for_ack_reports_bel_even_after_stale_bytes() {
+        // Explicit rejection should win over silent-success even
+        // if stale bytes came first.
+        let mut src = std::io::Cursor::new(b"leftover\x07".to_vec());
+        let err = wait_for_ack(&mut src, "S99\r", TEST_ACK_TIMEOUT).expect_err("BEL → error");
+        assert!(format!("{err}").contains("rejected"));
     }
 }
