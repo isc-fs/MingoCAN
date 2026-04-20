@@ -102,6 +102,22 @@ fn make_image(sectors: u32) -> Image {
     }
 }
 
+/// Like `make_image` but with an arbitrary byte count — lets tests
+/// cover the partial-sector case where the image ends mid-sector
+/// and the flash engine has to `0xFF`-pad the tail for CRC
+/// computation (the hardware sees erased flash beyond the image).
+fn make_image_exact(bytes: usize) -> Image {
+    let mut data = Vec::with_capacity(bytes);
+    for i in 0..bytes {
+        data.push(((i & 0xFF) ^ 0x5A) as u8);
+    }
+    Image {
+        base_addr: BL_APP_BASE,
+        data,
+        fw_info: None,
+    }
+}
+
 // ---- Full flash into an erased stub ----
 
 #[tokio::test]
@@ -358,6 +374,44 @@ async fn flash_manager_emits_planning_events_via_progress_sink() {
         planning,
         vec![(1, SectorRole::Write), (2, SectorRole::Write)]
     );
+
+    tear_down(h).await;
+}
+
+// ---- Partial-sector image (regression test for fix/8) ----
+
+/// A real-world firmware rarely fills a flash sector exactly — most
+/// Cortex-M apps fit in 50-100 KB, well under the 128 KB sector.
+/// The engine has to CRC the sector's image-bytes plus `0xFF`
+/// padding out to the sector boundary, matching what the device
+/// sees after erase + partial write.
+///
+/// Pre-fix/8, `expected_sector_crc` called `sector_slice` which
+/// `unreachable!()`-panicked when the requested slice extended past
+/// `image.data.len()`. This test reproduces that path with a 50 KB
+/// image — well short of a single sector's 128 KB.
+#[tokio::test]
+async fn flash_manager_handles_partial_sector_image() {
+    let h = setup(|_| {}).await;
+    h.session.send_command(&cmd_connect_self()).await.unwrap();
+
+    // 50 KB image — lands partway into sector 1. The engine must
+    // pad the remaining ~78 KB with `0xFF` when computing the
+    // sector's expected CRC.
+    let image = make_image_exact(50 * 1024);
+    let manager = FlashManager::new(&h.session, &image, FlashConfig::default());
+
+    let report = manager
+        .run(None)
+        .await
+        .expect("partial-sector flash succeeds");
+
+    // Only sector 1 touched; it was fully rewritten (stub started
+    // erased so diff saw a mismatch regardless of padding).
+    assert_eq!(report.sectors_erased, vec![1]);
+    assert_eq!(report.sectors_written, vec![1]);
+    assert!(report.sectors_skipped.is_empty());
+    assert_eq!(report.size, 50 * 1024);
 
     tear_down(h).await;
 }
