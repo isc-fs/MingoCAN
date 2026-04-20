@@ -408,15 +408,31 @@ impl Session {
 
     /// Send `CMD_DISCONNECT`, stop keepalive, tear down the RX task.
     /// Idempotent once called; after this the `Session` is unusable.
+    ///
+    /// Fire-and-forget on the wire: we don't wait for the device's ACK,
+    /// because every single caller of `disconnect()` already discards
+    /// whatever reply would come back. Waiting would cost a full
+    /// `command_timeout` in the one case that matters — when the peer
+    /// just jumped to the application via `CMD_JUMP` and the BL is
+    /// no longer on the bus to ACK us. Firing CMD_DISCONNECT and
+    /// tearing down locally without blocking matches the existing
+    /// `let _ = …` pattern and makes the post-jump path finish in
+    /// milliseconds instead of `command_timeout` seconds.
     pub async fn disconnect(self) -> Result<(), SessionError> {
         // Best-effort: acquire the command lock to play nicely with
         // concurrent send_command, but don't deadlock if we can't.
         let _guard = self.inner.command_lock.lock().await;
         if self.connected.load(Ordering::SeqCst) {
             let payload = cmd_disconnect();
-            // Ignore the ACK — even if the device didn't hear us we
-            // still want to tear down locally.
-            let _ = self.send_raw(&payload, MessageType::Cmd).await;
+            // Send the frame but don't wait for a reply. If the BL is
+            // still alive it sees CMD_DISCONNECT and clears its session
+            // latch; if the BL has jumped to the application the
+            // frame's lost in the ether and that's fine. Any ACK that
+            // does come back lands in the reply mpsc and is dropped
+            // when we drop `self` below.
+            let _ = self
+                .send_frames(&payload, MessageType::Cmd, self.inner.target_node)
+                .await;
             self.connected.store(false, Ordering::SeqCst);
         }
         self.stop_keepalive_locked().await;
