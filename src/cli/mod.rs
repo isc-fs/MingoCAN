@@ -30,7 +30,7 @@ pub mod verify;
 ///
 /// Numeric values match `ExitCodeValue` in `main.rs`; keep the two
 /// tables in sync when new codes land.
-#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ExitCodeHint {
     #[error("flash or write error")]
     FlashError,

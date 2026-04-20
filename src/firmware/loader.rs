@@ -18,12 +18,25 @@ use std::path::Path;
 
 use object::{Object, ObjectSegment};
 
-use super::{Image, BL_APP_BASE, FW_INFO_OFFSET};
+use super::{
+    Image, ImageError, BL_APP_BASE, BL_APP_END, BL_BOOTLOADER_SECTOR_END, BL_FLASH_BASE,
+    FW_INFO_OFFSET,
+};
 use crate::protocol::records::FirmwareInfo;
 
-/// Errors the loader surfaces. Validation errors against the
-/// bootloader's memory map live in [`super::ImageError`] and are
-/// raised by [`Image::validate_fits_app_region`] rather than here.
+/// Errors the loader surfaces.
+///
+/// Two categories:
+///
+/// - **Format / I/O** (`Io`, `UnknownFormat`, `BinaryNeedsAddress`,
+///   `Elf`, `IntelHex`, `NoSegments`, `AddressOverflow`) — the input
+///   file is malformed or unusable. Classified as
+///   [`crate::cli::ExitCodeHint::InputFileError`] (exit 8).
+/// - **Address-space validation** (`Validation`) — the file parsed,
+///   but its segments land somewhere the bootloader won't accept.
+///   Classified as [`crate::cli::ExitCodeHint::ProtectionViolation`]
+///   (exit 3). Callers should route this through
+///   [`exit_code_hint`] rather than hard-coding the split.
 #[derive(Debug, thiserror::Error)]
 pub enum LoaderError {
     #[error("I/O error reading firmware file: {0}")]
@@ -48,6 +61,26 @@ pub enum LoaderError {
 
     #[error("ELF segment address 0x{addr:016X} does not fit in 32 bits")]
     AddressOverflow { addr: u64 },
+
+    /// A per-segment address-space violation. Wraps an
+    /// [`ImageError`] so the detail survives the chain walk — the
+    /// CLI layer downcasts to pick the exit code.
+    #[error(transparent)]
+    Validation(#[from] ImageError),
+}
+
+/// Exit-code classification for the whole [`LoaderError`] family.
+/// Kept here (rather than in `cli::verify`) so every future
+/// subcommand that consumes the loader maps errors to the same
+/// codes. The CLI layer just routes this through [`exit_err`].
+///
+/// [`exit_err`]: crate::cli::exit_err
+pub fn classify(err: &LoaderError) -> crate::cli::ExitCodeHint {
+    use crate::cli::ExitCodeHint;
+    match err {
+        LoaderError::Validation(_) => ExitCodeHint::ProtectionViolation,
+        _ => ExitCodeHint::InputFileError,
+    }
 }
 
 /// Detected input format. Callers typically don't reach for this —
@@ -70,7 +103,7 @@ pub fn load(path: &Path, address_hint: Option<u32>) -> Result<Image, LoaderError
         Format::IntelHex => load_ihex(&bytes),
         Format::Binary => {
             let addr = address_hint.ok_or(LoaderError::BinaryNeedsAddress)?;
-            Ok(load_bin(&bytes, addr))
+            load_bin(&bytes, addr)
         }
     }
 }
@@ -110,8 +143,9 @@ pub fn detect_format(path: &Path, bytes: &[u8]) -> Result<Format, LoaderError> {
 // ---- ELF ----
 
 /// Parse ELF bytes into an [`Image`]. Collects every PT_LOAD-style
-/// segment, normalises to a contiguous buffer, `0xFF`-pads any gaps
-/// between segments.
+/// segment, runs per-segment address-space validation, then
+/// normalises to a contiguous buffer with `0xFF`-padding between
+/// segments.
 pub fn load_elf(bytes: &[u8]) -> Result<Image, LoaderError> {
     let file = object::File::parse(bytes).map_err(|e| LoaderError::Elf(format!("{e}")))?;
 
@@ -130,6 +164,7 @@ pub fn load_elf(bytes: &[u8]) -> Result<Image, LoaderError> {
         segments.push((addr as u32, data.to_vec()));
     }
 
+    validate_segments(&segments)?;
     compose_image(segments)
 }
 
@@ -165,22 +200,85 @@ pub fn load_ihex(bytes: &[u8]) -> Result<Image, LoaderError> {
         }
     }
 
+    validate_segments(&segments)?;
     compose_image(segments)
 }
 
 // ---- Raw binary ----
 
-/// Wrap raw bytes at the supplied `address` into an [`Image`]. No
-/// validation beyond the fw-info extraction; callers invoke
-/// `validate_fits_app_region()` separately before flashing.
-pub fn load_bin(bytes: &[u8], address: u32) -> Image {
+/// Wrap raw bytes at the supplied `address` into an [`Image`], after
+/// validating the span against the bootloader's memory map. Returns
+/// [`LoaderError::Validation`] on any overlap with sector 0 or the
+/// metadata region — callers get the same exit-code classification
+/// as ELF / HEX paths.
+pub fn load_bin(bytes: &[u8], address: u32) -> Result<Image, LoaderError> {
+    let segments = vec![(address, bytes.to_vec())];
+    validate_segments(&segments)?;
     let data = bytes.to_vec();
     let fw_info = extract_fw_info(address, &data);
-    Image {
+    Ok(Image {
         base_addr: address,
         data,
         fw_info,
+    })
+}
+
+// ---- Per-segment address-space validation ----
+
+/// Walk each `(addr, bytes)` segment and reject the whole input if
+/// any one of them crosses into the bootloader's own sector or
+/// extends past the end of the app region. Called from the three
+/// loader paths *before* `compose_image` — so we never allocate a
+/// huge `0xFF`-padded buffer for a file that's going to be refused
+/// anyway, and the error pinpoints the offending segment index
+/// rather than the post-compose base address.
+///
+/// Zero-length segments are skipped (they contribute no bytes and
+/// would produce confusing `end == addr` diagnostics).
+pub fn validate_segments(segments: &[(u32, Vec<u8>)]) -> Result<(), ImageError> {
+    for (idx, (addr, data)) in segments.iter().enumerate() {
+        if data.is_empty() {
+            continue;
+        }
+        let end = addr.saturating_add(data.len() as u32);
+
+        // Overlap with sector 0 iff the segment's first byte is
+        // at/after flash start and at/before the last byte of
+        // sector 0. Any segment whose base is below BL_APP_BASE is
+        // treated as sector-0 overlap regardless of how far down
+        // it sits — the bootloader will never accept it.
+        if *addr >= BL_FLASH_BASE && *addr <= BL_BOOTLOADER_SECTOR_END {
+            return Err(ImageError::TouchesBootloaderSector {
+                segment_index: idx,
+                addr: *addr,
+                end,
+            });
+        }
+        // Segments below the flash base entirely (e.g. RAM) also
+        // shouldn't flow through the loader. Catch as a generic
+        // "touches bootloader" violation — the message still points
+        // at the right linker-script problem.
+        if *addr < BL_FLASH_BASE {
+            return Err(ImageError::TouchesBootloaderSector {
+                segment_index: idx,
+                addr: *addr,
+                end,
+            });
+        }
+
+        // Past the app region. `BL_APP_END + 1` is the first byte
+        // past the writable app range; anything past that touches
+        // the metadata sector (sector 7) or leaves flash entirely.
+        if end > BL_APP_END + 1 {
+            return Err(ImageError::BeyondAppRegion {
+                segment_index: idx,
+                addr: *addr,
+                end,
+                app_end_plus_one: BL_APP_END + 1,
+            });
+        }
     }
+    Ok(())
 }
 
 // ---- Compose + fw-info extraction ----
@@ -322,7 +420,7 @@ mod tests {
     #[test]
     fn load_bin_wraps_bytes_at_address() {
         let bytes = vec![0x01, 0x02, 0x03];
-        let img = load_bin(&bytes, 0x0802_0000);
+        let img = load_bin(&bytes, 0x0802_0000).unwrap();
         assert_eq!(img.base_addr, 0x0802_0000);
         assert_eq!(img.data, bytes);
         assert!(img.fw_info.is_none());
@@ -347,6 +445,199 @@ mod tests {
     fn compose_without_segments_errors() {
         let err = compose_image(vec![]).unwrap_err();
         assert!(matches!(err, LoaderError::NoSegments));
+    }
+
+    // ---- validate_segments: address-space rejection ----
+
+    #[test]
+    fn validate_segments_accepts_app_region_image() {
+        let segs = vec![(0x0802_0000u32, vec![0u8; 128])];
+        assert!(validate_segments(&segs).is_ok());
+    }
+
+    #[test]
+    fn validate_segments_accepts_multiple_non_overlapping_app_segments() {
+        let segs = vec![
+            (0x0802_0000u32, vec![0u8; 64]),
+            (0x0802_1000u32, vec![0u8; 64]),
+        ];
+        assert!(validate_segments(&segs).is_ok());
+    }
+
+    #[test]
+    fn validate_segments_skips_zero_length_segments() {
+        // Some linkers emit a zero-length PT_LOAD for alignment;
+        // skipping them means the validator doesn't choke on
+        // `end == addr` diagnostics.
+        let segs = vec![
+            (0x0802_0000u32, Vec::new()),
+            (0x0802_0000u32, vec![0u8; 16]),
+        ];
+        assert!(validate_segments(&segs).is_ok());
+    }
+
+    #[test]
+    fn validate_segments_rejects_segment_in_sector_0() {
+        // Single segment sitting at flash base (sector 0).
+        let segs = vec![(0x0800_0000u32, vec![0u8; 32])];
+        let err = validate_segments(&segs).unwrap_err();
+        match err {
+            ImageError::TouchesBootloaderSector {
+                segment_index,
+                addr,
+                end,
+            } => {
+                assert_eq!(segment_index, 0);
+                assert_eq!(addr, 0x0800_0000);
+                assert_eq!(end, 0x0800_0020);
+            }
+            other => panic!("expected TouchesBootloaderSector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_segments_rejects_last_byte_of_sector_0() {
+        // Single byte at 0x0801_FFFF — still sector 0.
+        let segs = vec![(0x0801_FFFFu32, vec![0xAA])];
+        let err = validate_segments(&segs).unwrap_err();
+        assert!(matches!(err, ImageError::TouchesBootloaderSector { .. }));
+    }
+
+    #[test]
+    fn validate_segments_rejects_mixed_with_bootloader_segment_reports_offender_index() {
+        // Valid app segment at index 0, bad sector-0 segment at
+        // index 1 — validator reports index 1.
+        let segs = vec![
+            (0x0802_0000u32, vec![0u8; 32]),
+            (0x0800_1000u32, vec![0u8; 16]),
+        ];
+        let err = validate_segments(&segs).unwrap_err();
+        match err {
+            ImageError::TouchesBootloaderSector { segment_index, .. } => {
+                assert_eq!(segment_index, 1);
+            }
+            other => panic!("expected TouchesBootloaderSector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_segments_rejects_addresses_outside_flash() {
+        // Segment below flash (e.g. RAM at 0x0400_0000) trips the
+        // `addr < BL_FLASH_BASE` branch → TouchesBootloaderSector.
+        let below = vec![(0x0400_0000u32, vec![0u8; 16])];
+        assert!(matches!(
+            validate_segments(&below).unwrap_err(),
+            ImageError::TouchesBootloaderSector { .. }
+        ));
+
+        // Segment way above flash (e.g. RAM at 0x2000_0000)
+        // overshoots `BL_APP_END + 1` → BeyondAppRegion. Different
+        // message, same rejection — either way the loader refuses.
+        let above = vec![(0x2000_0000u32, vec![0u8; 16])];
+        assert!(matches!(
+            validate_segments(&above).unwrap_err(),
+            ImageError::BeyondAppRegion { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_beyond_app_region() {
+        // Segment ends at 0x080E_0010 — past BL_APP_END + 1.
+        let segs = vec![(0x080D_FFF0u32, vec![0u8; 0x20])];
+        let err = validate_segments(&segs).unwrap_err();
+        match err {
+            ImageError::BeyondAppRegion {
+                segment_index,
+                addr,
+                end,
+                app_end_plus_one,
+            } => {
+                assert_eq!(segment_index, 0);
+                assert_eq!(addr, 0x080D_FFF0);
+                assert_eq!(end, 0x080E_0010);
+                assert_eq!(app_end_plus_one, 0x080E_0000);
+            }
+            other => panic!("expected BeyondAppRegion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_segments_accepts_exact_app_region_end() {
+        // Segment ending exactly at BL_APP_END + 1 is fine —
+        // "end" is one-past-last-byte, not an inclusive bound.
+        let segs = vec![(0x080D_FFF0u32, vec![0u8; 0x10])];
+        assert!(validate_segments(&segs).is_ok());
+    }
+
+    // ---- LoaderError classification ----
+
+    #[test]
+    fn classify_maps_validation_to_protection_violation() {
+        use crate::cli::ExitCodeHint;
+        let err = LoaderError::Validation(ImageError::TouchesBootloaderSector {
+            segment_index: 0,
+            addr: 0x0800_0000,
+            end: 0x0800_0020,
+        });
+        assert_eq!(classify(&err), ExitCodeHint::ProtectionViolation);
+    }
+
+    #[test]
+    fn classify_maps_everything_else_to_input_file_error() {
+        use crate::cli::ExitCodeHint;
+        assert_eq!(
+            classify(&LoaderError::UnknownFormat),
+            ExitCodeHint::InputFileError
+        );
+        assert_eq!(
+            classify(&LoaderError::BinaryNeedsAddress),
+            ExitCodeHint::InputFileError
+        );
+        assert_eq!(
+            classify(&LoaderError::NoSegments),
+            ExitCodeHint::InputFileError
+        );
+    }
+
+    // ---- load_bin: now runs validation ----
+
+    #[test]
+    fn load_bin_rejects_sector_0_address() {
+        let bytes = vec![0u8; 16];
+        let err = load_bin(&bytes, 0x0800_0000).unwrap_err();
+        assert!(matches!(
+            err,
+            LoaderError::Validation(ImageError::TouchesBootloaderSector { .. })
+        ));
+    }
+
+    #[test]
+    fn load_bin_rejects_address_past_app_region() {
+        let bytes = vec![0u8; 0x40];
+        let err = load_bin(&bytes, 0x080D_FFF0).unwrap_err();
+        // 0x080D_FFF0 + 0x40 = 0x080E_0030 — past BL_APP_END + 1.
+        assert!(matches!(
+            err,
+            LoaderError::Validation(ImageError::BeyondAppRegion { .. })
+        ));
+    }
+
+    // ---- load_ihex: per-segment rejection ----
+
+    #[test]
+    fn load_ihex_rejects_data_segment_in_sector_0() {
+        // Upper linear address 0x0800, offset 0x0000 — sector 0.
+        let mut s = String::new();
+        // :020000040800F2 — ULA = 0x0800
+        s.push_str(":020000040800F2\n");
+        // :04000000AABBCCDDEE — 4 bytes at offset 0 (= 0x0800_0000)
+        s.push_str(":04000000AABBCCDDEE\n");
+        s.push_str(":00000001FF\n");
+        let err = load_ihex(s.as_bytes()).unwrap_err();
+        assert!(matches!(
+            err,
+            LoaderError::Validation(ImageError::TouchesBootloaderSector { .. })
+        ));
     }
 
     // ---- extract_fw_info via a crafted image ----

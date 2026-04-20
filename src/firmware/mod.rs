@@ -34,6 +34,9 @@ use crc::{Crc, CRC_32_ISO_HDLC};
 
 use crate::protocol::records::FirmwareInfo;
 
+/// First byte of STM32H7 internal flash. Sector 0 starts here.
+pub const BL_FLASH_BASE: u32 = 0x0800_0000;
+
 /// First byte of the app region on the STM32H733 — byte 0 of flash
 /// sector 1. Matches `BL_APP_BASE` in the bootloader.
 pub const BL_APP_BASE: u32 = 0x0802_0000;
@@ -45,12 +48,43 @@ pub const BL_APP_END: u32 = 0x080D_FFFF;
 /// Maximum firmware size the host tool will send to the bootloader.
 pub const BL_APP_MAX_SIZE: u32 = BL_APP_END - BL_APP_BASE + 1;
 
+/// STM32H7 flash sector size — 128 KB on this variant. Each of the
+/// 8 sectors is independently erasable.
+pub const BL_SECTOR_SIZE: u32 = 0x0002_0000;
+
+/// Inclusive last byte of sector 0 (the bootloader's own sector).
+/// Any firmware segment touching `[BL_FLASH_BASE..=BL_BOOTLOADER_SECTOR_END]`
+/// would require overwriting the bootloader itself — rejected before
+/// any frame hits the wire.
+pub const BL_BOOTLOADER_SECTOR_END: u32 = BL_APP_BASE - 1;
+
+/// Inclusive last byte of the metadata sector (sector 7). The
+/// FLASHWORD at `0x080FFFE0` is written by the bootloader on
+/// successful `CMD_FLASH_VERIFY`; user firmware must stop at
+/// `BL_APP_END` (end of sector 6).
+pub const BL_FLASH_END: u32 = 0x080F_FFFF;
+
 /// Offset from `BL_APP_BASE` at which the application's
 /// `__firmware_info` record lives. Same as `BL_FWINFO_OFFSET`.
 pub const FW_INFO_OFFSET: u32 = 0x400;
 
 /// Absolute address of the `__firmware_info` record.
 pub const FW_INFO_ADDR: u32 = BL_APP_BASE + FW_INFO_OFFSET;
+
+// ---- Sector-map helpers ----
+
+/// Map a flash address to its STM32H7 sector number (`0..=7`).
+/// Returns `None` for anything outside `[BL_FLASH_BASE..=BL_FLASH_END]`
+/// so callers can tell "not a flash address" apart from "sector 0".
+///
+/// The flash manager (feat/16) uses this to walk an [`Image`] one
+/// sector at a time when deciding what to erase / diff-CRC / write.
+pub fn sector_of_addr(addr: u32) -> Option<u8> {
+    if !(BL_FLASH_BASE..=BL_FLASH_END).contains(&addr) {
+        return None;
+    }
+    Some(((addr - BL_FLASH_BASE) / BL_SECTOR_SIZE) as u8)
+}
 
 // ---- Image ----
 
@@ -127,6 +161,30 @@ impl Image {
         }
         Ok(())
     }
+
+    /// Inclusive span of flash sectors this image occupies, e.g.
+    /// `1..=6` for a full-size app binary based at `BL_APP_BASE`.
+    /// Returns `None` if the image is not entirely within the flash
+    /// region — callers should `validate_fits_app_region()` first
+    /// (or rely on the loader having done so).
+    ///
+    /// The flash manager in feat/16 walks this range to drive
+    /// per-sector `CMD_FLASH_ERASE` / `CMD_FLASH_READ_CRC` (diff
+    /// mode) / `CMD_FLASH_WRITE`.
+    pub fn sector_range(&self) -> Option<std::ops::RangeInclusive<u8>> {
+        let size = self.size();
+        if size == 0 {
+            return None;
+        }
+        let start = sector_of_addr(self.base_addr)?;
+        // `end_addr()` is one past the last byte; the last byte
+        // written lives at `end_addr - 1`. Use that for sector
+        // lookup so a segment ending exactly on a sector boundary
+        // doesn't claim the next sector.
+        let last_addr = self.end_addr().saturating_sub(1);
+        let end = sector_of_addr(last_addr)?;
+        Some(start..=end)
+    }
 }
 
 /// CRC-32/ISO-HDLC — same variant the bootloader uses.
@@ -148,6 +206,11 @@ pub fn pack_version(major: u32, minor: u32, patch: u32) -> u32 {
 /// Errors validating a parsed [`Image`] against the bootloader's
 /// memory map. Loader-level failures (bad format, malformed bytes)
 /// use [`loader::LoaderError`] instead.
+///
+/// All variants here are a **protection violation** — the host tool
+/// classifies them with [`crate::cli::ExitCodeHint::ProtectionViolation`]
+/// (exit 3) so CI pipelines can tell a bad linker script apart from
+/// a genuine verify mismatch.
 #[derive(Debug, thiserror::Error)]
 pub enum ImageError {
     #[error("image base address 0x{base:08X} is below BL_APP_BASE (0x{app_base:08X})")]
@@ -155,6 +218,39 @@ pub enum ImageError {
 
     #[error("image ends at 0x{end:08X} — past BL_APP_END + 1 (0x{app_end_plus_one:08X})")]
     AboveAppEnd { end: u32, app_end_plus_one: u32 },
+
+    /// A per-segment check: one of the input file's segments sits
+    /// partly or wholly inside the bootloader's own flash sector
+    /// (`[BL_FLASH_BASE..=BL_BOOTLOADER_SECTOR_END]`). Firing this
+    /// before compose avoids allocating a sparse `0xFF`-padded
+    /// buffer for an input we're going to refuse anyway, and gives
+    /// the user a precise "segment N at 0x…" pointer instead of the
+    /// post-compose BelowAppBase message, which only reports the
+    /// lowest segment's base.
+    #[error(
+        "segment {segment_index} at 0x{addr:08X}..0x{end:08X} overlaps the bootloader sector \
+         (0x08000000..=0x0801FFFF); your firmware would overwrite the bootloader itself — \
+         check the linker script"
+    )]
+    TouchesBootloaderSector {
+        segment_index: usize,
+        addr: u32,
+        end: u32,
+    },
+
+    /// A per-segment check: one of the input file's segments ends
+    /// past `BL_APP_END + 1` (i.e. would clobber the metadata
+    /// sector or run off the end of flash entirely).
+    #[error(
+        "segment {segment_index} at 0x{addr:08X}..0x{end:08X} extends past BL_APP_END + 1 \
+         (0x{app_end_plus_one:08X}); reserve the metadata sector for the bootloader"
+    )]
+    BeyondAppRegion {
+        segment_index: usize,
+        addr: u32,
+        end: u32,
+        app_end_plus_one: u32,
+    },
 }
 
 #[cfg(test)]
@@ -240,5 +336,90 @@ mod tests {
             fw_info: None,
         };
         assert_eq!(img.packed_version(), 0);
+    }
+
+    // ---- sector_of_addr ----
+
+    #[test]
+    fn sector_of_addr_rejects_below_flash() {
+        assert_eq!(sector_of_addr(0x0000_0000), None);
+        assert_eq!(sector_of_addr(0x07FF_FFFF), None);
+    }
+
+    #[test]
+    fn sector_of_addr_rejects_above_flash_end() {
+        assert_eq!(sector_of_addr(0x0810_0000), None);
+        assert_eq!(sector_of_addr(0xFFFF_FFFF), None);
+    }
+
+    #[test]
+    fn sector_of_addr_maps_each_sector_boundary() {
+        // Sector 0: 0x08000000..=0x0801FFFF
+        assert_eq!(sector_of_addr(0x0800_0000), Some(0));
+        assert_eq!(sector_of_addr(0x0801_FFFF), Some(0));
+        // Sector 1: 0x08020000..=0x0803FFFF
+        assert_eq!(sector_of_addr(0x0802_0000), Some(1));
+        assert_eq!(sector_of_addr(0x0803_FFFF), Some(1));
+        // Sector 6: 0x080C0000..=0x080DFFFF (last of app region)
+        assert_eq!(sector_of_addr(0x080C_0000), Some(6));
+        assert_eq!(sector_of_addr(BL_APP_END), Some(6));
+        // Sector 7: 0x080E0000..=0x080FFFFF (metadata)
+        assert_eq!(sector_of_addr(0x080E_0000), Some(7));
+        assert_eq!(sector_of_addr(BL_FLASH_END), Some(7));
+    }
+
+    // ---- Image::sector_range ----
+
+    #[test]
+    fn sector_range_single_sector_image() {
+        let img = Image {
+            base_addr: BL_APP_BASE,
+            data: vec![0; 1024],
+            fw_info: None,
+        };
+        assert_eq!(img.sector_range(), Some(1..=1));
+    }
+
+    #[test]
+    fn sector_range_spans_multiple_sectors() {
+        // Base at sector 1, end at sector 3 (partway in).
+        let img = Image {
+            base_addr: BL_APP_BASE,
+            data: vec![0; (BL_SECTOR_SIZE * 2 + 1024) as usize],
+            fw_info: None,
+        };
+        assert_eq!(img.sector_range(), Some(1..=3));
+    }
+
+    #[test]
+    fn sector_range_exact_boundary_does_not_overrun() {
+        // Image ends exactly at the sector 2 boundary — sector_range
+        // must return 1..=1, not 1..=2.
+        let img = Image {
+            base_addr: BL_APP_BASE,
+            data: vec![0; BL_SECTOR_SIZE as usize],
+            fw_info: None,
+        };
+        assert_eq!(img.sector_range(), Some(1..=1));
+    }
+
+    #[test]
+    fn sector_range_full_app_region() {
+        let img = Image {
+            base_addr: BL_APP_BASE,
+            data: vec![0; BL_APP_MAX_SIZE as usize],
+            fw_info: None,
+        };
+        assert_eq!(img.sector_range(), Some(1..=6));
+    }
+
+    #[test]
+    fn sector_range_empty_image_returns_none() {
+        let img = Image {
+            base_addr: BL_APP_BASE,
+            data: Vec::new(),
+            fw_info: None,
+        };
+        assert_eq!(img.sector_range(), None);
     }
 }

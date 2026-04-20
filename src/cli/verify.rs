@@ -53,16 +53,26 @@ pub async fn run(args: VerifyArgs, global: &GlobalFlags) -> Result<()> {
 
     // ---- Load + validate image ----
 
+    // `loader::load` now runs per-segment validation before
+    // composing — a linker file with a segment in sector 0 fails
+    // here rather than after we've allocated a padded buffer.
+    // `loader::classify` splits the error family into the
+    // per-REQUIREMENTS exit codes (protection violation for
+    // address-space problems, input-file error for malformed files
+    // and missing --address).
     let image = loader::load(&args.firmware, args.address).map_err(|e| {
+        let hint = loader::classify(&e);
         exit_err(
-            ExitCodeHint::InputFileError,
+            hint,
             format!("could not load firmware '{}': {e}", args.firmware.display()),
         )
     })?;
 
+    // Belt-and-braces: `loader::load` has already validated each
+    // input segment against the app region, so this check should
+    // never fire on a real input. Kept as a guard against a future
+    // loader refactor that forgets to call `validate_segments`.
     if let Err(e) = image.validate_fits_app_region() {
-        // Overlap with sector 0 or beyond app region → protection
-        // violation. Fire before any frame hits the bus.
         return Err(exit_err(
             ExitCodeHint::ProtectionViolation,
             format!(
