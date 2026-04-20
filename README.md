@@ -64,4 +64,4 @@ MIT, see [`Cargo.toml`](Cargo.toml).
 
 ---
 
-*ISC Racing Team — IFS08 Driverless*
+*ISC Racing Team*
