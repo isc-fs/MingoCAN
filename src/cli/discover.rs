@@ -156,16 +156,17 @@ async fn enrich_with_fw_info(session: &Session, row: &mut DiscoverRow) {
         .await;
     match outcome {
         Ok(Response::Ack { payload, .. }) => {
-            // ACK payload is `[opcode, <64-byte __firmware_info record>]`.
-            // We only care about the record.
-            if payload.len() < 1 + FirmwareInfo::SIZE {
+            // `Response::Ack.payload` has the opcode byte already
+            // stripped (see `responses.rs::parse`), so we expect
+            // exactly the record here — NOT `[opcode, record]`.
+            if payload.len() < FirmwareInfo::SIZE {
                 row.fw_error = Some(format!(
                     "GET_FW_INFO ACK too short: got {} bytes",
                     payload.len()
                 ));
                 return;
             }
-            match FirmwareInfo::parse(&payload[1..]) {
+            match FirmwareInfo::parse(&payload) {
                 Ok(fw) => {
                     let (maj, min, patch) = fw.version();
                     row.fw_version = Some(format!("{maj}.{min}.{patch}"));
@@ -204,14 +205,16 @@ async fn enrich_with_health(session: &Session, row: &mut DiscoverRow) {
         .await;
     match outcome {
         Ok(Response::Ack { payload, .. }) => {
-            if payload.len() < 1 + HealthRecord::SIZE {
+            // Same note as `enrich_with_fw_info`: payload is the
+            // 32-byte record with the opcode already stripped.
+            if payload.len() < HealthRecord::SIZE {
                 row.health_error = Some(format!(
                     "GET_HEALTH ACK too short: got {} bytes",
                     payload.len()
                 ));
                 return;
             }
-            match HealthRecord::parse(&payload[1..]) {
+            match HealthRecord::parse(&payload) {
                 Ok(health) => {
                     row.wrp_protected = Some(health.wrp_protected());
                     row.reset_cause = health

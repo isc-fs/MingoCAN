@@ -7,6 +7,11 @@
 //! stub grows real `GET_FW_INFO` / `GET_HEALTH` handlers (later feat
 //! branches), this test will keep passing and additionally assert
 //! against the populated fields.
+//!
+//! The bottom section spawns the real binary via
+//! `CARGO_BIN_EXE_can-flasher` to pin the CLI-level enrichment
+//! contract — that regressions in the `cli::discover::run` payload
+//! slicing (fix/7) get caught before they ship.
 
 use std::time::Duration;
 
@@ -137,4 +142,79 @@ async fn send_command_to_an_absent_node_times_out() {
     let _ = session.disconnect().await;
     let _ = cancel.send(());
     let _ = handle.await;
+}
+
+// ---- CLI-level regression test ----
+
+/// Spawn the real binary against `--interface virtual`, run
+/// `discover --json`, and confirm the enrichment pipeline doesn't
+/// regress. Fix/7 corrected a payload-offset bug in
+/// `enrich_with_fw_info` / `enrich_with_health`: both sliced
+/// `payload[1..]` even though `Response::Ack.payload` already has
+/// the opcode stripped. Symptom was a 32-byte HealthRecord showing
+/// up as `"GET_HEALTH ACK too short: got 32 bytes"` in the CLI
+/// output.
+///
+/// The existing `stub_answers_get_health_with_synthetic_record`
+/// test covered the wire path correctly (it calls
+/// `HealthRecord::parse(&payload)` without the extra slice) so it
+/// couldn't catch the CLI-side bug. This test spawns the binary
+/// end-to-end to close the gap.
+#[test]
+fn discover_cli_does_not_emit_ack_too_short_on_enrichment() {
+    use std::process::Command;
+    let out = Command::new(env!("CARGO_BIN_EXE_can-flasher"))
+        .args([
+            "--interface",
+            "virtual",
+            "--node-id",
+            "0x3",
+            "--timeout",
+            "400",
+            "discover",
+            "--json",
+        ])
+        .output()
+        .expect("spawn can-flasher");
+
+    assert!(
+        out.status.success(),
+        "discover --json failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+
+    // The regression symptom: "ACK too short" leaked into either
+    // stdout (the JSON error field) or stderr. Neither should
+    // happen on a healthy enrichment round-trip.
+    assert!(
+        !stdout.contains("ACK too short"),
+        "stdout should not contain 'ACK too short' after fix/7:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("ACK too short"),
+        "stderr should not contain 'ACK too short' after fix/7:\n{stderr}"
+    );
+
+    // Sanity: there's a responder row for the stub. The stub's
+    // GET_FW_INFO / GET_HEALTH responses round-trip cleanly now,
+    // so the row should carry a populated reset_cause field.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("discover --json must emit valid JSON");
+    let rows = parsed.as_array().expect("top-level must be an array");
+    assert!(
+        !rows.is_empty(),
+        "expected at least one responder row, got empty array"
+    );
+    // Stub's bl_health_init default reset cause is POWER_ON. If
+    // enrichment parsed cleanly the field is populated; if it
+    // failed it'd be null or carry an error string.
+    let first = &rows[0];
+    let reset = first.get("reset_cause").and_then(|v| v.as_str());
+    assert!(
+        reset.is_some() && reset != Some(""),
+        "reset_cause should be populated by successful GET_HEALTH; row={first}"
+    );
 }
