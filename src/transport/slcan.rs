@@ -82,9 +82,16 @@ use super::{CanBackend, Result, TransportError};
 const SERIAL_BAUD: u32 = 2_000_000;
 
 /// How long each reader-side serial read blocks before returning
-/// with `ErrorKind::TimedOut`. Keeps the mutex held for at most
-/// this long, bounding the TX path's worst-case wait.
-const READ_TIMEOUT: Duration = Duration::from_millis(50);
+/// with `ErrorKind::TimedOut`. **Critical latency knob**: the reader
+/// thread holds the serial port's std mutex while `port.read()` is
+/// blocked, so any concurrent TX from the async `send()` path has
+/// to wait up to this long for the reader to release the lock.
+/// 1 ms is aggressive but safe — the kernel buffers received bytes
+/// while the reader is off the mutex, so we're never in danger of
+/// missing a frame. The reader thread wakes ~1000 times/second
+/// when the bus is quiet, which is negligible CPU for the latency
+/// win (~50 ms → ~1 ms of TX-vs-RX interleave stall, per frame).
+const READ_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// How long the open sequence waits to see an adapter's command
 /// response (`\r` for success, `\x07` for failure). Two kinds of
@@ -100,9 +107,16 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 /// We treat silence as success (the firmware isn't standards-pure
 /// but the commands still take effect) and `\x07` as failure.
 /// This timeout bounds how long we'll wait for a *possible* reply
-/// before concluding the firmware is silent; short enough to keep
-/// open-time snappy, long enough to tolerate USB-FS scheduling.
-const COMMAND_ACK_TIMEOUT: Duration = Duration::from_millis(200);
+/// before concluding the firmware is silent.
+///
+/// 50 ms is chosen empirically: USB-FS frame polling is 1 ms, and
+/// the CANable fork we've tested replies within 2–5 ms when it
+/// replies at all. Silent firmware pays this timeout three times
+/// during open (C, S<N>, O), so 50 ms × 3 = 150 ms of fixed cost
+/// per `cf` invocation — well below our per-command budget. The
+/// earlier 200 ms value made short CLI invocations feel sluggish
+/// (a round-trip discover took >1 s on silent firmware).
+const COMMAND_ACK_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// RX queue depth. Sized for the worst-case burst of a full `DTC_READ`
 /// multi-frame reply (~92 CFs at 8 bytes) plus some safety margin.
@@ -246,7 +260,6 @@ impl SlcanBackend {
         // might have been left open; sending `C\r` is a no-op for a
         // closed port and resets for an open one.
         let _ = port.write_all(b"C\r");
-        let _ = port.flush();
         drain(&mut *port);
 
         // Set bitrate, then open channel.
@@ -298,12 +311,24 @@ impl CanBackend for SlcanBackend {
 
         // Serial I/O is blocking; hand it to the blocking pool so we
         // don't stall the async runtime.
+        //
+        // No explicit `port.flush()` after `write_all`: on macOS
+        // USB-serial, `flush()` calls `tcdrain()` which waits for
+        // the kernel output buffer to fully drain over the USB OUT
+        // endpoint (1–4 ms per USB frame × however many endpoint
+        // polls it takes to ship our bytes — often 10–50 ms per
+        // call in practice). `write_all` already pushes the bytes
+        // into the kernel buffer; the USB driver will deliver them
+        // over the wire asynchronously. The only case where flush
+        // would matter is if the process exits immediately after
+        // send — but for our workflow every send is followed by a
+        // recv for the reply, so we'd block on the reply long after
+        // the kernel has shipped the TX.
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut port = port
                 .lock()
                 .map_err(|_| TransportError::Other("serial port mutex poisoned".into()))?;
             port.write_all(&encoded)?;
-            port.flush()?;
             Ok(())
         })
         .await
@@ -350,7 +375,6 @@ impl Drop for SlcanBackend {
         // mutex is poisoned we skip — nothing productive left to do.
         if let Ok(mut port) = self.port.lock() {
             let _ = port.write_all(b"C\r");
-            let _ = port.flush();
         }
         if let Ok(mut handle) = self.reader_handle.lock() {
             if let Some(h) = handle.take() {
@@ -582,8 +606,12 @@ fn reader_loop(
 // ---- Open-sequence helpers ----
 
 fn send_command_and_wait_ack(port: &mut dyn SerialPort, command: &str) -> Result<()> {
+    // No `port.flush()` — see the comment on `SlcanBackend::send` for
+    // why. The small USB-OUT latency means the command reaches the
+    // adapter a handful of milliseconds after `write_all` returns,
+    // which is exactly what `wait_for_ack`'s short timeout is sized
+    // to tolerate.
     port.write_all(command.as_bytes())?;
-    port.flush()?;
     wait_for_ack(port, command, COMMAND_ACK_TIMEOUT)
 }
 
