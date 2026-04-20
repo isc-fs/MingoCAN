@@ -756,8 +756,12 @@ mod tests {
     async fn send_command_to_unknown_opcode_returns_nack() {
         let (session, cancel, handle) = spawn_session_and_stub().await;
         session.connect().await.unwrap();
-        // FLASH_ERASE isn't implemented by the stub — it'll NACK(UNSUPPORTED).
-        let payload = crate::protocol::commands::cmd_flash_erase(0x0802_0000, 0x2_0000);
+        // `CMD_JUMP` isn't implemented by the stub — any opcode the
+        // stub doesn't route takes the `NACK(UNSUPPORTED)` fallthrough.
+        // (FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC used to hit the
+        // same path but gained real handlers in feat/16, so the test
+        // has to pick a still-unimplemented opcode.)
+        let payload = crate::protocol::commands::cmd_jump(0x0802_0000);
         let resp = session.send_command(&payload).await.unwrap();
         match resp {
             Response::Nack { code, .. } => assert_eq!(code, NackCode::Unsupported),

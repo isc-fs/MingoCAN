@@ -20,9 +20,7 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 
-use can_flasher::protocol::commands::{
-    cmd_flash_erase, PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR,
-};
+use can_flasher::protocol::commands::{cmd_jump, PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR};
 use can_flasher::protocol::ids::MessageType;
 use can_flasher::protocol::opcodes::{CommandOpcode, NackCode};
 use can_flasher::protocol::Response;
@@ -128,17 +126,21 @@ async fn unknown_opcode_earns_nack_unsupported() {
     let (session, cancel, handle) = setup().await;
     session.connect().await.expect("connect");
 
-    // FLASH_ERASE isn't implemented by the stub — expect
-    // NACK(UNSUPPORTED). Also exercises the FF+CF path (9-byte
-    // payload).
-    let payload = cmd_flash_erase(0x0802_0000, 0x2_0000);
+    // `CMD_JUMP` isn't implemented by the stub — expect
+    // NACK(UNSUPPORTED). Also exercises the FF+CF path (5-byte
+    // payload after the FF's 1-byte length + 1-byte opcode, still
+    // comfortably multi-frame after ISO-TP framing on 8-byte CAN.)
+    // (Was `cmd_flash_erase` pre-feat/16, but the stub grew a real
+    // erase handler then — we picked the next truly unimplemented
+    // opcode so the `Unsupported` fallthrough stays exercised.)
+    let payload = cmd_jump(0x0802_0000);
     let resp = session.send_command(&payload).await.expect("send");
     match resp {
         Response::Nack {
             rejected_opcode,
             code,
         } => {
-            assert_eq!(rejected_opcode, CommandOpcode::FlashErase.as_byte());
+            assert_eq!(rejected_opcode, CommandOpcode::Jump.as_byte());
             assert_eq!(code, NackCode::Unsupported);
         }
         other => panic!("expected Nack, got {other:?}"),

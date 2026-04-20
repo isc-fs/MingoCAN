@@ -32,6 +32,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, trace, warn};
 
+use crate::firmware::{BL_APP_BASE, BL_APP_END, BL_APP_MAX_SIZE, BL_SECTOR_SIZE};
 use crate::protocol::commands::{PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR};
 use crate::protocol::ids::{FrameId, MessageType};
 use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
@@ -44,6 +45,34 @@ use super::{CanBackend, Result, TransportError};
 /// Upper bound on a single NVM value, per REQUIREMENTS.md § NVM
 /// store — matches the bootloader's `BL_NVM_MAX_VALUE_LEN` (20 B).
 const STUB_NVM_MAX_VALUE_LEN: usize = 20;
+
+/// STM32H7 FLASHWORD size — 32 B. `CMD_FLASH_WRITE` addresses must
+/// be FLASHWORD-aligned; the real HAL rejects misaligned writes and
+/// so does the stub.
+const STUB_FLASHWORD_SIZE: u32 = 32;
+
+/// Alignment policy used by `StubDevice::validate_flash_range`.
+/// Kept module-local — the real bootloader enforces these per-opcode
+/// too, but the host tool doesn't need to know the taxonomy.
+#[derive(Clone, Copy, Debug)]
+enum StubRangePolicy {
+    /// No alignment requirement (e.g. `CMD_FLASH_READ_CRC` accepts
+    /// arbitrary ranges — the bootloader's CRC routine walks bytes).
+    Unaligned,
+    /// Start address + length must be FLASHWORD (32 B) aligned —
+    /// `CMD_FLASH_WRITE` contract.
+    FlashwordAligned,
+    /// Start address + length must be sector (128 KB) aligned —
+    /// `CMD_FLASH_ERASE` contract.
+    SectorAligned,
+}
+
+/// Maximum `CMD_FLASH_WRITE` payload (data bytes, excluding opcode +
+/// address). Classic CAN ISO-TP allows up to 280 B reassembled; the
+/// host tool caps writes at 256 B per REQUIREMENTS § Write chunk
+/// size. Stub enforces the same ceiling so an over-large write
+/// surfaces as a clean NACK rather than an assertion failure.
+const STUB_FLASH_WRITE_MAX: usize = 256;
 
 /// Stub's synthetic option-byte snapshot — nothing WRP-protected,
 /// level-0 RDP, default BOR. Matches what a dev board out of the
@@ -88,6 +117,20 @@ pub struct StubDevice {
     /// tests where we just want to confirm the wire round-trip
     /// without pretending to have a specific installed image.
     expected_verify: Option<(u32, u32, u32)>,
+    /// Synthetic flash buffer covering `BL_APP_BASE..=BL_APP_END`
+    /// (768 KB). Default 0xFF — matches erased flash. Mutated by
+    /// `CMD_FLASH_ERASE` (fills 0xFF) and `CMD_FLASH_WRITE` (copies
+    /// the supplied bytes in). Sector 0 and sector 7 (metadata) are
+    /// *not* represented — both are off-limits to the flash pipeline
+    /// and any request touching them earns `NACK(PROTECTED_ADDR)`
+    /// via range validation before we reach the buffer.
+    flash_buffer: Vec<u8>,
+    /// Per-sector CRC override. If the entry for sector `N` is
+    /// `Some`, `CMD_FLASH_READ_CRC` over that sector's full range
+    /// returns the overridden value instead of the computed one.
+    /// Used exclusively by tests that need to fake a post-write
+    /// CRC mismatch — real bootloader CRC is always honest.
+    flash_crc_overrides: HashMap<u8, u32>,
 }
 
 impl StubDevice {
@@ -105,6 +148,8 @@ impl StubDevice {
             nvm: HashMap::new(),
             wrp_sector_mask: 0,
             expected_verify: None,
+            flash_buffer: vec![0xFF; BL_APP_MAX_SIZE as usize],
+            flash_crc_overrides: HashMap::new(),
         }
     }
 
@@ -115,6 +160,29 @@ impl StubDevice {
     /// cares about the wire path and not the semantics.
     pub fn set_expected_verify(&mut self, expected: Option<(u32, u32, u32)>) {
         self.expected_verify = expected;
+    }
+
+    /// Snapshot the current flash buffer (`BL_APP_BASE..=BL_APP_END`).
+    /// Integration tests read this after a `FlashManager::run` to
+    /// confirm the stub ended up with the same bytes the host
+    /// composed.
+    pub fn flash_snapshot(&self) -> &[u8] {
+        &self.flash_buffer
+    }
+
+    /// Override the CRC the stub returns for reads covering exactly
+    /// sector `sector`'s whole range. `None` clears the override so
+    /// real CRCs flow again. Used by tests that need to simulate a
+    /// post-write CRC mismatch without corrupting the buffer itself.
+    pub fn set_flash_crc_override(&mut self, sector: u8, crc: Option<u32>) {
+        match crc {
+            Some(value) => {
+                self.flash_crc_overrides.insert(sector, value);
+            }
+            None => {
+                self.flash_crc_overrides.remove(&sector);
+            }
+        }
     }
 
     /// Run the dispatch loop. Terminates gracefully when `cancel`
@@ -250,6 +318,9 @@ impl StubDevice {
             Ok(CommandOpcode::ObApplyWrp) => self.handle_ob_apply_wrp(peer, payload).await,
             Ok(CommandOpcode::NvmRead) => self.handle_nvm_read(peer, payload).await,
             Ok(CommandOpcode::NvmWrite) => self.handle_nvm_write(peer, payload).await,
+            Ok(CommandOpcode::FlashErase) => self.handle_flash_erase(peer, payload).await,
+            Ok(CommandOpcode::FlashWrite) => self.handle_flash_write(peer, payload).await,
+            Ok(CommandOpcode::FlashReadCrc) => self.handle_flash_read_crc(peer, payload).await,
             Ok(CommandOpcode::FlashVerify) => self.handle_flash_verify(peer, payload).await,
             Ok(_) | Err(_) => self.send_nack(peer, opcode, NackCode::Unsupported).await,
         }
@@ -547,6 +618,263 @@ impl StubDevice {
 
         let resp = [CommandOpcode::NvmWrite.as_byte()];
         self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_FLASH_ERASE`. Args on the wire are
+    /// `[opcode, start_le32, length_le32]`. Erases the requested
+    /// range to 0xFF in the synthetic flash buffer.
+    ///
+    /// Validation:
+    ///
+    /// - Session must be active → `NACK(BAD_SESSION)`.
+    /// - Start + length must both be sector-aligned (128 KB) and
+    ///   land fully inside `BL_APP_BASE..=BL_APP_END` →
+    ///   `NACK(PROTECTED_ADDR)` on sector-0 / metadata overlap,
+    ///   `NACK(OUT_OF_BOUNDS)` otherwise.
+    async fn handle_flash_erase(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashErase.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, start_le32, length_le32] → 9 bytes
+        if payload.len() < 9 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashErase.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let start = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let length = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+
+        if let Err(code) = self.validate_flash_range(start, length, StubRangePolicy::SectorAligned)
+        {
+            return self
+                .send_nack(peer, CommandOpcode::FlashErase.as_byte(), code)
+                .await;
+        }
+
+        let off = (start - BL_APP_BASE) as usize;
+        let end_off = off + length as usize;
+        self.flash_buffer[off..end_off].fill(0xFF);
+        trace!(
+            start = format!("0x{start:08X}"),
+            length,
+            "stub: flash erase"
+        );
+
+        let resp = [CommandOpcode::FlashErase.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_FLASH_WRITE`. Args on the wire are
+    /// `[opcode, addr_le32, data…]`. Copies `data` into the flash
+    /// buffer at `addr`.
+    ///
+    /// Validation:
+    /// - Session must be active → `NACK(BAD_SESSION)`.
+    /// - Address must be FLASHWORD-aligned (32 B) and the full range
+    ///   must fit in the app region → `NACK(PROTECTED_ADDR)` /
+    ///   `NACK(OUT_OF_BOUNDS)`.
+    /// - Data length ≤ 256 B → else `NACK(UNSUPPORTED)`.
+    /// - Every target byte must currently read `0xFF` (erased). The
+    ///   real HAL raises a programming error on non-erased writes; we
+    ///   surface that as `NACK(FLASH_HW)` so the FlashManager
+    ///   engine can react the same way it would on hardware.
+    async fn handle_flash_write(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashWrite.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, addr_le32, data…] → at least 5 bytes
+        if payload.len() < 5 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashWrite.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let addr = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let data = &payload[5..];
+
+        if data.len() > STUB_FLASH_WRITE_MAX {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashWrite.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+
+        if let Err(code) =
+            self.validate_flash_range(addr, data.len() as u32, StubRangePolicy::FlashwordAligned)
+        {
+            return self
+                .send_nack(peer, CommandOpcode::FlashWrite.as_byte(), code)
+                .await;
+        }
+
+        let off = (addr - BL_APP_BASE) as usize;
+        let slot = &mut self.flash_buffer[off..off + data.len()];
+        if slot.iter().any(|&b| b != 0xFF) {
+            // Real HAL surfaces a programming error; mirror with
+            // FlashHw so the manager can treat the two identically.
+            return self
+                .send_nack(peer, CommandOpcode::FlashWrite.as_byte(), NackCode::FlashHw)
+                .await;
+        }
+        slot.copy_from_slice(data);
+        trace!(
+            addr = format!("0x{addr:08X}"),
+            len = data.len(),
+            "stub: flash write"
+        );
+
+        let resp = [CommandOpcode::FlashWrite.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_FLASH_READ_CRC`. Args on the wire are
+    /// `[opcode, addr_le32, length_le32]`. Computes CRC-32/ISO-HDLC
+    /// over the given range in the synthetic flash buffer and replies
+    /// with `ACK [opcode, crc_le32]`.
+    ///
+    /// When a per-sector override is registered via
+    /// `set_flash_crc_override` and the requested range covers
+    /// exactly that sector's span, the overridden CRC is returned
+    /// instead of the real one — tests exercising the mismatch path
+    /// use this to fake a corrupt sector after a successful write.
+    async fn handle_flash_read_crc(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashReadCrc.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, addr_le32, length_le32] → 9 bytes
+        if payload.len() < 9 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::FlashReadCrc.as_byte(),
+                    NackCode::Unsupported,
+                )
+                .await;
+        }
+        let addr = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let length = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+
+        if let Err(code) = self.validate_flash_range(addr, length, StubRangePolicy::Unaligned) {
+            return self
+                .send_nack(peer, CommandOpcode::FlashReadCrc.as_byte(), code)
+                .await;
+        }
+
+        // Override path: if the range lines up exactly with a
+        // configured sector, return the injected CRC. The range
+        // check matches FlashManager's per-sector diff request
+        // shape (sector base addr + BL_SECTOR_SIZE).
+        let crc = if let Some(sector) = Self::sector_of_exact_range(addr, length) {
+            if let Some(&fake) = self.flash_crc_overrides.get(&sector) {
+                fake
+            } else {
+                self.compute_flash_crc(addr, length)
+            }
+        } else {
+            self.compute_flash_crc(addr, length)
+        };
+
+        let mut resp = Vec::with_capacity(5);
+        resp.push(CommandOpcode::FlashReadCrc.as_byte());
+        resp.extend_from_slice(&crc.to_le_bytes());
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    fn compute_flash_crc(&self, addr: u32, length: u32) -> u32 {
+        let off = (addr - BL_APP_BASE) as usize;
+        let end_off = off + length as usize;
+        crate::firmware::crc32(&self.flash_buffer[off..end_off])
+    }
+
+    /// Helper: returns `Some(N)` iff `(addr, length)` names sector N
+    /// exactly (base-aligned + sector-sized). Used to decide whether
+    /// a CRC override applies to the current read.
+    fn sector_of_exact_range(addr: u32, length: u32) -> Option<u8> {
+        if length != BL_SECTOR_SIZE {
+            return None;
+        }
+        let relative = addr.checked_sub(BL_APP_BASE)?;
+        if !relative.is_multiple_of(BL_SECTOR_SIZE) {
+            return None;
+        }
+        // Sectors 1..=6 are the app region; sector 0 isn't reachable
+        // through this helper since BL_APP_BASE already skips it.
+        Some((relative / BL_SECTOR_SIZE) as u8 + 1)
+    }
+
+    /// Validate a `(addr, length)` pair against the app-region
+    /// envelope and the requested alignment. Returns the
+    /// `NackCode` the handler should emit on failure.
+    fn validate_flash_range(
+        &self,
+        addr: u32,
+        length: u32,
+        policy: StubRangePolicy,
+    ) -> std::result::Result<(), NackCode> {
+        if length == 0 {
+            return Err(NackCode::OutOfBounds);
+        }
+        // Alignment checks — split so the caller can pick
+        // flashword (write) vs sector (erase) vs none (CRC read).
+        match policy {
+            StubRangePolicy::Unaligned => {}
+            StubRangePolicy::FlashwordAligned => {
+                if !addr.is_multiple_of(STUB_FLASHWORD_SIZE)
+                    || !length.is_multiple_of(STUB_FLASHWORD_SIZE)
+                {
+                    return Err(NackCode::OutOfBounds);
+                }
+            }
+            StubRangePolicy::SectorAligned => {
+                let relative = match addr.checked_sub(BL_APP_BASE) {
+                    Some(v) => v,
+                    None => return Err(NackCode::ProtectedAddr),
+                };
+                if !relative.is_multiple_of(BL_SECTOR_SIZE)
+                    || !length.is_multiple_of(BL_SECTOR_SIZE)
+                {
+                    return Err(NackCode::OutOfBounds);
+                }
+            }
+        }
+        // Range envelope.
+        let end = addr.checked_add(length).ok_or(NackCode::OutOfBounds)?;
+        if addr < BL_APP_BASE {
+            // Below the app region — overlaps sector 0 or lower.
+            return Err(NackCode::ProtectedAddr);
+        }
+        if end > BL_APP_END + 1 {
+            return Err(NackCode::ProtectedAddr);
+        }
+        Ok(())
     }
 
     /// Session-gated `CMD_FLASH_VERIFY`. Args on the wire are
