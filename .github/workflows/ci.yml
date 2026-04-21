@@ -4,9 +4,9 @@ name: CI
 # sources, Cargo metadata, or the workflow itself. Docs-only changes
 # skip CI so README / REQUIREMENTS.md tweaks don't burn runner minutes.
 #
-# Cross-compile targets (aarch64-linux, aarch64-apple, etc.) are not in
-# this workflow — they land in release.yml once the first artefact ships.
-# CI here is a correctness gate: native build on each supported host OS.
+# Cross-platform binary builds for releases live in release.yml
+# (triggers on `v*` tag push + manual dispatch). CI here is a
+# correctness gate — native build on each supported host OS.
 
 on:
   push:
