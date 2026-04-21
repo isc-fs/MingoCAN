@@ -137,6 +137,25 @@ Phase boundaries (every few merged branches) trigger a `dev → main`
 **merge commit** (not squash) + a milestone tag + a GitHub Release.
 The roadmap table tracks which tag closes each phase.
 
+### Cutting a release
+
+When bumping `main` to a new version:
+
+1. **Bump `Cargo.toml`** on `dev` first (`version = "1.1.2"` →
+   `version = "1.2.0"`, or whatever the next tag will be). PR the
+   bump + any last changes, merge to `dev`, then `dev → main`.
+2. **Tag `main`** with `git tag -a v1.2.0 -m "…"` and push.
+3. The `release.yml` workflow triggers on the tag push. Its first
+   job (`verify-version`) compares the tag name minus the leading
+   `v` against the `version` field in `Cargo.toml`. If they
+   disagree, all build legs are skipped and you get a clear error
+   pointing at the mismatch — retag after fixing the bump.
+
+v1.1.0 shipped with a version skew bug (binaries reported
+`can-flasher 0.1.0`); v1.1.1 added the CI guard so it can't
+happen again. If you see the workflow fail on `verify-version`,
+that's the guard earning its keep.
+
 ---
 
 ## Writing new code
