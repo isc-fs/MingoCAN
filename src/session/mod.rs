@@ -52,6 +52,31 @@
 //!   module works).
 //! - **Flash orchestration.** Sector-aware erase / diff / CRC
 //!   verification live in `src/firmware/` (feat/12+).
+//!
+//! ## Reliability invariant — **no unbounded `.await` in this module**
+//!
+//! Every `.await` point is either wrapped in a `tokio::time::timeout`
+//! with a finite deadline, or provably bounded by construction (a
+//! sleep, a mutex with no reentrancy, a channel whose sender is
+//! held by a task that will complete). The RX daemon's outer `loop`
+//! is unbounded by design, but every await inside it has a 50 ms
+//! read deadline so shutdown is prompt.
+//!
+//! This is the invariant that three separate post-mortems (fix/10,
+//! fix/14, and the fix/15 audit) converged on — a missed deadline
+//! turned into a 25-minute silent hang or a "pkill-only" recovery.
+//! **Before adding a new `.await` to this module, justify its
+//! boundedness in a comment right at the await site** using one of:
+//!
+//! - `// bounded by `X` ms via `tokio::time::timeout`
+//! - `// bounded: tokio mutex, only held across non-awaiting code
+//! - `// bounded: channel drained by <task>, which always completes
+//! - `// by design: daemon outer loop / `ctrl_c` arm in `select!`
+//!
+//! A reviewer must push back on awaits without such a comment. The
+//! cost of regressing here is hard to detect (symptom is a hang
+//! indistinguishable from a long-running operation), so the bar at
+//! review time is higher than "does it compile."
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

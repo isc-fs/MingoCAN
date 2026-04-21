@@ -332,6 +332,26 @@ async fn fire_jump(session: &Session) -> Result<()> {
 }
 
 // ---- Progress rendering ----
+//
+// Two rendering modes, auto-selected by whether stderr is a TTY:
+//
+// **TTY mode** — full `indicatif` experience: a steady-tick spinner at
+// the top, one animated bar per sector during its write loop, state
+// transitions printed above the bars. Gorgeous when you have it.
+//
+// **Plain mode** (non-TTY: CI logs, piped to `tee`, captured by a test
+// harness) — indicatif silently suppresses EVERY draw call including
+// `MultiProgress::println`. A user ran `cf flash 2>&1 | tee` and saw
+// zero output for 52 s — indistinguishable from a hang. We emit plain
+// `eprintln!` lines for state transitions, and throttled percent-
+// complete pings during long writes, so the user always has a live
+// signal the engine is making forward progress. No ANSI escapes — the
+// output survives `grep`, `awk`, or a syslog sink cleanly.
+
+/// Rough throttle for non-TTY "still writing" pings — once every ~10%
+/// of the sector so a 52 s flash emits about 10 lines per sector,
+/// enough to read as "clearly still alive" without overflowing a log.
+const NON_TTY_PROGRESS_STEP: u32 = 10;
 
 async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool) {
     if json {
@@ -343,6 +363,12 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool
         return;
     }
 
+    // `indicatif::MultiProgress` uses stderr by default and auto-hides
+    // every draw (bars AND `println!`) when stderr isn't a TTY. That
+    // silent-on-pipe behaviour is what we patch around below — the
+    // TTY-path renders through `multi`, the non-TTY path bypasses it
+    // with raw `eprintln!`.
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let multi = MultiProgress::new();
     let overall = multi.add(ProgressBar::new_spinner());
     overall.set_style(
@@ -350,9 +376,26 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool
             .unwrap_or_else(|_| ProgressStyle::default_spinner()),
     );
     overall.set_message("Flashing…");
-    overall.enable_steady_tick(Duration::from_millis(120));
+    if tty {
+        overall.enable_steady_tick(Duration::from_millis(120));
+    }
 
     let mut per_sector: Option<(u8, ProgressBar)> = None;
+    // Non-TTY bookkeeping: last percent we printed for the active
+    // sector, so we only emit a "Sector N: 40%" line when we cross a
+    // fresh 10% bucket. Reset on sector boundary.
+    let mut last_percent_printed: Option<(u8, u32)> = None;
+
+    // Tiny helper to print a line in both modes — `multi.println` is
+    // the TTY path (renders above the active bars), `eprintln!` is
+    // the non-TTY path. A no-op in `--json` mode (we returned above).
+    let say = |multi: &MultiProgress, line: &str| {
+        if tty {
+            multi.println(line).ok();
+        } else {
+            eprintln!("{line}");
+        }
+    };
 
     while let Some(event) = rx.recv().await {
         match event {
@@ -361,59 +404,96 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool
                     SectorRole::Skip => format!("Sector {sector}: already matches — skipping"),
                     SectorRole::Write => format!("Sector {sector}: queued for rewrite"),
                 };
-                multi.println(txt).ok();
+                say(&multi, &txt);
             }
             FlashEvent::Erased { sector } => {
-                multi.println(format!("Sector {sector}: erased")).ok();
+                say(&multi, &format!("Sector {sector}: erased"));
             }
             FlashEvent::ChunkWritten {
                 sector,
                 bytes,
                 total,
             } => {
-                let bar = match &per_sector {
-                    Some((s, bar)) if *s == sector => bar.clone(),
-                    _ => {
-                        // First chunk of a new sector — finish any
-                        // previous bar and start a fresh one.
-                        if let Some((_, old)) = per_sector.take() {
-                            old.finish_and_clear();
+                if tty {
+                    let bar = match &per_sector {
+                        Some((s, bar)) if *s == sector => bar.clone(),
+                        _ => {
+                            // First chunk of a new sector — finish any
+                            // previous bar and start a fresh one.
+                            if let Some((_, old)) = per_sector.take() {
+                                old.finish_and_clear();
+                            }
+                            let bar = multi.add(ProgressBar::new(u64::from(total)));
+                            bar.set_style(
+                                ProgressStyle::with_template(
+                                    "  sector {prefix} [{bar:30.cyan/blue}] {bytes}/{total_bytes}",
+                                )
+                                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                                .progress_chars("█▉▊▋▌▍▎▏ "),
+                            );
+                            bar.set_prefix(format!("{sector}"));
+                            per_sector = Some((sector, bar.clone()));
+                            bar
                         }
-                        let bar = multi.add(ProgressBar::new(u64::from(total)));
-                        bar.set_style(
-                            ProgressStyle::with_template(
-                                "  sector {prefix} [{bar:30.cyan/blue}] {bytes}/{total_bytes}",
-                            )
-                            .unwrap_or_else(|_| ProgressStyle::default_bar())
-                            .progress_chars("█▉▊▋▌▍▎▏ "),
-                        );
-                        bar.set_prefix(format!("{sector}"));
-                        per_sector = Some((sector, bar.clone()));
-                        bar
+                    };
+                    bar.set_position(u64::from(bytes));
+                    if bytes >= total {
+                        bar.finish_and_clear();
+                        per_sector = None;
                     }
-                };
-                bar.set_position(u64::from(bytes));
-                if bytes >= total {
-                    bar.finish_and_clear();
-                    per_sector = None;
+                } else {
+                    // Non-TTY: emit a line once per ~10% progress plus
+                    // one at 100%. Total is sector size (≤128 KB) so
+                    // the percent math stays in u32 comfortably.
+                    let pct = if total == 0 {
+                        100
+                    } else {
+                        ((u64::from(bytes) * 100) / u64::from(total)) as u32
+                    };
+                    let should_print = match last_percent_printed {
+                        Some((s, last)) if s == sector => {
+                            pct >= last + NON_TTY_PROGRESS_STEP || bytes >= total
+                        }
+                        _ => true,
+                    };
+                    if should_print {
+                        say(
+                            &multi,
+                            &format!("Sector {sector}: {pct:>3}% ({bytes}/{total} B)"),
+                        );
+                        last_percent_printed = Some((sector, pct));
+                    }
+                    if bytes >= total {
+                        last_percent_printed = None;
+                    }
                 }
             }
             FlashEvent::SectorVerified { sector, crc } => {
-                multi
-                    .println(format!("Sector {sector}: verified (crc=0x{crc:08X})"))
-                    .ok();
+                say(
+                    &multi,
+                    &format!("Sector {sector}: verified (crc=0x{crc:08X})"),
+                );
             }
             FlashEvent::Committing => {
-                overall.set_message("Committing metadata…");
+                if tty {
+                    overall.set_message("Committing metadata…");
+                } else {
+                    say(&multi, "Committing metadata…");
+                }
             }
             FlashEvent::Done { report } => {
-                overall.finish_with_message(format!(
+                let msg = format!(
                     "Done — erased {} written {} skipped {} in {} ms",
                     report.sectors_erased.len(),
                     report.sectors_written.len(),
                     report.sectors_skipped.len(),
                     report.duration.as_millis(),
-                ));
+                );
+                if tty {
+                    overall.finish_with_message(msg);
+                } else {
+                    say(&multi, &msg);
+                }
             }
         }
     }
