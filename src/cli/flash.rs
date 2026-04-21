@@ -101,6 +101,14 @@ pub struct FlashArgs {
     /// Session keepalive interval in milliseconds
     #[arg(long = "keepalive-ms", default_value_t = 5_000)]
     pub keepalive_ms: u32,
+
+    /// Emit a timing summary to stderr after the flash completes.
+    /// Useful for diagnosing where the 52 s goes: per-phase wall
+    /// time (connect / diff / erase / write / verify / commit / jump)
+    /// plus per-chunk write statistics (p50, p95, max). No effect
+    /// on the flash itself — pure instrumentation.
+    #[arg(long = "profile", default_value_t = false)]
+    pub profile: bool,
 }
 
 // ---- Entry point ----
@@ -245,7 +253,8 @@ async fn run_pipeline(
     let config = build_flash_config(args);
     let (tx, rx) = mpsc::unbounded_channel::<FlashEvent>();
     let json_mode = global.json;
-    let progress_task = tokio::spawn(render_progress(rx, json_mode));
+    let profile = args.profile;
+    let progress_task = tokio::spawn(render_progress(rx, json_mode, profile));
 
     let manager = FlashManager::new(session, image, config);
     let report_result = manager.run(Some(tx)).await;
@@ -411,12 +420,44 @@ async fn fire_jump(session: &Session) -> Result<()> {
 /// enough to read as "clearly still alive" without overflowing a log.
 const NON_TTY_PROGRESS_STEP: u32 = 10;
 
-async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool) {
+async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool, profile: bool) {
+    // Profile-mode bookkeeping. Collects wall-clock timestamps of
+    // every FlashEvent we see plus per-chunk write intervals, and
+    // prints a timing summary at the very end. No effect when
+    // `profile == false` (the `if profile { … }` branches no-op).
+    //
+    // Timestamps come from `Instant::now()` at event-receive time on
+    // the progress task — which is one tokio await hop removed from
+    // the actual engine-side emission, but the gap is consistently a
+    // few microseconds so it doesn't skew the per-phase deltas we
+    // care about (the phases themselves are in the 10s of ms to
+    // multiple seconds).
+    let profile_start = std::time::Instant::now();
+    let mut profile_events: Vec<(std::time::Duration, FlashEventKind)> = Vec::new();
+    // Per-chunk write intervals, partitioned by sector. Populated on
+    // every `ChunkWritten`; at summary time we compute p50/p95/max.
+    let mut chunk_intervals: std::collections::BTreeMap<u8, Vec<std::time::Duration>> =
+        std::collections::BTreeMap::new();
+    let mut last_chunk_at: std::collections::HashMap<u8, std::time::Instant> =
+        std::collections::HashMap::new();
+
     if json {
         while let Some(event) = rx.recv().await {
+            if profile {
+                record_profile_event(
+                    &mut profile_events,
+                    &mut chunk_intervals,
+                    &mut last_chunk_at,
+                    profile_start,
+                    &event,
+                );
+            }
             if let Ok(line) = serde_json::to_string(&JsonEvent::from(&event)) {
                 println!("{line}");
             }
+        }
+        if profile {
+            print_profile_summary(&profile_events, &chunk_intervals);
         }
         return;
     }
@@ -456,6 +497,15 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool
     };
 
     while let Some(event) = rx.recv().await {
+        if profile {
+            record_profile_event(
+                &mut profile_events,
+                &mut chunk_intervals,
+                &mut last_chunk_at,
+                profile_start,
+                &event,
+            );
+        }
         match event {
             FlashEvent::PlanningSector { sector, role } => {
                 let txt = match role {
@@ -555,6 +605,136 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool
             }
         }
     }
+
+    if profile {
+        print_profile_summary(&profile_events, &chunk_intervals);
+    }
+}
+
+// ---- Profile-mode helpers ----
+//
+// Split out because they grew past the "one-liner inline in the
+// loop" size — the summary needs p50/p95/max on a Vec, and that's
+// sortable state not belonging in the hot progress path.
+
+/// Discriminant of [`FlashEvent`] without the payload — enough to
+/// recover phase boundaries without cloning full events into the
+/// profile timeline. Carries `sector` only where phase-boundary
+/// inference benefits from it (Erased, SectorVerified — per-sector
+/// event; everything else is singleton).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlashEventKind {
+    PlanningSector { sector: u8, role: SectorRole },
+    Erased { sector: u8 },
+    ChunkWritten { sector: u8, bytes: u32, total: u32 },
+    SectorVerified { sector: u8 },
+    Committing,
+    Done,
+}
+
+impl From<&FlashEvent> for FlashEventKind {
+    fn from(e: &FlashEvent) -> Self {
+        match e {
+            FlashEvent::PlanningSector { sector, role } => Self::PlanningSector {
+                sector: *sector,
+                role: *role,
+            },
+            FlashEvent::Erased { sector } => Self::Erased { sector: *sector },
+            FlashEvent::ChunkWritten {
+                sector,
+                bytes,
+                total,
+            } => Self::ChunkWritten {
+                sector: *sector,
+                bytes: *bytes,
+                total: *total,
+            },
+            FlashEvent::SectorVerified { sector, .. } => Self::SectorVerified { sector: *sector },
+            FlashEvent::Committing => Self::Committing,
+            FlashEvent::Done { .. } => Self::Done,
+        }
+    }
+}
+
+fn record_profile_event(
+    timeline: &mut Vec<(std::time::Duration, FlashEventKind)>,
+    chunk_intervals: &mut std::collections::BTreeMap<u8, Vec<std::time::Duration>>,
+    last_chunk_at: &mut std::collections::HashMap<u8, std::time::Instant>,
+    start: std::time::Instant,
+    event: &FlashEvent,
+) {
+    let now = std::time::Instant::now();
+    let since_start = now.saturating_duration_since(start);
+    timeline.push((since_start, FlashEventKind::from(event)));
+
+    if let FlashEvent::ChunkWritten { sector, .. } = event {
+        if let Some(prev) = last_chunk_at.get(sector) {
+            let gap = now.saturating_duration_since(*prev);
+            chunk_intervals.entry(*sector).or_default().push(gap);
+        }
+        last_chunk_at.insert(*sector, now);
+    }
+}
+
+fn print_profile_summary(
+    timeline: &[(std::time::Duration, FlashEventKind)],
+    chunk_intervals: &std::collections::BTreeMap<u8, Vec<std::time::Duration>>,
+) {
+    let Some(total) = timeline.last().map(|(t, _)| *t) else {
+        return;
+    };
+
+    eprintln!();
+    eprintln!("─────────────── profile ───────────────");
+    eprintln!("total flash engine:   {:>8} ms", total.as_millis());
+
+    // Phase breakdown: walk the timeline and bucket time between
+    // known boundary events. This is intentionally simple — a single
+    // sector with one of each phase is the common case, and it's
+    // what the user wants to read when diagnosing "where did the
+    // 52 s go."
+    let mut last_at = std::time::Duration::ZERO;
+    let mut last_label = "startup";
+    for (at, kind) in timeline {
+        let label = match kind {
+            FlashEventKind::PlanningSector { .. } => "plan/diff",
+            FlashEventKind::Erased { .. } => "erase",
+            FlashEventKind::ChunkWritten {
+                bytes, total: tot, ..
+            } if bytes == tot => "write (sector complete)",
+            FlashEventKind::ChunkWritten { .. } => continue, // mid-sector, don't flush
+            FlashEventKind::SectorVerified { .. } => "verify",
+            FlashEventKind::Committing => "pre-commit",
+            FlashEventKind::Done => "commit",
+        };
+        let delta = at.saturating_sub(last_at);
+        eprintln!("  {:>20} {:>8} ms", last_label, delta.as_millis());
+        last_label = label;
+        last_at = *at;
+    }
+
+    // Per-sector write-chunk statistics. Useful for spotting
+    // pacing-related oddities — uniform chunk intervals = TX
+    // floor-bounded; bimodal distribution = ACK-latency dependent.
+    if !chunk_intervals.is_empty() {
+        eprintln!();
+        eprintln!("per-chunk write interval (ms) — by sector:");
+        eprintln!("  sector  chunks     min     p50     p95     max");
+        for (sector, intervals) in chunk_intervals {
+            if intervals.is_empty() {
+                continue;
+            }
+            let mut sorted: Vec<u128> = intervals.iter().map(|d| d.as_millis()).collect();
+            sorted.sort_unstable();
+            let n = sorted.len();
+            let min = sorted[0];
+            let p50 = sorted[n / 2];
+            let p95 = sorted[n.saturating_mul(95) / 100];
+            let max = *sorted.last().unwrap();
+            eprintln!("  0x{sector:02X}      {n:>6}  {min:>6}  {p50:>6}  {p95:>6}  {max:>6}");
+        }
+    }
+    eprintln!("────────────────────────────────────────");
 }
 
 // ---- Report output ----
@@ -793,6 +973,7 @@ mod tests {
             jump: true,
             no_jump: false,
             keepalive_ms: 5000,
+            profile: false,
         };
         let cfg = build_flash_config(&args);
         assert!(!cfg.diff, "--no-diff should win");
@@ -815,6 +996,7 @@ mod tests {
             jump: true,
             no_jump: false,
             keepalive_ms: 5000,
+            profile: false,
         };
         let cfg = build_flash_config(&args);
         assert!(cfg.dry_run);
