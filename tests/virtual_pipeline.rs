@@ -213,7 +213,7 @@ async fn command_addressed_to_other_node_times_out() {
         .await
         .expect_err("routed-elsewhere connect");
     match err {
-        SessionError::CommandTimeout(_) => {}
+        SessionError::CommandTimeout { .. } => {}
         other => panic!("expected CommandTimeout, got {other:?}"),
     }
 

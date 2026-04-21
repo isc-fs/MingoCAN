@@ -134,8 +134,8 @@ async fn send_command_to_an_absent_node_times_out() {
         .await
         .expect_err("expected timeout");
     match err {
-        can_flasher::session::SessionError::CommandTimeout(d) => {
-            assert_eq!(d, Duration::from_millis(200));
+        can_flasher::session::SessionError::CommandTimeout { timeout, .. } => {
+            assert_eq!(timeout, Duration::from_millis(200));
         }
         other => panic!("expected CommandTimeout, got {other:?}"),
     }

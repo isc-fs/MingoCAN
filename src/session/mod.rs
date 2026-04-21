@@ -124,8 +124,24 @@ pub enum SessionError {
     },
 
     /// No reply arrived within the configured command timeout.
-    #[error("timed out waiting for device reply after {}ms", .0.as_millis())]
-    CommandTimeout(Duration),
+    ///
+    /// `adapter_errors_during_wait` is the number of adapter-level
+    /// error events the backend saw while this command was in
+    /// flight — on SLCAN that's BEL (`0x07`) bytes from the
+    /// CANable. A non-zero value means the adapter refused our TX
+    /// frame (bus-off, TX buffer full, stuck-dominant), so the
+    /// frame never reached the CAN bus and the device was never
+    /// going to reply. We print the count in the error so
+    /// operators know to unplug/replug the CANable rather than
+    /// assume the target is dead.
+    #[error(
+        "{}",
+        command_timeout_display(*.timeout, *.adapter_errors_during_wait)
+    )]
+    CommandTimeout {
+        timeout: Duration,
+        adapter_errors_during_wait: u32,
+    },
 
     /// Session operation attempted without a prior successful
     /// `connect()`.
@@ -146,6 +162,31 @@ pub enum SessionError {
     /// "garbled bus traffic".
     #[error("unexpected protocol frame: {0}")]
     Protocol(&'static str),
+}
+
+/// Render the `CommandTimeout` error message. Split into a helper so
+/// `thiserror`'s `#[error(...)]` can invoke it cleanly via
+/// `{}` + a function pointer, and so the string format is covered by
+/// its own unit tests (in `transport::slcan::tests`) without going
+/// through the whole error chain. `pub(crate)` so those tests can
+/// reach it; external callers should rely on the `Display` impl of
+/// `SessionError` instead.
+pub(crate) fn command_timeout_display(timeout: Duration, adapter_errors: u32) -> String {
+    if adapter_errors == 0 {
+        format!(
+            "timed out waiting for device reply after {}ms",
+            timeout.as_millis()
+        )
+    } else {
+        format!(
+            "timed out waiting for device reply after {}ms; adapter reported {} error(s) \
+             during this wait — the frame probably never reached the CAN bus (bus-off, \
+             TX buffer full, or stuck-dominant). Try unplugging and replugging the \
+             adapter, then retry.",
+            timeout.as_millis(),
+            adapter_errors,
+        )
+    }
 }
 
 /// Per-session knobs. [`SessionConfig::default`] gives you numbers
@@ -341,12 +382,20 @@ impl Session {
     /// per-call destination override.
     pub async fn send_command_to(&self, dst: u8, payload: &[u8]) -> Result<Response, SessionError> {
         let _guard = self.inner.command_lock.lock().await;
+        let errors_before = self.inner.backend.adapter_error_count();
         self.send_frames(payload, MessageType::Cmd, dst).await?;
         let mut rx = self.inner.reply_rx.lock().await;
         match timeout(self.config.command_timeout, rx.recv()).await {
             Ok(Some(response)) => Ok(response),
             Ok(None) => Err(SessionError::RxClosed),
-            Err(_) => Err(SessionError::CommandTimeout(self.config.command_timeout)),
+            Err(_) => Err(SessionError::CommandTimeout {
+                timeout: self.config.command_timeout,
+                adapter_errors_during_wait: self
+                    .inner
+                    .backend
+                    .adapter_error_count()
+                    .saturating_sub(errors_before),
+            }),
         }
     }
 
@@ -479,13 +528,21 @@ impl Session {
         payload: &[u8],
         message_type: MessageType,
     ) -> Result<Response, SessionError> {
+        let errors_before = self.inner.backend.adapter_error_count();
         self.send_frames(payload, message_type, self.inner.target_node)
             .await?;
         let mut rx = self.inner.reply_rx.lock().await;
         match timeout(self.config.command_timeout, rx.recv()).await {
             Ok(Some(response)) => Ok(response),
             Ok(None) => Err(SessionError::RxClosed),
-            Err(_) => Err(SessionError::CommandTimeout(self.config.command_timeout)),
+            Err(_) => Err(SessionError::CommandTimeout {
+                timeout: self.config.command_timeout,
+                adapter_errors_during_wait: self
+                    .inner
+                    .backend
+                    .adapter_error_count()
+                    .saturating_sub(errors_before),
+            }),
         }
     }
 
@@ -608,6 +665,7 @@ async fn keepalive_tick(
     command_timeout: Duration,
 ) -> Result<(), SessionError> {
     let _guard = inner.command_lock.lock().await;
+    let errors_before = inner.backend.adapter_error_count();
     let payload = cmd_get_health();
 
     // Mirrors `send_frames` — prepend msg_type, single ID for FF+CFs.
@@ -636,7 +694,13 @@ async fn keepalive_tick(
     match timeout(command_timeout, rx.recv()).await {
         Ok(Some(_resp)) => Ok(()),
         Ok(None) => Err(SessionError::RxClosed),
-        Err(_) => Err(SessionError::CommandTimeout(command_timeout)),
+        Err(_) => Err(SessionError::CommandTimeout {
+            timeout: command_timeout,
+            adapter_errors_during_wait: inner
+                .backend
+                .adapter_error_count()
+                .saturating_sub(errors_before),
+        }),
     }
 }
 
@@ -870,7 +934,13 @@ mod tests {
         let session = Session::attach(Box::new(host), test_config());
         let err = session.connect().await.unwrap_err();
         match err {
-            SessionError::CommandTimeout(d) => assert_eq!(d, Duration::from_millis(200)),
+            SessionError::CommandTimeout {
+                timeout,
+                adapter_errors_during_wait,
+            } => {
+                assert_eq!(timeout, Duration::from_millis(200));
+                assert_eq!(adapter_errors_during_wait, 0);
+            }
             other => panic!("expected CommandTimeout, got {other:?}"),
         }
     }

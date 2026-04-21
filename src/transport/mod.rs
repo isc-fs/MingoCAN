@@ -130,6 +130,25 @@ pub trait CanBackend: Send + Sync {
     /// Human-readable description used in logs and the audit-log
     /// row. Example: `"CANable 2.0 (USB 1d50:606f)"`.
     fn description(&self) -> String;
+
+    /// Monotonic count of adapter-reported errors since this backend
+    /// was opened. "Adapter error" here is a low-level refusal from
+    /// the adapter itself (as opposed to a NACK from the bootloader)
+    /// — on SLCAN this is every BEL byte, which signals bus-off, TX
+    /// buffer full, or stuck-dominant. Other backends that don't
+    /// distinguish adapter from bus errors return 0 and rely on
+    /// their own `recv()`/`send()` error types.
+    ///
+    /// Callers snapshot this before and after an operation to
+    /// detect adapter-level failures that would otherwise only
+    /// surface as a `TransportError::Timeout` after the full
+    /// `command_timeout` — turning a 5 s silent wait into an
+    /// immediate, informative error.
+    ///
+    /// Default returns 0. Non-zero is specific to SLCAN today.
+    fn adapter_error_count(&self) -> u32 {
+        0
+    }
 }
 
 /// Router: pick the right backend for the given `--interface` /

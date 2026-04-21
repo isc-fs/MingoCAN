@@ -221,7 +221,7 @@ impl FlashError {
     /// the error family to the REQUIREMENTS.md exit-code table.
     pub fn exit_code_hint(&self) -> ExitCodeHint {
         match self {
-            FlashError::Session(SessionError::CommandTimeout(_))
+            FlashError::Session(SessionError::CommandTimeout { .. })
             | FlashError::Session(SessionError::RxClosed) => ExitCodeHint::DeviceNotFound,
             FlashError::Nack {
                 code: NackCode::ProtectedAddr,
@@ -722,7 +722,10 @@ mod tests {
         assert_eq!(mismatch.exit_code_hint(), ExitCodeHint::VerifyMismatch);
 
         // Timeout / RxClosed → device not found.
-        let timeout = FlashError::Session(SessionError::CommandTimeout(Duration::from_millis(1)));
+        let timeout = FlashError::Session(SessionError::CommandTimeout {
+            timeout: Duration::from_millis(1),
+            adapter_errors_during_wait: 0,
+        });
         assert_eq!(timeout.exit_code_hint(), ExitCodeHint::DeviceNotFound);
 
         // Everything else → generic FlashError (exit 1).
