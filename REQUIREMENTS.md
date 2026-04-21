@@ -977,19 +977,11 @@ reserved for v2 / Phase-5 reactivation and never emitted by v1.0.0.
 
 ### Exit codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Success |
-| `1` | Flash or write error |
-| `2` | Verification mismatch |
-| `3` | Protection violation (address in bootloader sector) |
-| `4` | Device not found / timeout |
-| `7` | WRP not applied (when `--require-wrp` is set and `--apply-wrp` isn't) |
-| `8` | Input file error (bad format, address overlap) |
-| `9` | Adapter not found or SDK missing |
-
-Codes `5` (signature failed) and `6` (replay rejection) reserved for
-v2 / Phase-5 reactivation; never returned by v1.
+Canonical table lives in
+[docs/USAGE.md § Exit codes](docs/USAGE.md#exit-codes) — the
+operator-facing doc owns it so pit-wall users find the table in
+the first doc they'd reach for. Codes `5` (signature failed) and
+`6` (replay rejection) remain reserved for Phase-5 reactivation.
 
 ### JSON output (`--json`)
 

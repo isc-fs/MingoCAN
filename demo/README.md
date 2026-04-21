@@ -28,13 +28,23 @@ minimal: a blinky with enough CAN plumbing to accept the
 reboot-to-BL frame and identify itself over the bus. Anything fancier
 goes on the private side.
 
+## Prerequisite: bootloader already flashed
+
+This demo is the *application*. Before it can run, sector 0 needs
+the bootloader programmed via SWD and (ideally) WRP-latched. If
+that hasn't been done yet, follow [the bootloader's
+PROVISIONING.md](https://github.com/isc-fs/stm32-can-bootloader/blob/main/PROVISIONING.md)
+first — it covers a fresh board from factory state all the way to
+shipping-ready.
+
 ## App-side protocol summary
 
 `MAIN_IFS08_DEMO` installs an FDCAN2 filter that accepts host→node
 traffic for its own node ID and broadcasts. Incoming frames are
 decoded as ISO-TP SF (we only handle single-frame app-ctrl today;
-multi-frame app commands can be added if needed) with the wire
-layout from `protocol/ids.rs`:
+multi-frame app commands can be added if needed) using the wire
+layout documented in [../REQUIREMENTS.md § Message type
+byte](../REQUIREMENTS.md#message-type-byte):
 
 ```
 payload[0] = PCI  (0x02..0x07 for SF with len=2..7)
