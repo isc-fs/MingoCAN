@@ -1,0 +1,123 @@
+name: Release
+
+# Cross-platform binary builds for `can-flasher`. Triggers on any
+# `v*` tag push, plus manual runs via the UI when we need to
+# rebuild without cutting a new tag (e.g. re-uploading after an
+# artifact got clobbered). Each job compiles natively on its host
+# runner — no cross-compile toolchains to babysit — and the
+# artifacts land on the GitHub Release the tag created (or, for
+# manual runs, just stay as workflow artifacts so we can inspect
+# before promoting).
+#
+# CI correctness lives in ci.yml (fmt / clippy / test). This
+# workflow is strictly about producing and publishing binaries.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_ext: tar.gz
+            bin_ext: ''
+            apt_deps: libudev-dev pkg-config
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive_ext: tar.gz
+            bin_ext: ''
+            apt_deps: ''
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_ext: zip
+            bin_ext: '.exe'
+            apt_deps: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build deps
+        if: matrix.apt_deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_deps }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --bin can-flasher --target ${{ matrix.target }}
+
+      # Derive the version string from the tag (`refs/tags/v1.1.0` →
+      # `v1.1.0`) or use a `dev-<sha>` placeholder for manual runs.
+      # The placeholder keeps artifact names stable-ish while clearly
+      # signalling "not an official release."
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pack the binary plus README + LICENCE hints into a single
+      # archive per target. Flat layout — the archive extracts to a
+      # single directory named after the archive. Operators get one
+      # curl/wget + extract to a clean copy of `can-flasher` on their
+      # PATH.
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          STAGE="can-flasher-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          mkdir "$STAGE"
+          cp "target/${{ matrix.target }}/release/can-flasher${{ matrix.bin_ext }}" "$STAGE/"
+          cp README.md "$STAGE/"
+          [ -f LICENSE ] && cp LICENSE "$STAGE/" || true
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          echo "archive=$STAGE.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $stage = "can-flasher-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/can-flasher${{ matrix.bin_ext }}" $stage
+          Copy-Item README.md $stage
+          if (Test-Path LICENSE) { Copy-Item LICENSE $stage }
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          echo "archive=$stage.zip" >> $env:GITHUB_ENV
+
+      - name: Upload as workflow artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: can-flasher-${{ matrix.target }}
+          path: ${{ env.archive }}
+          # Keep manual-run artifacts for a week — enough for a
+          # hotfix loop, short enough that we don't hoard storage.
+          retention-days: 7
+
+      - name: Attach to GitHub Release
+        # Only attach when triggered by a tag push — manual runs
+        # stay as workflow artifacts so a half-built release
+        # doesn't accidentally publish.
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.archive }}
+          fail_on_unmatched_files: true
