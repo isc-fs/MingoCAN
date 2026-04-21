@@ -156,6 +156,12 @@ v1.1.0 shipped with a version skew bug (binaries reported
 happen again. If you see the workflow fail on `verify-version`,
 that's the guard earning its keep.
 
+4. **Dev re-syncs automatically** once the release is published.
+   `sync-dev-after-release.yml` listens for `release: published`
+   and fast-forwards `dev` to `main` (or creates a merge commit
+   if dev has diverged). No manual `git checkout dev && git merge
+   main` needed after a release cut.
+
 ---
 
 ## Writing new code
