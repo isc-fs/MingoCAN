@@ -1,14 +1,22 @@
-# Flash performance — v1.1.x baseline and v1.2.0 targets
+# Flash performance — v1.1.x baseline and v1.2.0 outcome
 
 Investigation doc for why `cf flash` takes ~52 s to program a
-26 KB application on real hardware, and what we can do about it.
-Builds on the `--profile` flag landed alongside this doc.
+26 KB application on real hardware, and what we learned about how
+to (and how *not* to) speed it up. Builds on the `--profile` flag
+from PR #82.
 
 Take every number here with a grain of "run it on your own
 machine" — macOS scheduler granularity varies, and the hardware
 numbers were collected on a single bench (STM32H733 + Protofusion
-Labs CANable @ 500 kbps). Trends are robust; absolute milliseconds
-aren't.
+Labs CANable 2.0 @ 500 kbps). Trends are robust; absolute
+milliseconds aren't.
+
+**TL;DR** — v1.2.0 ships `DEFAULT_WRITE_CHUNK` 128 → 256 B (fix/20),
+taking the hardware flash from 52 s → ~49.6 s (~4.5 %). The bigger
+wins predicted by the §3 back-of-envelope (5-15 s flash from precise
+pacing / no pacing) turned out **not** to exist at 500 kbps on this
+adapter — see [§ hardware bench](#what-the-hardware-bench-actually-said-fix19--fix20)
+for why. We dropped fix/19 (precise pacing) after measurement.
 
 ---
 
@@ -122,23 +130,89 @@ noise by comparison.
 
 ---
 
-## What fixes buy us
+## What the hardware bench actually said (fix/19 + fix/20)
 
-Rough theoretical savings if we eliminate the pacing sleep's
-scheduler overhead but keep its protective function (1 ms between
-frames, precise):
+When we actually tried the changes above on the IFS08 bench
+(STM32H733 + Protofusion Labs CANable 2.0 @ 500 kbps), the
+numbers told a different story than §3 predicted. Sharing them so
+the next person doesn't chase the same ghosts.
 
-| Fix | Expected new wall time |
-|---|---|
-| **Do nothing** | 52 s |
-| `spin_sleep` for sub-ms (or a hybrid sleep that busy-waits the tail) | ~30 s |
-| Drop pacing entirely (measure if CANable copes) | ~8–12 s |
-| 256 B chunks instead of 128 B (halves chunk count) | ~26 s at current pacing |
-| Chunks + precise pacing | ~15 s |
-| All three (256 B chunks + no pacing + fully pipelined) | ~5–8 s |
+### Precise pacing is a dead end here
 
-A 10× improvement (52 s → ~5 s) is plausible. A 4× improvement
-(52 s → ~13 s) is almost certain with the precise-sleep fix alone.
+| Variant | Per-chunk p50 | Wall | Result |
+|---|---:|---:|---|
+| dev baseline (`tokio::time::sleep(1ms)` → ~2.3 ms actual) | 47 ms | **52 s** | ✅ completes 1023/1023 chunks |
+| `spin_loop` busy-wait at 1 ms precise | 40 ms | — | ❌ fails chunk 48, `TRANSPORT_TIMEOUT` from BL |
+| `std::thread::sleep(1ms)` (yields to OS) | 40 ms | — | ❌ fails chunk 48, same failure |
+| `std::thread::sleep(2ms)` precise | 53 ms | — | ❌ fails chunk 572, same failure |
+| `std::thread::sleep(3ms)` precise | 79 ms | **84 s** | ✅ completes, but **slower than baseline** |
+
+The "~40 s of sleep is wasted" diagnosis in §3 was wrong. The
+CANable's **sustainable end-to-end TX rate is the binding
+constraint**, not tokio's timer granularity. dev works because
+`tokio::time::sleep` has 2.3 ms median *and* occasional 10 ms
+spikes (tokio timer wheel jitter); the spikes give the adapter's
+internal buffer recovery time. Remove the variance — by any
+mechanism, busy-wait or yielding sleep — and the steady-state rate
+alone walks the buffer over the cliff, first after ~960 frames at
+1 ms, at ~11 400 frames at 2 ms, never at 3 ms.
+
+No BEL bytes come back from the CANable when it drops — it just
+silently loses CFs, which the BL sees as reassembly timeout or
+bad-sequence error.
+
+**Takeaway**: precise pacing alone cannot speed up hardware flash
+on this adapter. We've dropped the fix/19 precise-pacing branch.
+
+### 256 B chunks: small but real win
+
+PR #57 had dropped `DEFAULT_WRITE_CHUNK` from 256 → 128 with a
+note that 256 B bursts overflowed the CANable. On remeasurement
+(fix/20) the 256 B chunks now complete cleanly — likely because
+#57 also split the SLCAN reader/writer ports in the same commit,
+and the actual root cause of the reported "overflow" was mutex
+contention, not buffer size.
+
+| Variant | Chunks | Per-chunk p50 | Wall |
+|---|---:|---:|---:|
+| 128 B chunks (v1.1.x) | 1023 | 47 ms | 51.9 s |
+| **256 B chunks (v1.2.0)** | **511** | **90 ms** | **49.6 s** |
+
+A ~4.5 % speedup — much less than the "halving" you might expect,
+because the per-chunk wall time roughly **doubles** with chunk size
+(37 frames × pacing vs 19 frames × pacing). The savings come only
+from eliminating ~512 per-chunk BL-RTT overheads (program cycle,
+ACK). Modest, but reliable, aligned with REQUIREMENTS.md, and
+removes the v1.1.x code/docs inconsistency for free.
+
+This is what actually lands in v1.2.0.
+
+### Where the bigger wins would have to come from
+
+At 500 kbps classic CAN with this adapter, a ~2.3 ms/frame floor
+× 20 000 frames per full-sector rewrite puts a theoretical minimum
+somewhere near **~45 s** (essentially: dev's baseline). We can't
+meaningfully beat that at the current bitrate without changing the
+topology. Real levers:
+
+1. **Adaptive pacing**. Probe the CANable's actual limit; back off
+   only when BEL fires (counter already exists per fix/17) or on a
+   BL retry. Complex, and the CANable doesn't BEL on silent drops,
+   so the signal to back off has to come from BL retries, not the
+   adapter. Untried.
+2. **Pipelining the write loop**. Issue `FLASH_WRITE(n+1)` while
+   BL is still programming `n`. Amortises per-chunk BL-RTT (~10 ms
+   × 511 chunks = ~5 s potential saving). Engine refactor.
+3. **Higher bus bitrate (1 Mbps)**. Halves wire time per frame,
+   but only helps if the BL and car harness can take it — not a
+   host-only change.
+4. **CAN-FD** (much more data per frame). Requires FD-capable
+   adapter and BL support. Out of scope for v1.x.
+
+None of these look worth the complexity for a saving of 5-10 s on
+a 50 s operation that you run maybe ten times per deploy. Ship the
+256 B chunk win, update the expectation in this doc, revisit if
+someone really needs sub-30-s flash.
 
 ---
 
@@ -147,52 +221,17 @@ A 10× improvement (52 s → ~5 s) is plausible. A 4× improvement
 The CANable's TX buffer is finite. When host + CANable get ahead
 of the CAN wire — which happens on multi-frame bursts — the
 CANable silently drops frames, which manifests on the BL side as
-ISO-TP reassembly timeouts. fix/10 added the 1 ms sleep as a
-conservative throttle. It worked; it just turns out to be much
-more expensive than intended.
+ISO-TP reassembly timeouts. fix/10 added `tokio::time::sleep(1ms)`
+between frames as a conservative throttle. It worked; the fix/19
+bench just revealed that the *real* pacing we were getting was
+~2.3 ms, not 1 ms, and the adapter actually needs ~2.3 ms to
+survive a continuous burst.
 
-Any pacing rework needs to preserve the property fix/10 enforced:
-never burst faster than the CANable can sustain onto the wire.
-
-Options (in rough order of implementation cost):
-
-1. **Precise 1 ms sleep** (`spin_sleep` crate or custom
-   busy-loop-with-yield hybrid). Minimal risk — same throttle,
-   less overhead.
-2. **Adaptive pacing**: start at 0 ms; if a BEL byte arrives from
-   the CANable (we already count these per fix/17), back off.
-   Requires passing the BEL counter into `send()`, which is a
-   minor refactor.
-3. **No pacing, rely on ISO-TP FC(Wait) from the BL**: the BL
-   already implements flow control. If we trust the BL to throttle
-   us via FC frames between FF and CFs, we don't need host-side
-   pacing at all. Requires BL-side FC(Wait) to actually fire on
-   TX-buffer-full conditions — untested.
-4. **Larger chunks** (256 B or even 512 B): halves or quarters the
-   chunk count. Has to be validated against the CANable's burst
-   capacity regardless of pacing.
-5. **Pipelining**: issue the next `FLASH_WRITE` before the
-   previous ACK lands. Amortises the per-chunk ACK RTT. Larger
-   refactor of the flash engine.
-
----
-
-## v1.2.0 plan
-
-1. Land fix #1 (precise pacing). Remeasure — expect ~30 s.
-2. Land fix #4 (256 B chunks). Remeasure — expect ~15 s.
-3. If hardware still under-performs, attempt fix #2 (adaptive
-   pacing off BEL) or #5 (pipelining). Validate against the same
-   CANable that surfaced the original fix/10 overflow — if 0 ms
-   pacing with 256 B chunks works cleanly there, no further
-   complexity needed.
-4. Re-run `--profile` on every step and paste the numbers into the
-   PR. This doc is the baseline to diff against.
-
-Not all three fixes need to land — measure after each, stop when
-the wall time is good enough. Every change that complicates the
-pacing story costs maintainability later, so keep the simplest
-thing that hits the target.
+Any pacing rework has to preserve fix/10's invariant: never burst
+faster than the CANable can sustain onto the wire. The safest
+knob today is `PACING_INTERVAL` in `src/transport/slcan.rs` — if
+someone later adopts a different adapter with a larger buffer,
+they can measure and lower it.
 
 ---
 
