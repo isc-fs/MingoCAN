@@ -47,6 +47,12 @@ pub enum ExitCodeHint {
     InputFileError,
     #[error("adapter not found or SDK missing")]
     AdapterMissing,
+    /// User hit Ctrl-C. Conventional shell exit code 130 (128 + SIGINT).
+    /// Subcommands that catch SIGINT should map to this; the cleanup
+    /// path (best-effort CMD_DISCONNECT, close port) runs before we
+    /// return so the device is left in a clean state for the next run.
+    #[error("interrupted by user (SIGINT)")]
+    Interrupted,
 }
 
 impl ExitCodeHint {
@@ -60,6 +66,7 @@ impl ExitCodeHint {
             Self::WrpNotApplied => 7,
             Self::InputFileError => 8,
             Self::AdapterMissing => 9,
+            Self::Interrupted => 130,
         }
     }
 }
@@ -210,7 +217,7 @@ fn parse_node_id(raw: &str) -> Result<u8, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_node_id;
+    use super::{parse_node_id, ExitCodeHint};
 
     #[test]
     fn node_id_accepts_hex() {
@@ -234,5 +241,21 @@ mod tests {
     fn node_id_rejects_junk() {
         assert!(parse_node_id("").is_err());
         assert!(parse_node_id("0xZZ").is_err());
+    }
+
+    #[test]
+    fn exit_codes_match_requirements_table() {
+        // Pin the numeric values — these leak into shell scripts and
+        // CI assertions, so accidental renumbering is a breaking
+        // change. Keep in sync with REQUIREMENTS.md § Exit codes.
+        assert_eq!(ExitCodeHint::FlashError.exit_code(), 1);
+        assert_eq!(ExitCodeHint::VerifyMismatch.exit_code(), 2);
+        assert_eq!(ExitCodeHint::ProtectionViolation.exit_code(), 3);
+        assert_eq!(ExitCodeHint::DeviceNotFound.exit_code(), 4);
+        assert_eq!(ExitCodeHint::WrpNotApplied.exit_code(), 7);
+        assert_eq!(ExitCodeHint::InputFileError.exit_code(), 8);
+        assert_eq!(ExitCodeHint::AdapterMissing.exit_code(), 9);
+        // 130 = 128 + SIGINT (shell convention for Ctrl-C).
+        assert_eq!(ExitCodeHint::Interrupted.exit_code(), 130);
     }
 }

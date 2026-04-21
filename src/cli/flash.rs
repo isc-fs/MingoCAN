@@ -151,50 +151,58 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         .await
         .map_err(|e| exit_err(ExitCodeHint::DeviceNotFound, format!("CONNECT failed: {e}")))?;
 
-    // ---- 3. WRP policy (pre-flash) ----
-
-    let ob_status =
-        apply_wrp_policy(&session, args.require_wrp, args.apply_wrp, &args.firmware).await?;
-
-    // ---- 4. Run the flash pipeline ----
-
-    let config = build_flash_config(&args);
-    let (tx, rx) = mpsc::unbounded_channel::<FlashEvent>();
-    let json_mode = global.json;
-    let progress_task = tokio::spawn(render_progress(rx, json_mode));
-
-    let manager = FlashManager::new(&session, &image, config.clone());
-    let report_result = manager.run(Some(tx)).await;
-    let _ = progress_task.await;
-
-    let report = match report_result {
-        Ok(r) => r,
-        Err(e) => {
-            // Best-effort disconnect, then surface the error with
-            // the engine-assigned exit code.
-            let _ = session.disconnect().await;
-            return Err(exit_err(
-                e.exit_code_hint(),
-                format!("flash failed on '{}': {e}", args.firmware.display()),
-            ));
+    // ---- 3-5. Main pipeline under Ctrl-C watch ----
+    //
+    // Everything from WRP policy through the optional jump is
+    // wrapped in a `tokio::select!` against `ctrl_c`. On interrupt
+    // we drop the pipeline future (cancel-on-drop — all in-flight
+    // `.await`s terminate cleanly because each is either bounded
+    // by `command_timeout` or cancellation-safe), then fall through
+    // to the shared disconnect path so the BL doesn't inherit a
+    // stale session latch. Without this, Ctrl-C killed tasks
+    // abruptly, `session.disconnect()` never ran, and the BL's
+    // `g_session_active` flag stayed set until its 30 s watchdog —
+    // breaking the next `cf` invocation that happened to run
+    // sooner than the watchdog fired. The `send_frames` inside
+    // `disconnect()` is fire-and-forget (fix/14), so this path is
+    // fast even when the device is already gone.
+    let outcome = tokio::select! {
+        biased;
+        // `biased` makes select! poll the Ctrl-C arm first each
+        // iteration. If the user has already pressed Ctrl-C, we
+        // exit without starting the next command rather than
+        // potentially firing one more erase/write first.
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!();  // break any partial progress line
+            eprintln!("cf: interrupted — disconnecting cleanly…");
+            Err(exit_err(
+                ExitCodeHint::Interrupted,
+                format!("flash interrupted by user on '{}'", args.firmware.display()),
+            ))
         }
+        res = run_pipeline(&session, &image, &args, global) => res,
     };
 
-    // ---- 5. Optional JUMP ----
-
-    // `--no-jump` wins over `--jump` — same convention as diff /
-    // verify-after. clap's `overrides_with` only settles conflicts
-    // when both flags are present; a lone `--no-jump` leaves the
-    // default-true `jump` untouched, so we reconcile here.
-    let jump = !args.no_jump && args.jump;
-    if jump && !args.dry_run {
-        fire_jump(&session).await?;
-    }
-
-    // Disconnect before we print — the device's reset/jump
-    // sometimes eats the ACK, so we disconnect best-effort and
-    // ignore errors here.
+    // ---- Cleanup (shared by success, engine error, interrupt) ----
+    //
+    // Disconnect is best-effort and now fast on every path:
+    // - device alive & listening: one CMD_DISCONNECT frame, session
+    //   latch cleared on the BL side.
+    // - device just jumped (`--jump`): frame hits the app, which
+    //   silently drops it; the BL already cleared its own latch
+    //   when it jumped.
+    // - device interrupted mid-flash: frame hits the BL, clears
+    //   the latch; the in-flight ISO-TP reassembly state is a
+    //   non-issue because `handle_connect` resets it on the next
+    //   session.
     let _ = session.disconnect().await;
+
+    let (report, ob_status) = match outcome {
+        Ok((report, ob_status)) => (report, ob_status),
+        Err(e) => return Err(e),
+    };
+
+    let jump = !args.no_jump && args.jump;
 
     // ---- 6. Report ----
 
@@ -210,6 +218,56 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         jump,
     )?;
     Ok(())
+}
+
+/// Pipeline body — WRP policy → flash engine → optional jump. Returns
+/// the engine's [`FlashReport`] paired with the [`ObStatus`] we
+/// captured pre-flash (both are needed to render the final report
+/// regardless of whether the pipeline completed or was interrupted).
+///
+/// Every `.await` inside here is bounded (per the invariant
+/// documented in `src/session/mod.rs`), so the caller's
+/// `tokio::select!` against `ctrl_c` terminates this future
+/// cancel-safely — no mid-flight ISO-TP reassembly leaks across the
+/// drop, and the session's own state is consistent once the
+/// pending futures unwind.
+async fn run_pipeline(
+    session: &Session,
+    image: &crate::firmware::Image,
+    args: &FlashArgs,
+    global: &GlobalFlags,
+) -> Result<(FlashReport, ObStatus)> {
+    // ---- 3. WRP policy ----
+    let ob_status =
+        apply_wrp_policy(session, args.require_wrp, args.apply_wrp, &args.firmware).await?;
+
+    // ---- 4. Flash engine ----
+    let config = build_flash_config(args);
+    let (tx, rx) = mpsc::unbounded_channel::<FlashEvent>();
+    let json_mode = global.json;
+    let progress_task = tokio::spawn(render_progress(rx, json_mode));
+
+    let manager = FlashManager::new(session, image, config);
+    let report_result = manager.run(Some(tx)).await;
+    let _ = progress_task.await;
+
+    let report = match report_result {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(exit_err(
+                e.exit_code_hint(),
+                format!("flash failed on '{}': {e}", args.firmware.display()),
+            ));
+        }
+    };
+
+    // ---- 5. Optional JUMP ----
+    let jump = !args.no_jump && args.jump;
+    if jump && !args.dry_run {
+        fire_jump(session).await?;
+    }
+
+    Ok((report, ob_status))
 }
 
 // ---- WRP policy ----
