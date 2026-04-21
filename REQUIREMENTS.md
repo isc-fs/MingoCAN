@@ -746,7 +746,7 @@ debugger — the token is a deliberate brick-safety belt.
 |---|---|---|
 | `0xF0` | `NOTIFY_HEARTBEAT` | `[opcode, node_id, reset_cause, flags_low_byte, uptime_le24]` — 7 B; 1 Hz while session active |
 | `0xF1` | `NOTIFY_DTC` | `[opcode, dtc_entry_20B]` — single 20-byte DTC entry; emitted only on genuinely new codes (dedupes are silent) |
-| `0xF2` | `NOTIFY_LOG` | `[opcode, severity, flags, timestamp_le32, message_chunk…]` — chunked log ring drain |
+| `0xF2` | `NOTIFY_LOG` | `[opcode, entries…]` where each entry is `[text_len_u8, severity_u8, uptime_le32, text_bytes…]` — multiple entries packed back-to-back per notification |
 | `0xF3` | `NOTIFY_LIVE_DATA` | `[opcode, <32-byte snapshot>]` — at `rate_hz` while live stream active |
 
 The host must subscribe `NOTIFY_HEARTBEAT` implicitly for every open
