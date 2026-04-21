@@ -1,0 +1,13 @@
+# CubeMX / CMake build output
+build/
+cmake-build-*/
+Debug/
+Release/
+
+# IDE / editor
+.vscode/
+.settings/
+.cproject
+.project
+*.launch
+*.osx.project

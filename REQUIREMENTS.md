@@ -618,24 +618,71 @@ Source of truth: `Core/Inc/bl_proto.h` and `Core/Inc/bl_memmap.h` in
 the bootloader repo. Any field below must match those files exactly.
 Ping ARCHITECTURE.md for prose.
 
-### Frame ID layout (11-bit standard CAN)
+### Frame ID layout (11-bit standard CAN, fix/12)
 
 ```
-Bits [10:8]  — message type (3 bits)
-Bits [7:4]   — source node ID (4 bits, 0x0 = host)
-Bits [3:0]   — destination node ID (4 bits, 0xF = broadcast)
+Bits [10:5]  — always zero (keeps every valid ID ≤ 0x01F for
+                 CAN arbitration priority vs any non-BL traffic)
+Bit    4     — direction   (0 = host→node, 1 = node→host)
+Bits [3:0]   — other-end node ID
+                 host→node: destination (0x0..0xE unicast, 0xF broadcast)
+                 node→host: source      (0x1..0xE; 0x0, 0xF reserved)
 ```
 
-### Message types
+Concrete ID ranges:
 
-| Type | ID bits | Direction | Description |
-|---|---|---|---|
-| `CMD` | 0x0 | Host → Device | Command frame |
-| `ACK` | 0x1 | Device → Host | Positive acknowledgement |
-| `NACK` | 0x2 | Device → Host | Negative acknowledgement with error code |
-| `DATA` | 0x3 | Bidirectional | Multi-frame payload continuation |
-| `NOTIFY` | 0x4 | Device → Host | Unsolicited event (heartbeat, DTC, log, live data) |
-| `DISCOVER` | 0x7 | Broadcast | Discovery ping / response |
+| Range           | Purpose                                              |
+|-----------------|------------------------------------------------------|
+| `0x000..=0x00E` | host → node CMD + host-side ISO-TP CFs               |
+| `0x00F`         | host → broadcast (DISCOVER, broadcast APP_CTRL)      |
+| `0x010..=0x01E` | node → host ACK/NACK/NOTIFY/DISCOVER-reply/CF/FC     |
+| `0x01F`         | reserved                                             |
+| `0x020..=0x7FF` | reserved for future protocol extensions              |
+
+The message TYPE is **not** encoded in the ID — it lives in payload
+byte 1 (see below). This keeps the ID space small (5 bits in use),
+which maximises CAN arbitration priority on a shared bus, and lets
+every frame of an ISO-TP multi-frame transfer share a single ID
+(FF and CFs both ride on the `direction | node` pair; the PCI byte
+distinguishes them).
+
+### Message-type byte
+
+Carried as **payload byte 1** of every SF and FF (byte 0 is the
+ISO-TP PCI, byte 2 is the opcode). CFs and FCs don't carry the
+message-type byte — they're unambiguous by PCI, and they inherit
+semantic type from their parent FF.
+
+| Value | Name              | Direction       | Description                                            |
+|-------|-------------------|-----------------|--------------------------------------------------------|
+| `0x00`| `CMD`             | Host → Device   | Bootloader command                                     |
+| `0x01`| `ACK`             | Device → Host   | Positive acknowledgement                               |
+| `0x02`| `NACK`            | Device → Host   | Negative acknowledgement with error code               |
+| `0x03`| `NOTIFY`          | Device → Host   | Unsolicited event (heartbeat, DTC, log, live data)     |
+| `0x04`| `DISCOVER_REQUEST`| Host → Broadcast| Discovery ping (sent with dst = 0xF)                   |
+| `0x05`| `DISCOVER_REPLY`  | Device → Host   | Discovery reply                                        |
+| `0x06`| `APP_CTRL`        | Host → Node     | App-level command; BL silently drops, app handles it   |
+| `0x07..0xFF`     | *reserved*       |                                                        |
+
+`APP_CTRL` is the escape hatch for app-controlled workflows (e.g.
+"reboot this running app back to bootloader so the next flash can
+proceed"). The BL filter accepts these frames — they share the
+host→node ID space — but the BL dispatcher silently drops anything
+whose msg_type isn't one of its own. Application firmware (see
+`demo/MAIN_IFS08_DEMO/`) installs its own filter using the same ID
+masks and interprets `APP_CTRL` payloads however it likes. The
+reference convention is:
+
+```
+APP_CTRL payload (after msg_type):
+  opcode   1 B  (0x01 = ENTER_BOOTLOADER, rest app-defined)
+  args     0+ B (opcode-specific)
+
+APP_CTRL ENTER_BOOTLOADER reply:
+  ID       0x01<node>
+  payload  [PCI_SF|3, APP_CTRL, ENTER_BOOTLOADER, 0x00 (status)]
+  then the app writes RTC->BKP0R = 0xB00710AD and NVIC_SystemResets.
+```
 
 ### Multi-frame (ISO-TP)
 
@@ -662,7 +709,7 @@ Max declared length: 1024 bytes per message. Anything larger earns
 |---|---|:-:|---|---|---|
 | `0x01` | `CMD_CONNECT` | – | H→D | `[major, minor]` | ACK `[opcode, major, minor]` or `NACK(PROTOCOL_VERSION)` |
 | `0x02` | `CMD_DISCONNECT` | – | H→D | – | ACK `[opcode]` |
-| `0x03` | `CMD_DISCOVER` | – | Broadcast | – (sent to dst=0xF) | `[opcode, node_id, major, minor]` as `TYPE=DISCOVER` dst=0x0 |
+| `0x03` | `CMD_DISCOVER` | – | Broadcast | – (host sends `msg_type=DISCOVER_REQUEST`, ID=0x00F) | `[opcode, node_id, major, minor]` with `msg_type=DISCOVER_REPLY` on ID `0x01<node>` |
 | `0x04` | `CMD_GET_FW_INFO` | – | H→D | – | ACK `[opcode, <64-byte __firmware_info record>]` or `NACK(NO_VALID_APP)` / `NACK(UNSUPPORTED)` |
 | `0x05` | `CMD_GET_HEALTH` | – | H→D | – | ACK `[opcode, <32-byte health record>]` |
 | `0x10` | `CMD_FLASH_ERASE` | ✔ | H→D | `[start_le32, length_le32]` | ACK `[opcode]` |

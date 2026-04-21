@@ -35,26 +35,49 @@ flasher is feature-complete against the v1.0.0 bootloader contract.
 
 ---
 
-## 60-second quick start
+## Install
+
+Need Rust once (any OS):
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Linux also needs:
+```bash
+sudo apt-get install libudev-dev pkg-config
+```
+
+Then install `can-flasher` to your PATH, straight from GitHub — no
+clone, no build directory to manage:
 
 ```bash
-# One-time: install Rust (stable channel)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cargo install --git https://github.com/isc-fs/can-flasher.git
+```
 
-# Linux only: install libudev + pkg-config for USB port enumeration
-sudo apt-get install libudev-dev pkg-config
+After this, `can-flasher --help` works from anywhere. Docs refer
+to it as `cf` for brevity; `alias cf=can-flasher` in your shell
+rc file if you like.
 
-# Build + run
+Sanity check — should list your CAN adapter if one is plugged in,
+or print an empty list if not:
+```bash
+can-flasher adapters
+```
+
+Full per-OS adapter setup (CANable, SocketCAN, PCAN):
+[docs/INSTALL.md](docs/INSTALL.md).
+
+### Build from source (contributors only)
+
+```bash
 git clone https://github.com/isc-fs/can-flasher.git
 cd can-flasher
 cargo build --release
 ./target/release/can-flasher --help
-
-# Smoke test against the in-process stub (no hardware required)
-./target/release/can-flasher --interface virtual adapters
 ```
 
-Full install + adapter setup: [docs/INSTALL.md](docs/INSTALL.md).
+See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for toolchain
+details, test suite, and branch conventions.
 
 ---
 

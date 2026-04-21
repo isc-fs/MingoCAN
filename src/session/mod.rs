@@ -52,6 +52,31 @@
 //!   module works).
 //! - **Flash orchestration.** Sector-aware erase / diff / CRC
 //!   verification live in `src/firmware/` (feat/12+).
+//!
+//! ## Reliability invariant — **no unbounded `.await` in this module**
+//!
+//! Every `.await` point is either wrapped in a `tokio::time::timeout`
+//! with a finite deadline, or provably bounded by construction (a
+//! sleep, a mutex with no reentrancy, a channel whose sender is
+//! held by a task that will complete). The RX daemon's outer `loop`
+//! is unbounded by design, but every await inside it has a 50 ms
+//! read deadline so shutdown is prompt.
+//!
+//! This is the invariant that three separate post-mortems (fix/10,
+//! fix/14, and the fix/15 audit) converged on — a missed deadline
+//! turned into a 25-minute silent hang or a "pkill-only" recovery.
+//! **Before adding a new `.await` to this module, justify its
+//! boundedness in a comment right at the await site** using one of:
+//!
+//! - `// bounded by `X` ms via `tokio::time::timeout`
+//! - `// bounded: tokio mutex, only held across non-awaiting code
+//! - `// bounded: channel drained by <task>, which always completes
+//! - `// by design: daemon outer loop / `ctrl_c` arm in `select!`
+//!
+//! A reviewer must push back on awaits without such a comment. The
+//! cost of regressing here is hard to detect (symptom is a hang
+//! indistinguishable from a long-running operation), so the bar at
+//! review time is higher than "does it compile."
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -68,7 +93,7 @@ use crate::protocol::commands::{
 use crate::protocol::ids::{FrameId, MessageType};
 use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
 use crate::protocol::opcodes::{CommandOpcode, NackCode};
-use crate::protocol::{CanFrame, Response, BROADCAST_NODE_ID, HOST_NODE_ID};
+use crate::protocol::{CanFrame, Response, BROADCAST_NODE_ID};
 use crate::transport::{CanBackend, TransportError};
 
 /// Everything this layer can fail with. Wraps the lower-level
@@ -99,8 +124,24 @@ pub enum SessionError {
     },
 
     /// No reply arrived within the configured command timeout.
-    #[error("timed out waiting for device reply after {}ms", .0.as_millis())]
-    CommandTimeout(Duration),
+    ///
+    /// `adapter_errors_during_wait` is the number of adapter-level
+    /// error events the backend saw while this command was in
+    /// flight — on SLCAN that's BEL (`0x07`) bytes from the
+    /// CANable. A non-zero value means the adapter refused our TX
+    /// frame (bus-off, TX buffer full, stuck-dominant), so the
+    /// frame never reached the CAN bus and the device was never
+    /// going to reply. We print the count in the error so
+    /// operators know to unplug/replug the CANable rather than
+    /// assume the target is dead.
+    #[error(
+        "{}",
+        command_timeout_display(*.timeout, *.adapter_errors_during_wait)
+    )]
+    CommandTimeout {
+        timeout: Duration,
+        adapter_errors_during_wait: u32,
+    },
 
     /// Session operation attempted without a prior successful
     /// `connect()`.
@@ -121,6 +162,31 @@ pub enum SessionError {
     /// "garbled bus traffic".
     #[error("unexpected protocol frame: {0}")]
     Protocol(&'static str),
+}
+
+/// Render the `CommandTimeout` error message. Split into a helper so
+/// `thiserror`'s `#[error(...)]` can invoke it cleanly via
+/// `{}` + a function pointer, and so the string format is covered by
+/// its own unit tests (in `transport::slcan::tests`) without going
+/// through the whole error chain. `pub(crate)` so those tests can
+/// reach it; external callers should rely on the `Display` impl of
+/// `SessionError` instead.
+pub(crate) fn command_timeout_display(timeout: Duration, adapter_errors: u32) -> String {
+    if adapter_errors == 0 {
+        format!(
+            "timed out waiting for device reply after {}ms",
+            timeout.as_millis()
+        )
+    } else {
+        format!(
+            "timed out waiting for device reply after {}ms; adapter reported {} error(s) \
+             during this wait — the frame probably never reached the CAN bus (bus-off, \
+             TX buffer full, or stuck-dominant). Try unplugging and replugging the \
+             adapter, then retry.",
+            timeout.as_millis(),
+            adapter_errors,
+        )
+    }
 }
 
 /// Per-session knobs. [`SessionConfig::default`] gives you numbers
@@ -316,12 +382,20 @@ impl Session {
     /// per-call destination override.
     pub async fn send_command_to(&self, dst: u8, payload: &[u8]) -> Result<Response, SessionError> {
         let _guard = self.inner.command_lock.lock().await;
+        let errors_before = self.inner.backend.adapter_error_count();
         self.send_frames(payload, MessageType::Cmd, dst).await?;
         let mut rx = self.inner.reply_rx.lock().await;
         match timeout(self.config.command_timeout, rx.recv()).await {
             Ok(Some(response)) => Ok(response),
             Ok(None) => Err(SessionError::RxClosed),
-            Err(_) => Err(SessionError::CommandTimeout(self.config.command_timeout)),
+            Err(_) => Err(SessionError::CommandTimeout {
+                timeout: self.config.command_timeout,
+                adapter_errors_during_wait: self
+                    .inner
+                    .backend
+                    .adapter_error_count()
+                    .saturating_sub(errors_before),
+            }),
         }
     }
 
@@ -408,15 +482,31 @@ impl Session {
 
     /// Send `CMD_DISCONNECT`, stop keepalive, tear down the RX task.
     /// Idempotent once called; after this the `Session` is unusable.
+    ///
+    /// Fire-and-forget on the wire: we don't wait for the device's ACK,
+    /// because every single caller of `disconnect()` already discards
+    /// whatever reply would come back. Waiting would cost a full
+    /// `command_timeout` in the one case that matters — when the peer
+    /// just jumped to the application via `CMD_JUMP` and the BL is
+    /// no longer on the bus to ACK us. Firing CMD_DISCONNECT and
+    /// tearing down locally without blocking matches the existing
+    /// `let _ = …` pattern and makes the post-jump path finish in
+    /// milliseconds instead of `command_timeout` seconds.
     pub async fn disconnect(self) -> Result<(), SessionError> {
         // Best-effort: acquire the command lock to play nicely with
         // concurrent send_command, but don't deadlock if we can't.
         let _guard = self.inner.command_lock.lock().await;
         if self.connected.load(Ordering::SeqCst) {
             let payload = cmd_disconnect();
-            // Ignore the ACK — even if the device didn't hear us we
-            // still want to tear down locally.
-            let _ = self.send_raw(&payload, MessageType::Cmd).await;
+            // Send the frame but don't wait for a reply. If the BL is
+            // still alive it sees CMD_DISCONNECT and clears its session
+            // latch; if the BL has jumped to the application the
+            // frame's lost in the ether and that's fine. Any ACK that
+            // does come back lands in the reply mpsc and is dropped
+            // when we drop `self` below.
+            let _ = self
+                .send_frames(&payload, MessageType::Cmd, self.inner.target_node)
+                .await;
             self.connected.store(false, Ordering::SeqCst);
         }
         self.stop_keepalive_locked().await;
@@ -438,13 +528,21 @@ impl Session {
         payload: &[u8],
         message_type: MessageType,
     ) -> Result<Response, SessionError> {
+        let errors_before = self.inner.backend.adapter_error_count();
         self.send_frames(payload, message_type, self.inner.target_node)
             .await?;
         let mut rx = self.inner.reply_rx.lock().await;
         match timeout(self.config.command_timeout, rx.recv()).await {
             Ok(Some(response)) => Ok(response),
             Ok(None) => Err(SessionError::RxClosed),
-            Err(_) => Err(SessionError::CommandTimeout(self.config.command_timeout)),
+            Err(_) => Err(SessionError::CommandTimeout {
+                timeout: self.config.command_timeout,
+                adapter_errors_during_wait: self
+                    .inner
+                    .backend
+                    .adapter_error_count()
+                    .saturating_sub(errors_before),
+            }),
         }
     }
 
@@ -454,20 +552,25 @@ impl Session {
         message_type: MessageType,
         dst: u8,
     ) -> Result<(), SessionError> {
-        let segmenter = IsoTpSegmenter::new(payload).map_err(|e| {
+        // New wire format (fix/12): the ID no longer carries the
+        // message type — it's prepended as the first byte of the
+        // payload. Every frame (FF + CFs) shares the same
+        // host→node ID; the PCI byte tells the receiver which frame
+        // of the ISO-TP sequence it's looking at.
+        let mut framed = Vec::with_capacity(1 + payload.len());
+        framed.push(message_type.as_byte());
+        framed.extend_from_slice(payload);
+
+        let segmenter = IsoTpSegmenter::new(&framed).map_err(|e| {
             SessionError::Transport(TransportError::Other(format!(
                 "session: payload rejected by segmenter: {e}"
             )))
         })?;
-        let initial_id = FrameId::new(message_type, HOST_NODE_ID, dst)
-            .expect("valid node ids")
-            .encode();
-        let cf_id = FrameId::new(MessageType::Data, HOST_NODE_ID, dst)
-            .expect("valid node ids")
+        let id = FrameId::from_host(dst)
+            .expect("dst fits in 4 bits")
             .encode();
 
-        for (idx, frame_bytes) in segmenter.enumerate() {
-            let id = if idx == 0 { initial_id } else { cf_id };
+        for frame_bytes in segmenter {
             let frame = CanFrame {
                 id,
                 data: frame_bytes,
@@ -562,22 +665,25 @@ async fn keepalive_tick(
     command_timeout: Duration,
 ) -> Result<(), SessionError> {
     let _guard = inner.command_lock.lock().await;
+    let errors_before = inner.backend.adapter_error_count();
     let payload = cmd_get_health();
 
-    let segmenter = IsoTpSegmenter::new(&payload).map_err(|e| {
+    // Mirrors `send_frames` — prepend msg_type, single ID for FF+CFs.
+    let mut framed = Vec::with_capacity(1 + payload.len());
+    framed.push(MessageType::Cmd.as_byte());
+    framed.extend_from_slice(&payload);
+
+    let segmenter = IsoTpSegmenter::new(&framed).map_err(|e| {
         SessionError::Transport(TransportError::Other(format!(
             "keepalive: payload rejected by segmenter: {e}"
         )))
     })?;
-    let id = FrameId::new(MessageType::Cmd, HOST_NODE_ID, inner.target_node)
-        .expect("valid node ids")
+    let id = FrameId::from_host(inner.target_node)
+        .expect("target_node fits in 4 bits")
         .encode();
-    let cf_id = FrameId::new(MessageType::Data, HOST_NODE_ID, inner.target_node)
-        .expect("valid node ids")
-        .encode();
-    for (idx, bytes) in segmenter.enumerate() {
+    for bytes in segmenter {
         let frame = CanFrame {
-            id: if idx == 0 { id } else { cf_id },
+            id,
             data: bytes,
             len: bytes.len() as u8,
         };
@@ -588,7 +694,13 @@ async fn keepalive_tick(
     match timeout(command_timeout, rx.recv()).await {
         Ok(Some(_resp)) => Ok(()),
         Ok(None) => Err(SessionError::RxClosed),
-        Err(_) => Err(SessionError::CommandTimeout(command_timeout)),
+        Err(_) => Err(SessionError::CommandTimeout {
+            timeout: command_timeout,
+            adapter_errors_during_wait: inner
+                .backend
+                .adapter_error_count()
+                .saturating_sub(errors_before),
+        }),
     }
 }
 
@@ -599,11 +711,10 @@ async fn rx_task(
     backend: Arc<dyn CanBackend>,
     reply_tx: mpsc::Sender<Response>,
     notification_tx: broadcast::Sender<Response>,
-    node_id: u8,
+    _node_id: u8,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut reasm = Reassembler::new();
-    let mut pending_msg_type: Option<MessageType> = None;
     let mut tick_start = Instant::now();
     let tick_ms = move || tick_start.elapsed().as_millis() as u64;
     // Re-borrow because closures that capture mutable state can't
@@ -629,31 +740,52 @@ async fn rx_task(
             }
         };
 
+        // Drop frames with an invalid or not-for-us ID. Under the
+        // Proposal-A layout, the host only cares about NodeToHost
+        // frames (direction bit set). Host-originated frames on the
+        // bus (our own TX echo) and malformed IDs get silently
+        // dropped here.
         let id = match FrameId::decode(frame.id) {
             Ok(id) => id,
             Err(_) => continue,
         };
-        if !id.addressed_to(HOST_NODE_ID) && !id.addressed_to(node_id) {
-            // Frame isn't for us — a real CAN bus filters by arbitration,
-            // virtual backends we talk to don't. Drop it here so the
-            // reassembler doesn't see interleaved traffic.
+        if !matches!(
+            id.direction,
+            crate::protocol::ids::FrameDirection::NodeToHost
+        ) {
+            // Either our own TX echo (HostToNode) or a malformed
+            // frame; the reassembler should never see these.
             continue;
         }
 
         let payload = frame.payload();
-        if let Some(pci_hi) = payload.first().map(|b| b & 0xF0) {
-            if pci_hi == 0x00 || pci_hi == 0x10 {
-                pending_msg_type = Some(id.message_type);
-            }
-        }
 
         match reasm.feed(payload, tick_ms()) {
             Ok(ReassembleOutcome::Ongoing) => continue,
             Ok(ReassembleOutcome::Complete(bytes)) => {
-                let msg_type = pending_msg_type.take().unwrap_or(id.message_type);
-                match Response::parse(msg_type, &bytes) {
+                // Every reassembled SF/FF message starts with the
+                // msg_type byte (fix/12 wire format). Decode it,
+                // then hand the remaining bytes to the response
+                // parser. An empty reassembly is a bug; log and drop.
+                if bytes.is_empty() {
+                    warn!("session rx: empty reassembly — dropping");
+                    continue;
+                }
+                let msg_type = match MessageType::from_byte(bytes[0]) {
+                    Ok(mt) => mt,
+                    Err(err) => {
+                        warn!(
+                            ?err,
+                            byte = bytes[0],
+                            "session rx: unknown msg_type — dropping"
+                        );
+                        continue;
+                    }
+                };
+                let inner_bytes = &bytes[1..];
+                match Response::parse(msg_type, inner_bytes) {
                     Ok(Response::Notify { .. }) => {
-                        let response = Response::parse(msg_type, &bytes).unwrap();
+                        let response = Response::parse(msg_type, inner_bytes).unwrap();
                         // Lagged subscribers get RecvError::Lagged on
                         // their next recv; we don't treat overflow as
                         // an error here.
@@ -673,7 +805,6 @@ async fn rx_task(
             }
             Err(err) => {
                 warn!(?err, "session rx: reassembler error; resetting");
-                pending_msg_type = None;
             }
         }
     }
@@ -776,7 +907,11 @@ mod tests {
         let (session, cancel, handle) = spawn_session_and_stub().await;
         let payload = crate::protocol::commands::cmd_discover();
         let replies = session
-            .broadcast(&payload, MessageType::Discover, Duration::from_millis(150))
+            .broadcast(
+                &payload,
+                MessageType::DiscoverRequest,
+                Duration::from_millis(150),
+            )
             .await
             .unwrap();
         assert_eq!(replies.len(), 1, "one stub means one discover reply");
@@ -799,7 +934,13 @@ mod tests {
         let session = Session::attach(Box::new(host), test_config());
         let err = session.connect().await.unwrap_err();
         match err {
-            SessionError::CommandTimeout(d) => assert_eq!(d, Duration::from_millis(200)),
+            SessionError::CommandTimeout {
+                timeout,
+                adapter_errors_during_wait,
+            } => {
+                assert_eq!(timeout, Duration::from_millis(200));
+                assert_eq!(adapter_errors_during_wait, 0);
+            }
             other => panic!("expected CommandTimeout, got {other:?}"),
         }
     }

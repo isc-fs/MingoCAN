@@ -151,50 +151,58 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         .await
         .map_err(|e| exit_err(ExitCodeHint::DeviceNotFound, format!("CONNECT failed: {e}")))?;
 
-    // ---- 3. WRP policy (pre-flash) ----
-
-    let ob_status =
-        apply_wrp_policy(&session, args.require_wrp, args.apply_wrp, &args.firmware).await?;
-
-    // ---- 4. Run the flash pipeline ----
-
-    let config = build_flash_config(&args);
-    let (tx, rx) = mpsc::unbounded_channel::<FlashEvent>();
-    let json_mode = global.json;
-    let progress_task = tokio::spawn(render_progress(rx, json_mode));
-
-    let manager = FlashManager::new(&session, &image, config.clone());
-    let report_result = manager.run(Some(tx)).await;
-    let _ = progress_task.await;
-
-    let report = match report_result {
-        Ok(r) => r,
-        Err(e) => {
-            // Best-effort disconnect, then surface the error with
-            // the engine-assigned exit code.
-            let _ = session.disconnect().await;
-            return Err(exit_err(
-                e.exit_code_hint(),
-                format!("flash failed on '{}': {e}", args.firmware.display()),
-            ));
+    // ---- 3-5. Main pipeline under Ctrl-C watch ----
+    //
+    // Everything from WRP policy through the optional jump is
+    // wrapped in a `tokio::select!` against `ctrl_c`. On interrupt
+    // we drop the pipeline future (cancel-on-drop — all in-flight
+    // `.await`s terminate cleanly because each is either bounded
+    // by `command_timeout` or cancellation-safe), then fall through
+    // to the shared disconnect path so the BL doesn't inherit a
+    // stale session latch. Without this, Ctrl-C killed tasks
+    // abruptly, `session.disconnect()` never ran, and the BL's
+    // `g_session_active` flag stayed set until its 30 s watchdog —
+    // breaking the next `cf` invocation that happened to run
+    // sooner than the watchdog fired. The `send_frames` inside
+    // `disconnect()` is fire-and-forget (fix/14), so this path is
+    // fast even when the device is already gone.
+    let outcome = tokio::select! {
+        biased;
+        // `biased` makes select! poll the Ctrl-C arm first each
+        // iteration. If the user has already pressed Ctrl-C, we
+        // exit without starting the next command rather than
+        // potentially firing one more erase/write first.
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!();  // break any partial progress line
+            eprintln!("cf: interrupted — disconnecting cleanly…");
+            Err(exit_err(
+                ExitCodeHint::Interrupted,
+                format!("flash interrupted by user on '{}'", args.firmware.display()),
+            ))
         }
+        res = run_pipeline(&session, &image, &args, global) => res,
     };
 
-    // ---- 5. Optional JUMP ----
-
-    // `--no-jump` wins over `--jump` — same convention as diff /
-    // verify-after. clap's `overrides_with` only settles conflicts
-    // when both flags are present; a lone `--no-jump` leaves the
-    // default-true `jump` untouched, so we reconcile here.
-    let jump = !args.no_jump && args.jump;
-    if jump && !args.dry_run {
-        fire_jump(&session).await?;
-    }
-
-    // Disconnect before we print — the device's reset/jump
-    // sometimes eats the ACK, so we disconnect best-effort and
-    // ignore errors here.
+    // ---- Cleanup (shared by success, engine error, interrupt) ----
+    //
+    // Disconnect is best-effort and now fast on every path:
+    // - device alive & listening: one CMD_DISCONNECT frame, session
+    //   latch cleared on the BL side.
+    // - device just jumped (`--jump`): frame hits the app, which
+    //   silently drops it; the BL already cleared its own latch
+    //   when it jumped.
+    // - device interrupted mid-flash: frame hits the BL, clears
+    //   the latch; the in-flight ISO-TP reassembly state is a
+    //   non-issue because `handle_connect` resets it on the next
+    //   session.
     let _ = session.disconnect().await;
+
+    let (report, ob_status) = match outcome {
+        Ok((report, ob_status)) => (report, ob_status),
+        Err(e) => return Err(e),
+    };
+
+    let jump = !args.no_jump && args.jump;
 
     // ---- 6. Report ----
 
@@ -210,6 +218,56 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         jump,
     )?;
     Ok(())
+}
+
+/// Pipeline body — WRP policy → flash engine → optional jump. Returns
+/// the engine's [`FlashReport`] paired with the [`ObStatus`] we
+/// captured pre-flash (both are needed to render the final report
+/// regardless of whether the pipeline completed or was interrupted).
+///
+/// Every `.await` inside here is bounded (per the invariant
+/// documented in `src/session/mod.rs`), so the caller's
+/// `tokio::select!` against `ctrl_c` terminates this future
+/// cancel-safely — no mid-flight ISO-TP reassembly leaks across the
+/// drop, and the session's own state is consistent once the
+/// pending futures unwind.
+async fn run_pipeline(
+    session: &Session,
+    image: &crate::firmware::Image,
+    args: &FlashArgs,
+    global: &GlobalFlags,
+) -> Result<(FlashReport, ObStatus)> {
+    // ---- 3. WRP policy ----
+    let ob_status =
+        apply_wrp_policy(session, args.require_wrp, args.apply_wrp, &args.firmware).await?;
+
+    // ---- 4. Flash engine ----
+    let config = build_flash_config(args);
+    let (tx, rx) = mpsc::unbounded_channel::<FlashEvent>();
+    let json_mode = global.json;
+    let progress_task = tokio::spawn(render_progress(rx, json_mode));
+
+    let manager = FlashManager::new(session, image, config);
+    let report_result = manager.run(Some(tx)).await;
+    let _ = progress_task.await;
+
+    let report = match report_result {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(exit_err(
+                e.exit_code_hint(),
+                format!("flash failed on '{}': {e}", args.firmware.display()),
+            ));
+        }
+    };
+
+    // ---- 5. Optional JUMP ----
+    let jump = !args.no_jump && args.jump;
+    if jump && !args.dry_run {
+        fire_jump(session).await?;
+    }
+
+    Ok((report, ob_status))
 }
 
 // ---- WRP policy ----
@@ -332,6 +390,26 @@ async fn fire_jump(session: &Session) -> Result<()> {
 }
 
 // ---- Progress rendering ----
+//
+// Two rendering modes, auto-selected by whether stderr is a TTY:
+//
+// **TTY mode** — full `indicatif` experience: a steady-tick spinner at
+// the top, one animated bar per sector during its write loop, state
+// transitions printed above the bars. Gorgeous when you have it.
+//
+// **Plain mode** (non-TTY: CI logs, piped to `tee`, captured by a test
+// harness) — indicatif silently suppresses EVERY draw call including
+// `MultiProgress::println`. A user ran `cf flash 2>&1 | tee` and saw
+// zero output for 52 s — indistinguishable from a hang. We emit plain
+// `eprintln!` lines for state transitions, and throttled percent-
+// complete pings during long writes, so the user always has a live
+// signal the engine is making forward progress. No ANSI escapes — the
+// output survives `grep`, `awk`, or a syslog sink cleanly.
+
+/// Rough throttle for non-TTY "still writing" pings — once every ~10%
+/// of the sector so a 52 s flash emits about 10 lines per sector,
+/// enough to read as "clearly still alive" without overflowing a log.
+const NON_TTY_PROGRESS_STEP: u32 = 10;
 
 async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool) {
     if json {
@@ -343,6 +421,12 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool
         return;
     }
 
+    // `indicatif::MultiProgress` uses stderr by default and auto-hides
+    // every draw (bars AND `println!`) when stderr isn't a TTY. That
+    // silent-on-pipe behaviour is what we patch around below — the
+    // TTY-path renders through `multi`, the non-TTY path bypasses it
+    // with raw `eprintln!`.
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let multi = MultiProgress::new();
     let overall = multi.add(ProgressBar::new_spinner());
     overall.set_style(
@@ -350,9 +434,26 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool
             .unwrap_or_else(|_| ProgressStyle::default_spinner()),
     );
     overall.set_message("Flashing…");
-    overall.enable_steady_tick(Duration::from_millis(120));
+    if tty {
+        overall.enable_steady_tick(Duration::from_millis(120));
+    }
 
     let mut per_sector: Option<(u8, ProgressBar)> = None;
+    // Non-TTY bookkeeping: last percent we printed for the active
+    // sector, so we only emit a "Sector N: 40%" line when we cross a
+    // fresh 10% bucket. Reset on sector boundary.
+    let mut last_percent_printed: Option<(u8, u32)> = None;
+
+    // Tiny helper to print a line in both modes — `multi.println` is
+    // the TTY path (renders above the active bars), `eprintln!` is
+    // the non-TTY path. A no-op in `--json` mode (we returned above).
+    let say = |multi: &MultiProgress, line: &str| {
+        if tty {
+            multi.println(line).ok();
+        } else {
+            eprintln!("{line}");
+        }
+    };
 
     while let Some(event) = rx.recv().await {
         match event {
@@ -361,59 +462,96 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<FlashEvent>, json: bool
                     SectorRole::Skip => format!("Sector {sector}: already matches — skipping"),
                     SectorRole::Write => format!("Sector {sector}: queued for rewrite"),
                 };
-                multi.println(txt).ok();
+                say(&multi, &txt);
             }
             FlashEvent::Erased { sector } => {
-                multi.println(format!("Sector {sector}: erased")).ok();
+                say(&multi, &format!("Sector {sector}: erased"));
             }
             FlashEvent::ChunkWritten {
                 sector,
                 bytes,
                 total,
             } => {
-                let bar = match &per_sector {
-                    Some((s, bar)) if *s == sector => bar.clone(),
-                    _ => {
-                        // First chunk of a new sector — finish any
-                        // previous bar and start a fresh one.
-                        if let Some((_, old)) = per_sector.take() {
-                            old.finish_and_clear();
+                if tty {
+                    let bar = match &per_sector {
+                        Some((s, bar)) if *s == sector => bar.clone(),
+                        _ => {
+                            // First chunk of a new sector — finish any
+                            // previous bar and start a fresh one.
+                            if let Some((_, old)) = per_sector.take() {
+                                old.finish_and_clear();
+                            }
+                            let bar = multi.add(ProgressBar::new(u64::from(total)));
+                            bar.set_style(
+                                ProgressStyle::with_template(
+                                    "  sector {prefix} [{bar:30.cyan/blue}] {bytes}/{total_bytes}",
+                                )
+                                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                                .progress_chars("█▉▊▋▌▍▎▏ "),
+                            );
+                            bar.set_prefix(format!("{sector}"));
+                            per_sector = Some((sector, bar.clone()));
+                            bar
                         }
-                        let bar = multi.add(ProgressBar::new(u64::from(total)));
-                        bar.set_style(
-                            ProgressStyle::with_template(
-                                "  sector {prefix} [{bar:30.cyan/blue}] {bytes}/{total_bytes}",
-                            )
-                            .unwrap_or_else(|_| ProgressStyle::default_bar())
-                            .progress_chars("█▉▊▋▌▍▎▏ "),
-                        );
-                        bar.set_prefix(format!("{sector}"));
-                        per_sector = Some((sector, bar.clone()));
-                        bar
+                    };
+                    bar.set_position(u64::from(bytes));
+                    if bytes >= total {
+                        bar.finish_and_clear();
+                        per_sector = None;
                     }
-                };
-                bar.set_position(u64::from(bytes));
-                if bytes >= total {
-                    bar.finish_and_clear();
-                    per_sector = None;
+                } else {
+                    // Non-TTY: emit a line once per ~10% progress plus
+                    // one at 100%. Total is sector size (≤128 KB) so
+                    // the percent math stays in u32 comfortably.
+                    let pct = if total == 0 {
+                        100
+                    } else {
+                        ((u64::from(bytes) * 100) / u64::from(total)) as u32
+                    };
+                    let should_print = match last_percent_printed {
+                        Some((s, last)) if s == sector => {
+                            pct >= last + NON_TTY_PROGRESS_STEP || bytes >= total
+                        }
+                        _ => true,
+                    };
+                    if should_print {
+                        say(
+                            &multi,
+                            &format!("Sector {sector}: {pct:>3}% ({bytes}/{total} B)"),
+                        );
+                        last_percent_printed = Some((sector, pct));
+                    }
+                    if bytes >= total {
+                        last_percent_printed = None;
+                    }
                 }
             }
             FlashEvent::SectorVerified { sector, crc } => {
-                multi
-                    .println(format!("Sector {sector}: verified (crc=0x{crc:08X})"))
-                    .ok();
+                say(
+                    &multi,
+                    &format!("Sector {sector}: verified (crc=0x{crc:08X})"),
+                );
             }
             FlashEvent::Committing => {
-                overall.set_message("Committing metadata…");
+                if tty {
+                    overall.set_message("Committing metadata…");
+                } else {
+                    say(&multi, "Committing metadata…");
+                }
             }
             FlashEvent::Done { report } => {
-                overall.finish_with_message(format!(
+                let msg = format!(
                     "Done — erased {} written {} skipped {} in {} ms",
                     report.sectors_erased.len(),
                     report.sectors_written.len(),
                     report.sectors_skipped.len(),
                     report.duration.as_millis(),
-                ));
+                );
+                if tty {
+                    overall.finish_with_message(msg);
+                } else {
+                    say(&multi, &msg);
+                }
             }
         }
     }

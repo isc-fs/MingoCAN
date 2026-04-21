@@ -58,7 +58,7 @@ pub const FLASHWORD_SIZE: u32 = 32;
 /// Default bytes per `CMD_FLASH_WRITE` payload. Matches
 /// REQUIREMENTS.md § Write chunk size — 256 B, i.e. one ISO-TP
 /// FF + ~37 CFs at 8-byte frames on classic CAN.
-pub const DEFAULT_WRITE_CHUNK: usize = 256;
+pub const DEFAULT_WRITE_CHUNK: usize = 128;
 
 /// Tunable knobs for a single [`FlashManager::run`] invocation.
 ///
@@ -221,7 +221,7 @@ impl FlashError {
     /// the error family to the REQUIREMENTS.md exit-code table.
     pub fn exit_code_hint(&self) -> ExitCodeHint {
         match self {
-            FlashError::Session(SessionError::CommandTimeout(_))
+            FlashError::Session(SessionError::CommandTimeout { .. })
             | FlashError::Session(SessionError::RxClosed) => ExitCodeHint::DeviceNotFound,
             FlashError::Nack {
                 code: NackCode::ProtectedAddr,
@@ -386,8 +386,13 @@ impl<'a> FlashManager<'a> {
     }
 
     fn expected_sector_crc(&self, sector: u8) -> u32 {
-        let slice = self.sector_slice(sector);
-        crc32(slice)
+        // `sector_bytes` returns the sector's content — borrowed when
+        // the sector lies fully inside the image, freshly allocated
+        // and `0xFF`-padded when the image ends mid-sector. Either
+        // way, hashing the whole thing matches what the device sees
+        // after an erase (`0xFF`) + partial-write cycle.
+        let bytes = self.sector_bytes(sector);
+        crc32(&bytes)
     }
 
     /// Bytes of the composed image that land in `sector`. The image
@@ -416,28 +421,6 @@ impl<'a> FlashManager<'a> {
             let start_off = sector_base.saturating_sub(image_base) as usize;
             buf[..available].copy_from_slice(&self.image.data[start_off..start_off + available]);
             std::borrow::Cow::Owned(buf)
-        }
-    }
-
-    fn sector_slice(&self, sector: u8) -> &[u8] {
-        // Specialised helper when we know the sector lies fully
-        // inside the image — avoids the Cow allocation. Used by
-        // `expected_sector_crc` which always looks at whole sectors.
-        let sector_base = sector_base_addr(sector);
-        let start_off = (sector_base - self.image.base_addr) as usize;
-        let end_off = start_off + BL_SECTOR_SIZE as usize;
-        if end_off <= self.image.data.len() {
-            &self.image.data[start_off..end_off]
-        } else {
-            // Image ends mid-sector — we need a padded buffer, so
-            // fall through to the Cow variant via a leaked static.
-            // This path is taken by `expected_sector_crc` only and
-            // only when the host-composed image doesn't cover the
-            // sector exactly. In that case we hash the Cow'd bytes
-            // directly via `crc32` inside `expected_sector_crc`.
-            unreachable!(
-                "sector_slice called on partial sector; callers must go through sector_bytes"
-            )
         }
     }
 
@@ -680,7 +663,7 @@ mod tests {
         assert!(!cfg.dry_run);
         assert!(cfg.verify_after);
         assert!(cfg.final_commit);
-        assert_eq!(cfg.write_chunk_size, 256);
+        assert_eq!(cfg.write_chunk_size, DEFAULT_WRITE_CHUNK);
     }
 
     #[test]
@@ -739,7 +722,10 @@ mod tests {
         assert_eq!(mismatch.exit_code_hint(), ExitCodeHint::VerifyMismatch);
 
         // Timeout / RxClosed → device not found.
-        let timeout = FlashError::Session(SessionError::CommandTimeout(Duration::from_millis(1)));
+        let timeout = FlashError::Session(SessionError::CommandTimeout {
+            timeout: Duration::from_millis(1),
+            adapter_errors_during_wait: 0,
+        });
         assert_eq!(timeout.exit_code_hint(), ExitCodeHint::DeviceNotFound);
 
         // Everything else → generic FlashError (exit 1).

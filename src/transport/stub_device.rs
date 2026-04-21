@@ -95,12 +95,6 @@ pub struct StubDevice {
     node_id: u8,
     reasm: Reassembler,
     session_active: bool,
-    /// Message type carried by the last SF or FF seen. CFs ride as
-    /// `TYPE=DATA` per the bootloader's ISO-TP convention, so the
-    /// reassembler (which operates purely on frame payload bytes)
-    /// can't know the originating type — we capture it at the
-    /// frame-ID layer and consume it when the reassembly completes.
-    pending_msg_type: Option<MessageType>,
     /// In-memory NVM store. Real bootloader persists to sector 7;
     /// stub keeps it RAM-only per run so integration tests get a
     /// fresh KV space each time. Tombstoned entries get evicted
@@ -144,7 +138,6 @@ impl StubDevice {
             node_id,
             reasm: Reassembler::new(),
             session_active: false,
-            pending_msg_type: None,
             nvm: HashMap::new(),
             wrp_sector_mask: 0,
             expected_verify: None,
@@ -221,8 +214,12 @@ impl StubDevice {
     }
 
     async fn handle_frame(&mut self, frame: CanFrame) -> Result<()> {
-        // Filter by the 11-bit ID: ignore frames addressed to a
-        // different node unless they're broadcast.
+        // New wire format (fix/12): the 11-bit ID carries only
+        // direction + node; message type lives in the reassembled
+        // payload's first byte. The BL only ever hears host→node
+        // traffic on the real bus (hardware filter drops node→host
+        // frames at the peripheral); the stub enforces the same rule
+        // in software.
         let id = match FrameId::decode(frame.id) {
             Ok(id) => id,
             Err(_) => {
@@ -230,40 +227,54 @@ impl StubDevice {
                 return Ok(());
             }
         };
-        if !id.addressed_to(self.node_id) {
+        if !matches!(
+            id.direction,
+            crate::protocol::ids::FrameDirection::HostToNode
+        ) {
+            // Node-to-host — not our concern.
             return Ok(());
         }
-
-        // Capture the message type whenever the current frame carries
-        // it — i.e. when it's an SF (PCI high nibble 0) or FF (PCI
-        // high nibble 1). CFs (nibble 2) and FCs (nibble 3) ride as
-        // TYPE=DATA and would overwrite the real type if we took
-        // `id.message_type` unconditionally.
-        let payload_bytes = frame.payload();
-        if let Some(pci_hi) = payload_bytes.first().map(|b| b & 0xF0) {
-            if pci_hi == 0x00 || pci_hi == 0x10 {
-                self.pending_msg_type = Some(id.message_type);
-            }
+        if !id.addressed_to(self.node_id) {
+            return Ok(());
         }
 
         // Feed the ISO-TP reassembler. `now_ms` is a synthetic clock
         // — the stub doesn't run a timeout scheduler, the tick count
         // is just used to drive the reassembler's internal
         // bookkeeping.
+        let payload_bytes = frame.payload();
         let now_ms = static_ms();
         let outcome = self.reasm.feed(payload_bytes, now_ms);
+
+        // The real BL always knows who addressed it (the host),
+        // encoded as the constant HOST_NODE_ID = 0x0 in every reply.
+        // With direction-only IDs we use that constant directly.
+        let peer = crate::protocol::ids::HOST_NODE_ID;
 
         match outcome {
             Ok(ReassembleOutcome::Ongoing) => Ok(()),
             Ok(ReassembleOutcome::Complete(payload)) => {
-                let msg_type = self.pending_msg_type.take().unwrap_or(id.message_type);
-                self.dispatch(id.src, msg_type, &payload).await
+                // First byte = msg_type, rest = opcode + args.
+                if payload.is_empty() {
+                    trace!("stub: empty reassembly — dropping");
+                    return Ok(());
+                }
+                let msg_type = match MessageType::from_byte(payload[0]) {
+                    Ok(mt) => mt,
+                    Err(_) => {
+                        // Unknown msg_type byte — silently drop, matching
+                        // the BL behaviour (BL silently ignores reserved
+                        // types rather than NACKing, since APP_CTRL
+                        // traffic uses a reserved byte value).
+                        return Ok(());
+                    }
+                };
+                self.dispatch(peer, msg_type, &payload[1..]).await
             }
             Err(_err) => {
                 // The real bootloader emits NACK(TRANSPORT_*) here.
                 // For the stub we bail silently — tests that care
                 // about framing errors feed the reassembler directly.
-                self.pending_msg_type = None;
                 Ok(())
             }
         }
@@ -275,16 +286,26 @@ impl StubDevice {
         message_type: MessageType,
         payload: &[u8],
     ) -> Result<()> {
-        if message_type != MessageType::Cmd && message_type != MessageType::Discover {
-            // Stub only answers CMD / DISCOVER; other types are
-            // host-bound and shouldn't appear here.
-            return Ok(());
+        match message_type {
+            MessageType::Cmd | MessageType::DiscoverRequest => {}
+            MessageType::AppCtrl => {
+                // BL silently drops app-ctrl traffic — the application
+                // firmware handles it after BL-jump. See docs in
+                // protocol/ids.rs and cli/send_raw.rs.
+                return Ok(());
+            }
+            _ => {
+                // ACK / NACK / NOTIFY / DISCOVER_REPLY are all
+                // device→host types; seeing one here means a
+                // misrouted frame or a test bug. Silent drop.
+                return Ok(());
+            }
         }
 
         let opcode = match payload.first() {
             Some(b) => *b,
             None => {
-                trace!("stub: empty payload after reassembly");
+                trace!("stub: empty payload after reassembly (no opcode)");
                 return Ok(());
             }
         };
@@ -373,7 +394,8 @@ impl StubDevice {
             PROTOCOL_VERSION_MAJOR,
             PROTOCOL_VERSION_MINOR,
         ];
-        self.send_message(peer, MessageType::Discover, &resp).await
+        self.send_message(peer, MessageType::DiscoverReply, &resp)
+            .await
     }
 
     /// Synthetic `CMD_GET_HEALTH` reply. Produces a realistic-looking
@@ -951,15 +973,20 @@ impl StubDevice {
     }
 
     /// Segment `payload` into ISO-TP frames and push each through
-    /// the backend, keeping the bootloader convention: FF keeps the
-    /// original TYPE, CFs travel as TYPE=DATA.
+    /// the backend. New wire format: message type is prepended as
+    /// payload byte 1 (after PCI), and every frame of the sequence
+    /// shares a single node→host ID.
     async fn send_message(
         &self,
-        peer: u8,
+        _peer: u8,
         message_type: MessageType,
         payload: &[u8],
     ) -> Result<()> {
-        let segmenter = match IsoTpSegmenter::new(payload) {
+        let mut framed = Vec::with_capacity(1 + payload.len());
+        framed.push(message_type.as_byte());
+        framed.extend_from_slice(payload);
+
+        let segmenter = match IsoTpSegmenter::new(&framed) {
             Ok(s) => s,
             Err(err) => {
                 warn!(?err, "stub: segmenter rejected payload");
@@ -967,15 +994,11 @@ impl StubDevice {
             }
         };
 
-        let initial_id = FrameId::new(message_type, self.node_id, peer)
-            .expect("valid node ids")
-            .encode();
-        let cf_id = FrameId::new(MessageType::Data, self.node_id, peer)
-            .expect("valid node ids")
+        let id = FrameId::from_node(self.node_id)
+            .expect("valid stub node id")
             .encode();
 
-        for (idx, frame_bytes) in segmenter.enumerate() {
-            let id = if idx == 0 { initial_id } else { cf_id };
+        for frame_bytes in segmenter {
             let frame = CanFrame {
                 id,
                 data: frame_bytes,

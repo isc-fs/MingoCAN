@@ -1,24 +1,25 @@
-//! Response parser — turns a completed ISO-TP reassembly + the CAN
-//! message type into a typed [`Response`] enum.
+//! Response parser — turns a completed ISO-TP reassembly + the
+//! decoded message-type byte into a typed [`Response`] enum.
 //!
 //! The adapter layer reassembles each ISO-TP message into a
-//! `Vec<u8>`, tags it with the decoded [`FrameId::message_type`], and
-//! hands the pair here. Parse rules:
+//! `Vec<u8>`, extracts the message-type byte (payload byte 1, after
+//! the PCI — see `protocol::ids` for the wire format), and hands the
+//! pair here along with the *remaining* bytes (opcode + args).
 //!
-//! - `Cmd` is never received by the host, only sent — [`parse`]
-//!   returns an `Invalid` error to make it loud rather than silent.
+//! Parse rules:
+//!
+//! - `Cmd` / `DiscoverRequest` / `AppCtrl` are never received by the
+//!   host, only sent — [`parse`] returns an `Invalid` error to make
+//!   it loud rather than silent.
 //! - `Ack` — byte 0 is the echoed opcode, rest is opcode-specific
 //!   payload. We don't interpret the payload; callers downcast by
 //!   opcode.
 //! - `Nack` — byte 0 is the rejected opcode, byte 1 is a [`NackCode`]
 //!   (lenient, unknown bytes become `Unknown(u8)`).
-//! - `Data` — never surfaces as a completed message; it's an ISO-TP
-//!   continuation type. Seeing one here means a reassembler bug or a
-//!   misrouted frame.
 //! - `Notify` — byte 0 is the notify opcode (see [`NotifyOpcode`]),
 //!   rest is opcode-specific payload.
-//! - `Discover` — byte 0 is `CMD_DISCOVER = 0x03`, byte 1 = node ID,
-//!   bytes 2..3 = protocol (major, minor).
+//! - `DiscoverReply` — byte 0 is `CMD_DISCOVER = 0x03`, byte 1 = node
+//!   ID, bytes 2..3 = protocol (major, minor).
 
 use super::ids::MessageType;
 use super::opcodes::NackCode;
@@ -84,7 +85,7 @@ impl Response {
                     payload: bytes[1..].to_vec(),
                 })
             }
-            MessageType::Discover => {
+            MessageType::DiscoverReply => {
                 if bytes.len() < 4 {
                     return Err(ParseError::Invalid("DISCOVER reply shorter than 4 bytes"));
                 }
@@ -100,8 +101,11 @@ impl Response {
             MessageType::Cmd => Err(ParseError::Invalid(
                 "CMD frame received at host — bootloaders don't send CMDs",
             )),
-            MessageType::Data => Err(ParseError::Invalid(
-                "completed DATA frame — ISO-TP layer should have consumed this",
+            MessageType::DiscoverRequest => Err(ParseError::Invalid(
+                "DISCOVER_REQUEST frame received at host — only the host sends these",
+            )),
+            MessageType::AppCtrl => Err(ParseError::Invalid(
+                "APP_CTRL frame received at host — app-control traffic is host-to-node only",
             )),
         }
     }
@@ -182,7 +186,7 @@ mod tests {
     #[test]
     fn parse_discover_reply() {
         let bytes = vec![0x03, 0x03, 0x00, 0x01];
-        match Response::parse(MessageType::Discover, &bytes).unwrap() {
+        match Response::parse(MessageType::DiscoverReply, &bytes).unwrap() {
             Response::Discover {
                 node_id,
                 proto_major,
@@ -203,8 +207,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_bare_data_frame() {
-        let err = Response::parse(MessageType::Data, &[0x00, 0x00]).unwrap_err();
+    fn parse_rejects_discover_request_at_host() {
+        let err = Response::parse(MessageType::DiscoverRequest, &[0x03]).unwrap_err();
+        assert!(matches!(err, ParseError::Invalid(_)));
+    }
+
+    #[test]
+    fn parse_rejects_app_ctrl_at_host() {
+        let err = Response::parse(MessageType::AppCtrl, &[0x01]).unwrap_err();
         assert!(matches!(err, ParseError::Invalid(_)));
     }
 
@@ -222,7 +232,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_short_discover() {
-        let err = Response::parse(MessageType::Discover, &[0x03, 0x01, 0x00]).unwrap_err();
+        let err = Response::parse(MessageType::DiscoverReply, &[0x03, 0x01, 0x00]).unwrap_err();
         assert!(matches!(err, ParseError::Invalid(_)));
     }
 }
