@@ -158,10 +158,27 @@ To produce a `.vsix` for sideload installation:
 
 ```bash
 npm run package
-# → vscode-stm32-can-0.0.1.vsix
+# → vscode-stm32-can-0.1.0.vsix
 ```
 
 Then in the target VS Code: **Extensions → … menu → Install from VSIX**.
+
+## Releasing
+
+Official `.vsix` builds are produced by the [`Editor release`](../../.github/workflows/editor-release.yml) GitHub Actions workflow. To cut a new release:
+
+1. Bump `version` in [package.json](package.json) (and commit + merge through the normal feat-branch + PR flow).
+2. Push a tag of the form `editor-vX.Y.Z` matching the bumped version:
+   ```bash
+   git tag editor-v0.1.0
+   git push origin editor-v0.1.0
+   ```
+3. The workflow's `verify-version` gate cross-checks the tag against `package.json`. On match it compiles, packages with `vsce`, and creates a GitHub Release with the `.vsix` attached as the only asset.
+4. Team members install from the Release page (Extensions → ⋯ menu → Install from VSIX…).
+
+Manual dispatch (`Run workflow` button) on the Actions UI produces a `.vsix` as a workflow artifact (14-day retention) without creating a Release — useful for testing a build before tagging.
+
+The Rust CLI and the extension have **independent release cadences and tag spaces**: `v*` triggers the binary build, `editor-v*` triggers the extension build, neither interferes with the other.
 
 ## Design notes
 

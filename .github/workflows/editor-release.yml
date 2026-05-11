@@ -1,0 +1,120 @@
+name: Editor release
+
+# Builds the VS Code extension `.vsix` and attaches it to a GitHub
+# Release. Triggered by tags of the form `editor-v*` (e.g.
+# `editor-v0.1.0`). The Rust binary release pipeline uses bare `v*`
+# tags — the prefixes don't collide, so an editor release and a
+# can-flasher release can ship the same day without interfering.
+#
+# A `workflow_dispatch` entry is also provided for manual dry-runs
+# from the Actions UI; those skip the version-vs-tag gate (no tag
+# to compare against) and produce a workflow artifact instead of a
+# Release asset, so a half-built `.vsix` can never accidentally
+# publish.
+
+on:
+  push:
+    tags:
+      - 'editor-v*'
+  workflow_dispatch:
+
+concurrency:
+  group: editor-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: editor/vscode
+
+jobs:
+  # Mirror of the verify-version gate in release.yml. Prevents the
+  # classic "tag editor-v0.1.0 got pushed but package.json still
+  # reads 0.0.1" mistake. Skipped on manual dispatch (nothing to
+  # compare against).
+  verify-version:
+    name: verify tag matches package.json
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare versions
+        run: |
+          # editor-v0.1.0 → 0.1.0
+          TAG_NAME="${GITHUB_REF_NAME#editor-v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "$TAG_NAME" != "$PKG_VERSION" ]]; then
+            echo "::error::tag=${GITHUB_REF_NAME} implies version=${TAG_NAME}, but editor/vscode/package.json reads ${PKG_VERSION}. Bump package.json to ${TAG_NAME} and retag (or delete the tag and re-cut after bumping)."
+            exit 1
+          fi
+          echo "✓ version ${PKG_VERSION} matches tag ${GITHUB_REF_NAME}"
+
+  build:
+    name: build vsix
+    needs: verify-version
+    # `if: always()` lets this job run when verify-version was
+    # skipped (manual dispatch). A tag push where verify-version
+    # FAILED propagates through `needs` and skips this job.
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      vsix_path: ${{ steps.package.outputs.vsix_path }}
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Package .vsix
+        id: package
+        run: |
+          npx --yes @vscode/vsce@^2.24.0 package --no-dependencies
+          VSIX_NAME=$(ls vscode-stm32-can-*.vsix | head -n1)
+          VERSION=$(node -p "require('./package.json').version")
+          echo "vsix_path=editor/vscode/${VSIX_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          ls -lh "${VSIX_NAME}"
+
+      - name: Upload as workflow artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-stm32-can-vsix
+          path: editor/vscode/vscode-stm32-can-*.vsix
+          retention-days: 14
+
+      - name: Attach to GitHub Release
+        # Only on tag pushes — manual runs leave the artifact in
+        # the workflow output for inspection without publishing.
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: editor/vscode/vscode-stm32-can-*.vsix
+          fail_on_unmatched_files: true
+          name: VS Code extension ${{ steps.package.outputs.version }}
+          body: |
+            **Internal ISC racing-team distribution.** Not published to the VS Code Marketplace.
+
+            ### Install
+
+            1. Download `vscode-stm32-can-${{ steps.package.outputs.version }}.vsix` from the assets below
+            2. In VS Code: **Extensions panel → ⋯ menu → Install from VSIX…**
+            3. Pick the downloaded file. The extension activates on next reload.
+
+            ### Configure
+
+            - `iscFs.canFlasherPath` — path to the `can-flasher` binary (default: `can-flasher` on `$PATH`)
+            - `iscFs.interface` / `iscFs.channel` — adapter selection (also settable via the status-bar item or `ISC CAN: Select adapter…`)
+            - `iscFs.firmwareArtifact` — path or glob to the .elf/.hex/.bin to flash
+
+            See `editor/vscode/README.md` in the repo for the full settings reference and the command roadmap (Tier A flash, Tier B device tree, Tier C diagnostics + live-data webview).
