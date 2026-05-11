@@ -7,7 +7,7 @@
 //! as a human-readable summary or as a stable JSON object for
 //! downstream tooling.
 //!
-//! JSON shape (always all three top-level keys present, even on
+//! JSON shape (always all four top-level keys present, even on
 //! platforms where a backend isn't supported — the key just holds an
 //! empty array, which keeps consumer code stable across OSes):
 //!
@@ -22,6 +22,10 @@
 //!   ],
 //!   "pcan": [
 //!     { "channel": "PCAN_USBBUS1", "channel_byte": "0x51" }
+//!   ],
+//!   "vector": [
+//!     { "channel": "0", "name": "VN1610 1 Channel 1",
+//!       "transceiver": "CAN - TJA1041" }
 //!   ]
 //! }
 //! ```
@@ -38,6 +42,8 @@ use crate::transport::pcan;
 use crate::transport::slcan;
 #[cfg(target_os = "linux")]
 use crate::transport::socketcan;
+#[cfg(target_os = "windows")]
+use crate::transport::vector;
 
 /// Structured report. Serialised as-is for `--json` mode; the human
 /// formatter iterates over the same fields.
@@ -46,6 +52,7 @@ pub struct AdapterReport {
     pub slcan: Vec<SlcanEntry>,
     pub socketcan: Vec<SocketCanEntry>,
     pub pcan: Vec<PcanEntry>,
+    pub vector: Vec<VectorEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +79,17 @@ pub struct PcanEntry {
     /// `"0x51"`..`"0x60"`, the numeric constant the PCAN-Basic API
     /// takes.
     pub channel_byte: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VectorEntry {
+    /// Decimal XL channel index — pass as `--channel N`.
+    pub channel: String,
+    /// Human-readable channel name from the XL Driver Library
+    /// (e.g. `"VN1610 1 Channel 1"`).
+    pub name: String,
+    /// Transceiver name (e.g. `"CAN - TJA1041"`).
+    pub transceiver: String,
 }
 
 /// Collect adapters from every backend available on this platform.
@@ -111,6 +129,17 @@ pub fn collect_report() -> AdapterReport {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        for info in vector::detect() {
+            report.vector.push(VectorEntry {
+                channel: info.channel_index.to_string(),
+                name: info.name,
+                transceiver: info.transceiver_name,
+            });
+        }
+    }
+
     report
 }
 
@@ -141,6 +170,8 @@ fn write_human<W: Write>(out: &mut W, report: &AdapterReport) -> std::io::Result
     write_slcan_section(out, &report.slcan)?;
     writeln!(out)?;
     write_pcan_section(out, &report.pcan)?;
+    writeln!(out)?;
+    write_vector_section(out, &report.vector)?;
     writeln!(out)?;
     write_socketcan_section(out, &report.socketcan)?;
     Ok(())
@@ -208,12 +239,48 @@ fn write_socketcan_section<W: Write>(
     Ok(())
 }
 
+fn write_vector_section<W: Write>(out: &mut W, entries: &[VectorEntry]) -> std::io::Result<()> {
+    writeln!(out, "Vector XL devices:")?;
+    if !supports_vector() {
+        writeln!(
+            out,
+            "  (Vector XL Driver Library is currently Windows-only — Linux support planned)"
+        )?;
+        return Ok(());
+    }
+    if entries.is_empty() {
+        writeln!(
+            out,
+            "  (none detected — XL Driver Library may be missing or no hardware connected)"
+        )?;
+        return Ok(());
+    }
+    let channel_width = entries.iter().map(|e| e.channel.len()).max().unwrap_or(0);
+    let name_width = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    for e in entries {
+        writeln!(
+            out,
+            "  {:cw$}   {:nw$}   {}",
+            e.channel,
+            e.name,
+            e.transceiver,
+            cw = channel_width,
+            nw = name_width,
+        )?;
+    }
+    Ok(())
+}
+
 const fn supports_pcan_basic() -> bool {
     cfg!(any(target_os = "windows", target_os = "macos"))
 }
 
 const fn supports_socketcan() -> bool {
     cfg!(target_os = "linux")
+}
+
+const fn supports_vector() -> bool {
+    cfg!(target_os = "windows")
 }
 
 #[cfg(test)]
@@ -235,15 +302,21 @@ mod tests {
                 channel: "PCAN_USBBUS1".into(),
                 channel_byte: "0x51".into(),
             }],
+            vector: vec![VectorEntry {
+                channel: "0".into(),
+                name: "VN1610 1 Channel 1".into(),
+                transceiver: "CAN - TJA1041".into(),
+            }],
         }
     }
 
     #[test]
-    fn json_shape_has_all_three_sections() {
+    fn json_shape_has_all_four_sections() {
         let json = serde_json::to_string(&sample_report()).unwrap();
         assert!(json.contains("\"slcan\":"));
         assert!(json.contains("\"socketcan\":"));
         assert!(json.contains("\"pcan\":"));
+        assert!(json.contains("\"vector\":"));
     }
 
     #[test]
@@ -276,6 +349,7 @@ mod tests {
         assert!(json.contains("\"slcan\":[]"));
         assert!(json.contains("\"socketcan\":[]"));
         assert!(json.contains("\"pcan\":[]"));
+        assert!(json.contains("\"vector\":[]"));
     }
 
     // ---- Human formatting ----
@@ -287,10 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn human_output_has_three_section_headers() {
+    fn human_output_has_four_section_headers() {
         let s = human_string(&sample_report());
         assert!(s.contains("SLCAN serial ports:"));
         assert!(s.contains("PCAN devices:"));
+        assert!(s.contains("Vector XL devices:"));
         assert!(s.contains("SocketCAN interfaces:"));
     }
 
@@ -309,6 +384,7 @@ mod tests {
                 interface: "can0".into(),
             }],
             pcan: vec![],
+            vector: vec![],
         };
         let s = human_string(&report);
         assert!(s.contains("SLCAN serial ports:\n  (none detected)"));
@@ -356,15 +432,16 @@ mod tests {
 
     #[test]
     fn human_output_surfaces_platform_limits() {
-        // On Linux, the PCAN section should say "Linux" language.
-        // On Windows/macOS, the SocketCAN section should.
-        // We run this test on the current host; the assertion picks
-        // which message to look for.
         let s = human_string(&AdapterReport::default());
         if cfg!(target_os = "linux") {
             assert!(s.contains("PCAN-Basic only supported on Windows / macOS"));
-        } else {
+            assert!(s.contains("Vector XL Driver Library is currently Windows-only"));
+        } else if cfg!(target_os = "windows") {
             assert!(s.contains("SocketCAN is Linux-only"));
+        } else {
+            // macOS: both SocketCAN and Vector are unavailable.
+            assert!(s.contains("SocketCAN is Linux-only"));
+            assert!(s.contains("Vector XL Driver Library is currently Windows-only"));
         }
     }
 }

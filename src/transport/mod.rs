@@ -34,6 +34,8 @@ pub mod slcan;
 #[cfg(target_os = "linux")]
 pub mod socketcan;
 pub mod stub_device;
+#[cfg(target_os = "windows")]
+pub mod vector;
 pub mod virtual_bus;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -42,6 +44,8 @@ pub use slcan::{SlcanAdapterInfo, SlcanBackend};
 #[cfg(target_os = "linux")]
 pub use socketcan::{SocketCanAdapterInfo, SocketCanBackend};
 pub use stub_device::StubDevice;
+#[cfg(target_os = "windows")]
+pub use vector::{VectorAdapterInfo, VectorBackend};
 pub use virtual_bus::{StubLoopback, VirtualBackend, VirtualBus};
 
 /// Every way the transport layer can fail.
@@ -227,6 +231,28 @@ pub fn open_backend(
                     name: "pcan",
                     reason: "PCAN is supported on Linux (via SocketCAN + peak_usb), \
                              Windows, and macOS only"
+                        .into(),
+                })
+            }
+        }
+        InterfaceType::Vector => {
+            #[cfg(target_os = "windows")]
+            {
+                let channel = channel.ok_or_else(|| TransportError::InvalidChannel {
+                    channel: String::new(),
+                    reason: "--channel required for --interface vector; use the index \
+                              shown by `can-flasher adapters` (e.g. --channel 0)"
+                        .into(),
+                })?;
+                Ok(Box::new(vector::VectorBackend::open(channel, bitrate)?))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = (channel, bitrate);
+                Err(TransportError::AdapterMissing {
+                    name: "vector",
+                    reason: "Vector XL Driver Library is currently supported on Windows only; \
+                             Linux support is planned for a future release"
                         .into(),
                 })
             }

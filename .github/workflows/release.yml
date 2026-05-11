@@ -76,6 +76,11 @@ jobs:
             archive_ext: zip
             bin_ext: '.exe'
             apt_deps: ''
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive_ext: tar.gz
+            bin_ext: ''
+            apt_deps: libudev-dev pkg-config
     steps:
       - uses: actions/checkout@v4
 
