@@ -22,13 +22,19 @@ can-flasher/
 │   ├── logging.rs          tracing-subscriber bootstrap
 │   ├── cli/
 │   │   ├── mod.rs          Cli, Command, GlobalFlags (clap derive)
-│   │   ├── adapters.rs     ✅ live — enumerates backends, emits table or JSON
-│   │   ├── flash.rs        🔜 stub bailing "not implemented"
-│   │   ├── verify.rs       🔜 stub
-│   │   ├── discover.rs     🔜 stub
-│   │   ├── diagnose.rs     🔜 stub
-│   │   ├── config.rs       🔜 stub
-│   │   └── replay.rs       🔜 stub
+│   │   ├── adapters.rs     enumerates backends, emits table or JSON
+│   │   ├── flash.rs        end-to-end firmware programming pipeline
+│   │   ├── verify.rs       readback CRC comparison against a binary
+│   │   ├── discover.rs     bus scan + bootloader-mode device table
+│   │   ├── diagnose.rs     DTC / log / live-data / health / reset
+│   │   ├── config.rs       NVM read/write + option bytes + WRP apply
+│   │   ├── replay.rs       candump record / playback
+│   │   └── send_raw.rs     single raw CAN frame (app-level commands)
+│   ├── firmware/
+│   │   ├── mod.rs          Image type + address-space validation
+│   │   └── loader.rs       ELF / Intel HEX / raw .bin loader
+│   ├── flash/
+│   │   └── mod.rs          FlashManager (sector-aware erase + diff + verify)
 │   ├── protocol/
 │   │   ├── mod.rs          CanFrame + ParseError + re-exports
 │   │   ├── ids.rs          FrameId + MessageType + HOST/BROADCAST
@@ -43,11 +49,15 @@ can-flasher/
 │   │   ├── stub_device.rs  StubDevice (minimum bootloader simulator)
 │   │   ├── slcan.rs        SlcanBackend (all OSes)
 │   │   ├── socketcan.rs    SocketCanBackend (Linux only)
-│   │   └── pcan.rs         PcanBackend (Windows + macOS only)
+│   │   ├── pcan.rs         PcanBackend (Windows + macOS only)
+│   │   └── vector.rs       VectorBackend (Windows; XL Driver Library)
 │   └── session/
 │       └── mod.rs          Session (handshake, keepalive, reconnect, notifications)
 ├── tests/
-│   └── virtual_pipeline.rs end-to-end: host Session drives VirtualBus-paired StubDevice
+│   ├── virtual_pipeline.rs end-to-end: host Session drives VirtualBus-paired StubDevice
+│   ├── flash_manager.rs    unit harness for the FlashManager state machine
+│   └── *_subcommand.rs     one integration test per CLI subcommand (config, diagnose,
+│                           discover, flash, replay, verify)
 └── .github/
     ├── roadmap.yaml        source of truth for ROADMAP.md
     ├── scripts/
@@ -100,7 +110,7 @@ methods. Every backend implements it; callers consume it as
 `Box<dyn CanBackend>` so the layer above doesn't care which adapter
 actually shuffles frames.
 
-Four backends ship today:
+Five backends ship today:
 
 | Backend | Platform | Wire | Notes |
 |---|---|---|---|
@@ -108,6 +118,7 @@ Four backends ship today:
 | `SlcanBackend` | Linux / macOS / Windows | USB CDC serial | Speaks SLCAN ASCII (`t` frames, `S<N>` bitrate, `O`/`C` open/close) via the `serialport` crate. Blocking reader thread + `tokio::sync::mpsc` for async recv. |
 | `SocketCanBackend` | Linux | `AF_CAN` socket | `socketcan` crate with `tokio` feature. `cfg(target_os = "linux")`-gated. Also services `--interface pcan` on Linux since the `peak_usb` kernel module exposes PCAN as SocketCAN. |
 | `PcanBackend` | Windows / macOS | PCAN-Basic SDK | `libloading` loads `PCANBasic.dll` / `libPCBUSB.dylib` at runtime. Missing SDK → `TransportError::AdapterMissing`, not a link error. Poll-based reader thread (1 ms between empty reads). |
+| `VectorBackend` | Windows | XL Driver Library | `libloading` loads `vxlapi64.dll` at runtime; same fail-soft behaviour as PCAN. Channels enumerated via `xlGetDriverConfig`; the CLI takes a 0-based XL channel index. Linux support is planned. |
 
 `TransportError` covers `Timeout` / `Disconnected` / `Io` /
 `InvalidChannel` / `AdapterMissing` / `Other`. Every fallible method
@@ -146,22 +157,28 @@ boilerplate a subcommand would otherwise open-code:
   aborts the RX task; `Drop` does a best-effort version without
   being able to `.await`.
 
-```
-┌──────────────┐     backend.recv()     ┌──────────────┐
-│   rx_task    │ ◄──────────────────── │   backend    │
-│ (background) │                        └──────┬───────┘
-│              │                               │ backend.send()
-│   routes:    │                               ▲
-│   ACK/NACK/  │──► reply_tx (mpsc) ──┐       │
-│   DISCOVER   │                       │       │
-│   NOTIFY ───►│ notification_tx       │       │
-│              │    (broadcast)        │       │
-└──────────────┘                       ▼       │
-                               ┌──────────────┐│
-                               │ send_command │├─ command_lock
-                               │ broadcast()  │◄ serialises
-                               │ connect()    ││ all ops
-                               └──────────────┘│
+```mermaid
+flowchart LR
+    backend["backend<br/><i>(CanBackend impl)</i>"]
+    rx["rx_task<br/><i>background daemon</i><br/>parses ISO-TP → Response"]
+    reply[("reply_tx<br/>(mpsc, single reader)")]
+    notif[("notification_tx<br/>(broadcast, fan-out)")]
+    ops["send_command<br/>broadcast<br/>connect / disconnect<br/><i>command_lock serialises all</i>"]
+    sub[/"Notify subscribers<br/>(diagnose log/live-data)"/]
+
+    backend -- "recv()" --> rx
+    rx -- "ACK / NACK / Discover" --> reply
+    rx -- "Notify" --> notif
+    reply --> ops
+    notif --> sub
+    ops -- "send()" --> backend
+
+    classDef io fill:#eef,stroke:#558,color:#000;
+    classDef task fill:#efe,stroke:#585,color:#000;
+    classDef chan fill:#fef6e0,stroke:#a87,color:#000;
+    class backend io
+    class rx,ops task
+    class reply,notif chan
 ```
 
 Exactly one command is in flight at a time — `command_lock`
@@ -261,6 +278,36 @@ Search order (in priority):
 Missing library surfaces as `TransportError::AdapterMissing` with
 the PEAK download URL.
 
+### Why the same pattern for Vector?
+
+The Vector XL Driver Library (`vxlapi64.dll`) follows the identical
+runtime-load story for the same reasons — it's a proprietary SDK
+that absent users shouldn't have to install. `VectorBackend` loads
+`vxlapi64.dll` via `libloading` on first `--interface vector` use,
+with the search order:
+
+1. `$VECTOR_LIB_PATH` env var — explicit override.
+2. Bare `vxlapi64.dll` (Windows DLL search picks up the System32 copy
+   that the Vector installer drops in).
+3. Directory containing the currently-running binary.
+
+Missing library surfaces as `TransportError::AdapterMissing` with the
+Vector download URL.
+
+One extra wrinkle vs PCAN: the XL Driver Library's `XLchannelConfig`
+struct has changed layout across SDK releases. `vector.rs` treats the
+config buffer as opaque bytes and reads only the fields it needs
+(channel mask, channel index, bus capabilities, name) at documented
+byte offsets. `XL_CHANNEL_CONFIG_SIZE` is the single tunable if a
+future SDK ever shifts the slot stride. Adapter enumeration filters
+by `channelBusCapabilities & XL_BUS_ACTIVE_CAP_CAN` so a multi-bus
+device like the VN1640 (CAN + LIN) reports only its CAN channels.
+
+Linux support is on the roadmap. Vector's Linux driver does not
+currently expose adapters as SocketCAN interfaces (unlike PCAN's
+`peak_usb`), so it'll need a separate code path rather than routing
+through `SocketCanBackend`.
+
 ### Why `cfg`-gated platform modules?
 
 The backends live in files that compile only on their supported
@@ -268,6 +315,7 @@ platforms:
 
 - `transport/socketcan.rs` — `#![cfg(target_os = "linux")]`
 - `transport/pcan.rs` — `#![cfg(any(target_os = "windows", target_os = "macos"))]`
+- `transport/vector.rs` — `#![cfg(target_os = "windows")]`
 
 The alternative (one file with inline `#[cfg]` everywhere) would
 bloat each backend with platform-specific branches and prevent
@@ -367,9 +415,12 @@ extended to carry signatures and nonces when the time comes.
 - **Understanding the wire format**: `src/protocol/isotp.rs` module
   comment + `src/protocol/opcodes.rs`.
 - **Adding a new backend**: `src/transport/slcan.rs` is the simplest
-  full implementation; copy its shape.
-- **Adding a new subcommand**: `src/cli/adapters.rs` is the only
-  implemented one today; it's short enough to be the template.
+  full implementation; `src/transport/pcan.rs` and `src/transport/vector.rs`
+  are the template if the backend talks to a proprietary SDK via
+  `libloading`.
+- **Adding a new subcommand**: `src/cli/adapters.rs` is the shortest
+  one and `src/cli/discover.rs` is the canonical "open backend + drive
+  session + format output" template.
 - **Testing a new protocol feature**: `tests/virtual_pipeline.rs`
   plus the unit tests in the relevant module.
 - **Changing the CLI args**: `src/cli/mod.rs` owns the `clap` types;

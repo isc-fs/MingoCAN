@@ -43,7 +43,7 @@ Three test flavours all run under `cargo test`:
 - **Doc tests** in `///` blocks — currently one example in
   `protocol::commands`.
 
-Hardware-in-the-loop (real CANable / SocketCAN / PCAN adapters) is
+Hardware-in-the-loop (real CANable / SocketCAN / PCAN / Vector adapters) is
 not part of CI; it's covered by the manual smoke-test workflow.
 
 ### CI
@@ -65,13 +65,41 @@ tweaks.
 
 ### Main branches
 
+```mermaid
+%%{init: { 'gitGraph': { 'mainBranchName': 'main', 'showCommitLabel': true }}}%%
+gitGraph
+    commit id: "v0.4.0-subcommands"
+    branch dev
+    checkout dev
+
+    branch feat/1
+    commit id: "feat work"
+    checkout dev
+    merge feat/1
+
+    branch fix/1
+    commit id: "fix work"
+    checkout dev
+    merge fix/1
+
+    branch feat/2
+    commit id: "feat work"
+    checkout dev
+    merge feat/2
+
+    checkout main
+    merge dev tag: "v1.0.0"
+    checkout dev
+
+    branch feat/3
+    commit id: "feat work"
+    checkout dev
+    merge feat/3
 ```
-main  ──────────────────●──────────────────────●──▶  validated releases only
-                        ↑                      ↑
-dev   ──────●───●───●───●───●───●───●───●───●──●──▶  continuous integration
-            ↑   ↑       ↑   ↑   ↑       ↑   ↑
-          feat/1 fix/1 feat/2 fix/2   feat/3 fix/3
-```
+
+- `main` only advances when `dev` is merged at a release milestone — every commit on `main` corresponds to a tagged release.
+- `dev` accumulates integration from per-branch PRs; nobody commits directly to it.
+- Feature branches and fix branches are cut from `dev`, opened as PRs against `dev`, and squash-merged once CI passes.
 
 `main` carries validated, tagged releases (`v0.x.0-…`, culminating
 at `v1.0.0` and whatever comes next). `dev` is where feat / fix

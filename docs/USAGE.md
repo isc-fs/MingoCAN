@@ -22,10 +22,11 @@ Commands:
   diagnose    Read/clear DTCs, stream logs, stream live data, session health
   config      Read/write device configuration (NVM) and option bytes (WRP)
   replay      Record or replay a CAN session (testing)
+  send-raw    Send one raw CAN frame (app-level reboot-to-BL, bench probes)
   adapters    List detected CAN adapters on this machine
 
 Global Options:
-  -i, --interface <TYPE>    CAN backend: slcan | socketcan | pcan | virtual
+  -i, --interface <TYPE>    CAN backend: slcan | socketcan | pcan | vector | virtual
   -c, --channel <CHANNEL>   Adapter channel (format depends on OS and backend)
   -b, --bitrate <BPS>       Nominal CAN bitrate [default: 500000]
       --node-id <ID>        Target node ID hex or decimal [default: broadcast]
@@ -212,6 +213,35 @@ can-flasher --json replay run flash.candump | jq
 
 Files are compatible with `canplayer` and `cantools` — you can
 replay them against a `vcan` interface externally if the need arises.
+
+---
+
+## `send-raw` — single raw CAN frame
+
+Bypass the bootloader protocol entirely and transmit one classic-CAN
+frame with the operator-supplied 11-bit ID and 0–8 payload bytes.
+Used for app-level conventions that the BL doesn't know about — most
+commonly a "reboot to bootloader" escape sent to a running
+application before the next flash.
+
+```bash
+# Send one frame with ID 0x010, payload 0x01, listen 100 ms for replies (default)
+can-flasher --interface slcan --channel /dev/ttyACM0 \
+  send-raw 0x010 01
+
+# No listen window — fire and exit
+can-flasher --interface slcan --channel /dev/ttyACM0 \
+  send-raw 0x010 01 --listen-ms 0
+
+# Longer listen window to catch a slow ACK
+can-flasher --interface slcan --channel /dev/ttyACM0 \
+  send-raw 0x010 DE AD BE EF --listen-ms 500
+```
+
+The specific ID and payload convention for "reboot to BL" or any
+other app-level signal lives in the **application firmware** and the
+matching REQUIREMENTS.md update, not here — `send-raw` is the
+generic primitive, the convention is app-defined.
 
 ---
 

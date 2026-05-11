@@ -108,6 +108,13 @@ phases:
       - name: feat/17-flash-subcommand
         scope: end-to-end `flash` wiring + FLASH_VERIFY commit + JUMP
 
+  - number: 6
+    title: Post-v1 adapter coverage
+    tag: v1.2.0
+    branches:
+      - name: feat/18-vector-backend
+        scope: Vector XL Driver Library (VN1610 / VN16xx, Windows)
+
 sidequests:
   - title: Plantilla sync
     note: Workflow bootstrapping pulled in from the template repository.
@@ -115,3 +122,9 @@ sidequests:
     branches:
       - feat/1-autoclose-on-dev-merge
       - fix/1-workflow-titled-branches
+
+  - title: Release tooling
+    note: Maintenance / pipeline fixes that don't slot into a product phase.
+    branches:
+      - fix/2-release-sync-dev
+      - fix/3-docs-revamp-vector
