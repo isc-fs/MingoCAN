@@ -4,11 +4,16 @@
 
 Host-side CAN flasher for the [isc-fs/stm32-can-bootloader](https://github.com/isc-fs/stm32-can-bootloader).
 Single static Rust binary that runs on Linux, macOS and Windows;
-speaks the bootloader's classic-CAN protocol through SLCAN adapters
-(CANable), SocketCAN (Linux) or PCAN-Basic (Windows / macOS).
+speaks the bootloader's classic-CAN protocol through four adapter
+families: SLCAN (CANable, all OSes), SocketCAN (Linux), PCAN-Basic
+(Windows / macOS), and Vector XL Driver Library (VN1610 and the
+rest of the [VN16xx](https://www.vector.com/int/en/products/products-a-z/hardware/network-interfaces/vn16xx/)
+series on Windows).
 
-**v1.0.0** — all 7 subcommands are live and the full host-side
-flasher is feature-complete against the v1.0.0 bootloader contract.
+**Current release: [v1.2.0](https://github.com/isc-fs/can-flasher/releases/tag/v1.2.0)** —
+flash pipeline feature-complete against the v1.0.0 bootloader
+contract; subsequent releases add adapter coverage, flash-speed
+improvements, and tooling.
 
 | Subcommand | Purpose |
 |---|---|
@@ -19,6 +24,17 @@ flasher is feature-complete against the v1.0.0 bootloader contract.
 | `verify` | Compare installed image against a binary |
 | `replay` | Record / replay CAN sessions for testing |
 | `flash` | Program firmware end-to-end |
+| `send-raw` | Send one raw CAN frame (app-level reboot-to-BL, bench probes) |
+
+## Supported adapters
+
+| Family | Platforms | Channel example | Notes |
+|---|---|---|---|
+| **SLCAN** | Linux / macOS / Windows | `/dev/ttyACM0`, `COM3` | CANable, CANtact, any SLCAN-compatible USB adapter |
+| **SocketCAN** | Linux | `can0`, `vcan0` | Native kernel sockets; also handles PCAN on Linux via the `peak_usb` module |
+| **PCAN-Basic** | Windows / macOS | `PCAN_USBBUS1` | PEAK adapters via `libloading` — SDK loaded at runtime |
+| **Vector XL** | Windows | `0`, `1` (XL channel index) | VN1610 / VN16xx via `vxlapi64.dll` — SDK loaded at runtime |
+| **Virtual** | all | (ignored) | In-process bus for testing without hardware |
 
 ---
 

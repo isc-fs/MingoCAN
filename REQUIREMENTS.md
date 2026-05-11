@@ -31,8 +31,8 @@ the bootloader repo is a bug in this file — fix this file first.
 
 ## Supported host adapters
 
-Two adapter families are supported. Both are first-class; neither is
-a fallback.
+Three adapter families are supported. All three are first-class;
+none is a fallback. The CLI picks between them with `--interface`.
 
 ### CANable (SLCAN firmware)
 
@@ -96,6 +96,49 @@ interface.
 On Linux, PCAN routes through SocketCAN — the `SocketCanBackend`
 handles it transparently once `peak_usb` is loaded. On Windows and
 macOS the `PcanBackend` calls PCAN-Basic directly via `libloading`.
+
+### Vector (XL Driver Library)
+
+Vector adapters are recommended when working with existing
+[CANoe](https://www.vector.com/int/en/products/products-a-z/software/canoe/)
+/ [CANalyzer](https://www.vector.com/int/en/products/products-a-z/software/canalyzer/)
+toolchains, when the lab already has the XL Driver Library installed
+across machines, or when a vehicle-grade adapter with multi-bus
+capability is preferred for the car. Vector provides the **XL Driver
+Library** (`vxlapi64.dll`) for Windows; Linux support is on the
+roadmap but not in v1.
+
+| Model | Notes |
+|---|---|
+| VN1610 | 2 × CAN / CAN FD, USB 2.0, D-SUB — the typical dev adapter |
+| VN1611 | VN1610 variant |
+| VN1630A | 4 × CAN / CAN FD, exchangeable transceivers |
+| VN1640A | 4 × CAN / CAN FD + SENT |
+| VN1670 | Up to 15 channels via piggyback slots |
+| Any XL-API-compatible Vector device | Detected automatically by `xlGetDriverConfig` |
+
+CAN FD is not used by the bootloader, but the host tool opens the
+channel in classic-CAN mode regardless of the adapter's FD
+capability.
+
+**Per-OS setup**:
+
+| OS | What to do |
+|---|---|
+| Windows | Install the Vector XL Driver Library from [vector.com](https://www.vector.com/int/en/products/products-a-z/software/xl-driver-library/). `vxlapi64.dll` lands in `System32`. |
+| Linux | _Not yet supported by `--interface vector`. Roadmap item — Vector's Linux driver does not expose adapters as SocketCAN interfaces, so a dedicated code path is needed._ |
+| macOS | _Not supported. Vector does not ship an XL Driver Library for macOS._ |
+
+**Channel naming on Vector** (used with `--channel`): the 0-based XL
+channel index as reported by `xlGetDriverConfig`. Run `can-flasher
+adapters` to see the index for each physical channel — a VN1610
+typically appears as channels `0` and `1` if it's the only Vector
+device plugged in.
+
+`VectorBackend` calls XL-API directly via `libloading` against a
+runtime-resolved `vxlapi64.dll`. Missing library →
+`TransportError::AdapterMissing` with the Vector download URL, the
+same fail-soft contract as PCAN.
 
 ---
 
@@ -301,6 +344,58 @@ The user always uses `--channel can0` on Linux regardless of whether
 the adapter is a CANable (candlelight) or a PCAN — the kernel hides
 the difference.
 
+#### `VectorBackend` — Windows
+
+Talks to the Vector XL Driver Library via `libloading` against a
+runtime-resolved `vxlapi64.dll`. Same fail-soft contract as PCAN: a
+missing library surfaces as `TransportError::AdapterMissing` with the
+SDK download URL, not a link error.
+
+```rust
+#[cfg(target_os = "windows")]
+pub struct VectorBackend {
+    api: Arc<VectorApi>,        // libloading::Library + resolved fn ptrs
+    port_handle: XLportHandle,
+    access_mask: XLaccess,      // channel bitmask from xlGetDriverConfig
+    rx: Arc<TokioMutex<mpsc::Receiver<CanFrame>>>,
+    shutdown: Arc<AtomicBool>,
+    reader_handle: StdMutex<Option<JoinHandle<()>>>,
+    description: String,
+}
+
+#[cfg(target_os = "windows")]
+impl VectorBackend {
+    /// Open the 0-based XL channel index from `xlGetDriverConfig`,
+    /// initialise the channel at `bitrate` if init access is granted,
+    /// activate the bus, spawn the polling reader thread.
+    pub fn open(channel: &str, bitrate: u32) -> Result<Self>;
+}
+```
+
+- Bitrate is set via `xlCanSetChannelBitrate(port, mask, bps)` when the
+  open call obtains init permission. If another process already
+  initialised the bus at a different rate, the flasher logs a warning
+  and continues at the existing rate.
+- TX is via `xlCanTransmit` from a `spawn_blocking` task; RX is a
+  dedicated thread polling `xlReceive` (returns
+  `XL_ERR_QUEUE_IS_EMPTY` when no frame, so 1 ms sleep between empty
+  reads keeps the core idle).
+- Reader filters out TX echoes (`XL_CAN_MSG_FLAG_TX_COMPLETED` /
+  `_TX_REQUEST`) and error / remote frames; only 11-bit standard data
+  frames make it to the host session.
+- `description()` reports the XL channel name (e.g. `"Vector VN1610 1
+  Channel 1 (channel 0, 500000 bps)"`) for the audit log.
+- `has_hw_timestamps()` returns `false` today even though the XL API
+  provides nanosecond timestamps — the flasher doesn't currently
+  consume them.
+
+`XLchannelConfig` struct layout has drifted across SDK releases, so
+the backend treats `xlGetDriverConfig`'s output as an opaque byte
+buffer and reads only the fields it needs (name, channel mask,
+channel index, bus capabilities, transceiver name) at documented
+offsets. `XL_CHANNEL_CONFIG_SIZE` is the single constant to bump if a
+future SDK shifts the slot stride.
+
 #### `VirtualBackend` — all platforms
 
 In-process loopback for testing and CI. Two `VirtualBackend`
@@ -328,34 +423,44 @@ pub enum InterfaceType {
     /// SLCAN serial — CANable and compatible adapters, all platforms
     Slcan,
     /// Native SocketCAN kernel socket — Linux only
-    #[cfg(target_os = "linux")]
     Socketcan,
     /// PEAK PCAN — SocketCAN on Linux, PCAN-Basic SDK on Win/macOS
     Pcan,
+    /// Vector XL Driver Library — VN-series, Windows (Linux planned)
+    Vector,
     /// In-process virtual bus for testing
     Virtual,
 }
 
 pub fn open_backend(
     iface:   InterfaceType,
-    channel: &str,
+    channel: Option<&str>,
     bitrate: u32,
 ) -> Result<Box<dyn CanBackend>> {
     match iface {
         InterfaceType::Slcan => {
-            Ok(Box::new(SlcanBackend::open(channel, bitrate)?))
+            Ok(Box::new(SlcanBackend::open(channel?, bitrate)?))
         }
         #[cfg(target_os = "linux")]
         InterfaceType::Socketcan | InterfaceType::Pcan => {
-            Ok(Box::new(SocketCanBackend::open(channel)?))
+            Ok(Box::new(SocketCanBackend::open(channel?)?))
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         InterfaceType::Pcan => {
-            Ok(Box::new(PcanBackend::open(channel, bitrate)?))
+            Ok(Box::new(PcanBackend::open(channel?, bitrate)?))
+        }
+        #[cfg(target_os = "windows")]
+        InterfaceType::Vector => {
+            Ok(Box::new(VectorBackend::open(channel?, bitrate)?))
         }
         InterfaceType::Virtual => {
             Ok(Box::new(VirtualBackend::new()))
         }
+        // Unsupported (interface, OS) combinations return
+        // TransportError::AdapterMissing with a clear message — see
+        // src/transport/mod.rs for the full router. Sketch above
+        // omits those for readability.
+        _ => bail_adapter_missing(iface),
     }
 }
 ```
@@ -1108,69 +1213,82 @@ duration, result.
 
 ```
 can-flasher/
-├── Cargo.toml
-├── REQUIREMENTS.md                — this file
-├── signals/
-│   └── bl_live_v1.toml            — live-data snapshot signal definitions
-├── build.rs                       — embeds PCAN-Basic channel constants at compile time
+├── Cargo.toml                            manifest + target-gated deps
+├── README.md
+├── ARCHITECTURE.md                       module-level architecture notes
+├── REQUIREMENTS.md                       this file (authoritative spec)
+├── ROADMAP.md                            phase delivery (auto-generated from YAML)
+├── docs/
+│   ├── INSTALL.md                        toolchain + per-OS adapter setup
+│   ├── USAGE.md                          subcommand reference + examples
+│   ├── CONTRIBUTING.md                   contributor guide
+│   └── PERFORMANCE.md                    flash-speed baseline + --profile guide
 ├── src/
-│   ├── main.rs
+│   ├── lib.rs                            pub mod declarations (library target)
+│   ├── main.rs                           clap entry point (binary target)
+│   ├── logging.rs                        tracing-subscriber bootstrap
 │   ├── cli/
-│   │   ├── mod.rs
-│   │   ├── flash.rs
-│   │   ├── verify.rs
-│   │   ├── discover.rs
-│   │   ├── diagnose.rs
-│   │   ├── config.rs
-│   │   ├── replay.rs
-│   │   └── adapters.rs
-│   ├── transport/
-│   │   ├── mod.rs                 — CanBackend trait, open_backend(), InterfaceType
-│   │   ├── slcan.rs               — SlcanBackend (all platforms)
-│   │   ├── socketcan.rs           — SocketCanBackend (#[cfg(target_os = "linux")])
-│   │   ├── pcan.rs                — PcanBackend via libloading (Windows / macOS)
-│   │   ├── pcan_linux.rs          — Thin shim: delegates to SocketCanBackend
-│   │   ├── virtual.rs             — VirtualBackend + VirtualBus
-│   │   └── detect.rs              — adapter enumeration for `adapters` command
-│   ├── protocol/
-│   │   ├── mod.rs                 — CanFrame, MessageType, opcodes
-│   │   ├── isotp.rs               — multi-frame segmentation / reassembly
-│   │   ├── session.rs             — connect / disconnect / keepalive / timeout
-│   │   ├── commands.rs            — typed command builders and response parsers
-│   │   └── records.rs             — __firmware_info / health / live-data / DTC / OB structs
+│   │   ├── mod.rs                        Cli / Command / GlobalFlags (clap derive)
+│   │   ├── adapters.rs                   enumerate detected adapters
+│   │   ├── flash.rs                      end-to-end programming pipeline
+│   │   ├── verify.rs                     readback CRC comparison
+│   │   ├── discover.rs                   bus scan + device table
+│   │   ├── diagnose.rs                   DTC / log / live-data / health / reset
+│   │   ├── config.rs                     NVM read/write + option bytes + WRP
+│   │   ├── replay.rs                     candump record / playback
+│   │   └── send_raw.rs                   single raw CAN frame
+│   ├── protocol/                         pure wire-format, no I/O
+│   │   ├── mod.rs                        CanFrame + ParseError + re-exports
+│   │   ├── ids.rs                        FrameId / MessageType / node-ID consts
+│   │   ├── opcodes.rs                    CommandOpcode / NotifyOpcode / NackCode / ResetMode
+│   │   ├── isotp.rs                      IsoTpSegmenter + Reassembler
+│   │   ├── records.rs                    FirmwareInfo / Health / LiveData / DtcEntry / ObStatus
+│   │   ├── commands.rs                   typed command builders
+│   │   └── responses.rs                  Response parser
+│   ├── transport/                        adapter I/O behind CanBackend trait
+│   │   ├── mod.rs                        CanBackend + TransportError + open_backend
+│   │   ├── virtual_bus.rs                VirtualBus + VirtualBackend + StubLoopback
+│   │   ├── stub_device.rs                StubDevice (bootloader simulator)
+│   │   ├── slcan.rs                      SlcanBackend (all OSes)
+│   │   ├── socketcan.rs                  SocketCanBackend (Linux only)
+│   │   ├── pcan.rs                       PcanBackend (Windows + macOS)
+│   │   └── vector.rs                     VectorBackend (Windows; Linux planned)
+│   ├── session/
+│   │   └── mod.rs                        Session: handshake, keepalive, reconnect, notifications
 │   ├── firmware/
-│   │   ├── loader.rs              — ELF / HEX / BIN parsing
-│   │   ├── flash_manager.rs       — sector map, diff, erase/write/verify
-│   │   └── metadata.rs            — __firmware_info decoding
-│   ├── protection/
-│   │   └── wrp.rs                 — WRP query, address validation, token builder
-│   ├── diagnostics/
-│   │   ├── dtc.rs
-│   │   ├── log_stream.rs
-│   │   ├── live_data.rs
-│   │   └── health.rs
-│   ├── output/
-│   │   ├── json.rs
-│   │   ├── audit.rs               — SQLite session log
-│   │   └── summary.rs             — GitHub Actions step summary
-│   └── device/
-│       └── registry.rs            — discovery, multi-node sessions
-├── tests/
-│   ├── flash_pipeline.rs
-│   ├── address_validation.rs
-│   ├── wrp_enforcement.rs
-│   ├── multiframe.rs
-│   ├── nack_handling.rs
-│   ├── keepalive_and_reconnect.rs
-│   └── multi_node.rs
+│   │   ├── mod.rs                        Image type + address validation
+│   │   └── loader.rs                     ELF / Intel HEX / raw .bin
+│   └── flash/
+│       └── mod.rs                        FlashManager (sector map, diff, erase/write/verify)
+├── tests/                                integration tests against VirtualBus + StubDevice
+│   ├── virtual_pipeline.rs               end-to-end session round-trip
+│   ├── flash_manager.rs                  FlashManager state-machine harness
+│   ├── flash_subcommand.rs               `flash` CLI integration
+│   ├── verify_subcommand.rs              `verify` CLI integration
+│   ├── discover_subcommand.rs            `discover` CLI integration
+│   ├── diagnose_subcommand.rs            `diagnose` CLI integration
+│   ├── config_subcommand.rs              `config` CLI integration
+│   └── replay_subcommand.rs              `replay` CLI integration
+├── demo/                                 reference STM32H733 application
+│   └── MAIN_IFS08_DEMO/                  builds against the bootloader contract
 └── .github/
+    ├── roadmap.yaml                      source of truth for ROADMAP.md
+    ├── scripts/render_roadmap.py
     └── workflows/
-        ├── ci.yml
-        └── release.yml
+        ├── ci.yml                        fmt / clippy / build / test matrix
+        ├── release.yml                   tag-pushed cross-platform binaries + inline dev sync
+        ├── sync-dev-after-release.yml    workflow_dispatch recovery handle
+        ├── branch-issue.yml              auto-create tracking issue on branch push
+        ├── close-on-dev-merge.yml        auto-close tracking issue on dev merge
+        └── roadmap.yml                   regenerate ROADMAP.md from YAML
 ```
 
-No `src/security/` directory in v1; no `src/debug/` directory (no
-`CMD_MEM_READ` / `CMD_MEM_WRITE` to wrap).
+No `src/security/` directory in v1 (Phase 5 security work — Ed25519
+signing, challenge-response, replay counter — is deferred); no
+`src/debug/` (no `CMD_MEM_READ` / `CMD_MEM_WRITE` to wrap). The
+`audit` / `output / summary` / `protection / wrp` boxes from earlier
+planning drafts never materialised as separate modules — that
+functionality is inlined into the relevant subcommand instead.
 
 ---
 

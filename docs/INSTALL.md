@@ -82,6 +82,25 @@ The flasher loads the shared library at runtime; on Linux PCAN
 adapters appear under SocketCAN via the `peak_usb` kernel module so
 the SDK isn't needed there.
 
+### Vector XL Driver Library (Windows)
+
+For VN1610 and other [VN16xx](https://www.vector.com/int/en/products/products-a-z/hardware/network-interfaces/vn16xx/)
+series adapters. Download and install the **Vector XL Driver
+Library** from
+[vector.com](https://www.vector.com/int/en/products/products-a-z/software/xl-driver-library/) —
+the installer drops `vxlapi64.dll` into `C:\Windows\System32`. The
+flasher loads it at runtime, so machines without the SDK installed
+won't see a link failure; instead `--interface vector` returns
+`AdapterMissing` with the download URL.
+
+To point at a non-default install location, set `VECTOR_LIB_PATH` to
+the full path of `vxlapi64.dll` before running the flasher.
+
+Linux support is not yet shipped — Vector's Linux driver doesn't
+expose adapters as SocketCAN interfaces (the way PCAN does via
+`peak_usb`), so a dedicated backend is needed and is on the roadmap.
+macOS isn't supported by Vector at all.
+
 ---
 
 ## First command: enumerate adapters
@@ -98,6 +117,9 @@ can-flasher adapters
 #
 # PCAN devices:
 #   (none detected — PCAN-Basic library may be missing)
+#
+# Vector XL devices:
+#   (Vector XL Driver Library is currently Windows-only — Linux support planned)
 #
 # SocketCAN interfaces:
 #   (SocketCAN is Linux-only)
@@ -119,8 +141,15 @@ can-flasher adapters --json | jq
 #   "slcan":     [ { "channel": "/dev/ttyACM0", "description": "CANable 2.0 (…)",
 #                    "vid": "0x1d50", "pid": "0x606f" } ],
 #   "socketcan": [],
-#   "pcan":      []
+#   "pcan":      [],
+#   "vector":    []
 # }
+#
+# On Windows with a VN1610 plugged in, "vector" would carry e.g.:
+#   [ { "channel": "0", "name": "VN1610 1 Channel 1",
+#       "transceiver": "CAN - TJA1041" },
+#     { "channel": "1", "name": "VN1610 1 Channel 2",
+#       "transceiver": "CAN - TJA1041" } ]
 ```
 
 ---
