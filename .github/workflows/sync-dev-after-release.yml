@@ -1,20 +1,44 @@
 name: Sync dev after release
 
-# Fast-forwards `dev` to match `main` whenever a GitHub Release is
-# published. Closes the "dev behind main" drift that merge-commit
-# dev→main cuts leave behind: without this, the next feature branch
-# cut from `dev` diverges from `main` for no reason (new code path
-# == same code, just different merge-commit ancestry).
+# Fast-forwards `dev` to match `main`. Closes the "dev behind main"
+# drift that merge-commit dev→main cuts leave behind: without this,
+# the next feature branch cut from `dev` diverges from `main` for no
+# reason (new code path == same code, just different merge-commit
+# ancestry).
+#
+# ## Primary path: inline sync in release.yml
+#
+# The actual sync now runs as the `sync-dev` job inside `release.yml`,
+# right after the `build` job completes. That job uses the identical
+# three-case logic below and the same `github-actions[bot]` identity.
+# It lives in release.yml because the `release.published` trigger on
+# this workflow file is *unreliable* — GitHub does not fire downstream
+# workflow events when the release is created by another workflow's
+# default `GITHUB_TOKEN`, which is exactly what
+# `softprops/action-gh-release` in release.yml uses. v1.2.0 hit this
+# silently: builds succeeded, release published, this workflow never
+# ran, and `dev` had to be fast-forwarded by hand.
+#
+# ## This workflow's remaining role: manual recovery
+#
+# Kept around (with `workflow_dispatch`) as a one-button recovery
+# handle when the inline sync didn't run — e.g. a manual release
+# publish that bypassed release.yml entirely, or a partial-failure
+# rerun. Trigger via the Actions tab or `gh workflow run`.
+#
+# The `release.published` listener is also kept on the off-chance a
+# future setup uses a PAT (which *does* fire downstream events) for
+# the release-publish step — at that point this workflow becomes
+# redundant with release.yml's inline job and one of the two should
+# be deleted.
 #
 # The default `GITHUB_TOKEN` with `contents: write` is enough: we
-# only fast-forward or append merge commits, never force-push. If a
-# branch-protection rule ever lands on `dev`, the token's bot
-# identity needs to be on the allow-list, or this workflow will
-# surface a clear 403 instead of silently skipping.
+# only fast-forward or append merge commits, never force-push.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 # One sync at a time per repo — if two releases publish
 # back-to-back, the second run waits for the first rather than

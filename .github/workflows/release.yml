@@ -157,3 +157,65 @@ jobs:
         with:
           files: ${{ env.archive }}
           fail_on_unmatched_files: true
+
+  # Inline `dev → main` sync that runs after every successful tag-push
+  # release. Historically this lived in a separate `sync-dev-after-release.yml`
+  # listening for `release.published` events — but GitHub does not fire
+  # downstream workflow events when the release is created by another
+  # workflow's GITHUB_TOKEN (which is exactly what `softprops/action-gh-release`
+  # uses in the `build` job above). That meant the standalone workflow
+  # silently never ran on real releases. v1.2.0 shipped before this was
+  # caught and needed a manual fast-forward. Doing the sync inline here
+  # avoids the cross-workflow event chain entirely.
+  #
+  # The standalone `sync-dev-after-release.yml` still exists as a
+  # `workflow_dispatch` recovery handle for cases where this inline job
+  # didn't run (manual release publishes, partial-failure recoveries).
+  sync-dev:
+    name: sync dev to main
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          # Full history so `merge-base --is-ancestor` can compare
+          # against main without falling back to shallow-fetch
+          # failure modes.
+          fetch-depth: 0
+
+      - name: Configure git as github-actions[bot]
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch main
+        run: git fetch origin main
+
+      - name: Sync dev with main
+        run: |
+          set -e
+          # Three cases — same logic as sync-dev-after-release.yml:
+          #
+          #  1. dev is strictly behind main (the expected case post-release):
+          #     fast-forward.
+          #  2. dev is already ahead of main: someone pushed to dev between
+          #     release cut and this job. Nothing to do.
+          #  3. dev and main diverged: rare. Create a merge commit on dev.
+          if git merge-base --is-ancestor HEAD origin/main; then
+            git merge --ff-only origin/main
+            echo "✓ fast-forwarded dev to origin/main"
+          elif git merge-base --is-ancestor origin/main HEAD; then
+            echo "✓ dev is already ahead of main — nothing to do"
+            exit 0
+          else
+            echo "dev and main have diverged — creating a merge commit"
+            git merge --no-edit origin/main
+            echo "✓ merged main into dev"
+          fi
+
+      - name: Push dev
+        run: git push origin dev
