@@ -68,10 +68,7 @@
             parsing: false,
             interaction: { mode: 'nearest', intersect: false },
             plugins: {
-                legend: {
-                    position: 'top',
-                    labels: { color: cssVar('--vscode-foreground', '#ccc') },
-                },
+                legend: { position: 'top' },
                 tooltip: {
                     callbacks: {
                         title: (items) =>
@@ -83,18 +80,40 @@
                 x: {
                     type: 'linear',
                     title: { display: true, text: 'uptime (s)' },
-                    ticks: { color: cssVar('--vscode-descriptionForeground', '#888') },
-                    grid: { color: cssVar('--vscode-panel-border', '#444') },
                 },
                 y: {
                     type: 'linear',
                     title: { display: true, text: 'frames / s' },
                     beginAtZero: true,
-                    ticks: { color: cssVar('--vscode-descriptionForeground', '#888') },
-                    grid: { color: cssVar('--vscode-panel-border', '#444') },
                 },
             },
         },
+    });
+
+    // ---- Theme reactivity ----
+    //
+    // VS Code toggles `vscode-light` / `vscode-dark` / `vscode-high-contrast`
+    // classes on <body> when the colour theme changes. The CSS variables
+    // we read for foreground / grid / tick colours update at the same
+    // moment, but Chart.js stored the previous values in its options
+    // object — we have to push the new values in and call update().
+    function applyThemeColours() {
+        const fg = cssVar('--vscode-foreground', '#ccc');
+        const desc = cssVar('--vscode-descriptionForeground', '#888');
+        const border = cssVar('--vscode-panel-border', '#444');
+        chart.options.plugins.legend.labels = { color: fg };
+        chart.options.scales.x.ticks = { color: desc };
+        chart.options.scales.x.grid = { color: border };
+        chart.options.scales.x.title.color = desc;
+        chart.options.scales.y.ticks = { color: desc };
+        chart.options.scales.y.grid = { color: border };
+        chart.options.scales.y.title.color = desc;
+        chart.update('none');
+    }
+    applyThemeColours();
+    new MutationObserver(applyThemeColours).observe(document.body, {
+        attributes: true,
+        attributeFilter: ['class'],
     });
 
     // ---- State ----

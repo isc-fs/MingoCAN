@@ -1,27 +1,36 @@
 // `iscFs.liveData` — webview panel showing a live chart of
-// `diagnose live-data --json` snapshots. Single-panel singleton:
-// re-running the command focuses the existing panel rather than
-// creating a second one.
+// `diagnose live-data --json` snapshots.
+//
+// One panel per (interface, channel) pair, keyed in `byKey`. Each
+// panel captures its adapter identity at creation time, so a
+// running stream stays locked to its adapter even if the operator
+// later switches `iscFs.interface` / `iscFs.channel` to look at a
+// different board. This is how the two-board workflow works:
+// open one panel for CANable A, switch settings, open a second
+// for CANable B, both stream independently.
 //
 // Lifecycle:
 //   command:iscFs.liveData
-//      → createOrShow() (singleton)
-//      → panel.show()
+//      → captures current adapter from settings
+//      → createOrShow(context, interface, channel)
+//          → if a panel for that adapter exists: reveal it
+//          → else: spawn a new one keyed under byKey
 //   user clicks "Start" in the webview
-//      → controller.start() spawns can-flasher
+//      → controller.start() spawns can-flasher with the *captured*
+//        adapter (overrides the current settings)
 //      → snapshots stream → postMessage → chart updates
 //   user clicks "Stop"
 //      → controller.stop() kills the child
 //   panel closed
 //      → controller.dispose() (kills any in-flight child)
-//      → panel disposed
+//      → panel removed from byKey
 //   extension deactivates
-//      → context.subscriptions disposes the singleton, which kills
+//      → context.subscriptions disposes every panel, which kills
 //        any in-flight child via its dispose() chain.
 
 import * as vscode from 'vscode';
 
-import { readConfig } from './config';
+import { type Config, type InterfaceType, readConfig } from './config';
 import {
     LiveDataController,
     type ControllerStatus,
@@ -31,21 +40,29 @@ import {
 const VIEW_TYPE = 'iscFs.liveData';
 
 export class LiveDataPanel {
-    private static current: LiveDataPanel | undefined;
+    private static readonly byKey: Map<string, LiveDataPanel> = new Map();
 
     private readonly panel: vscode.WebviewPanel;
     private readonly controller: LiveDataController;
     private readonly extensionUri: vscode.Uri;
     private readonly disposables: vscode.Disposable[] = [];
+    private readonly key: string;
 
-    static createOrShow(context: vscode.ExtensionContext): void {
-        if (LiveDataPanel.current !== undefined) {
-            LiveDataPanel.current.panel.reveal();
+    static createOrShow(
+        context: vscode.ExtensionContext,
+        capturedInterface: InterfaceType,
+        capturedChannel: string,
+    ): void {
+        const key = panelKey(capturedInterface, capturedChannel);
+        const existing = LiveDataPanel.byKey.get(key);
+        if (existing !== undefined) {
+            existing.panel.reveal();
             return;
         }
+        const title = panelTitle(capturedInterface, capturedChannel);
         const panel = vscode.window.createWebviewPanel(
             VIEW_TYPE,
-            'ISC CAN — Live data',
+            title,
             vscode.ViewColumn.Active,
             {
                 enableScripts: true,
@@ -53,15 +70,26 @@ export class LiveDataPanel {
                 localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
             },
         );
-        LiveDataPanel.current = new LiveDataPanel(panel, context);
+        const instance = new LiveDataPanel(
+            panel,
+            context,
+            capturedInterface,
+            capturedChannel,
+            key,
+        );
+        LiveDataPanel.byKey.set(key, instance);
     }
 
     private constructor(
         panel: vscode.WebviewPanel,
         context: vscode.ExtensionContext,
+        private readonly capturedInterface: InterfaceType,
+        private readonly capturedChannel: string,
+        key: string,
     ) {
         this.panel = panel;
         this.extensionUri = context.extensionUri;
+        this.key = key;
 
         this.controller = new LiveDataController({
             onSnapshot: (snapshot) => this.postSnapshot(snapshot),
@@ -87,7 +115,9 @@ export class LiveDataPanel {
             d.dispose();
         }
         this.disposables.length = 0;
-        LiveDataPanel.current = undefined;
+        if (LiveDataPanel.byKey.get(this.key) === this) {
+            LiveDataPanel.byKey.delete(this.key);
+        }
     }
 
     // ---- Webview ↔ host messages ----
@@ -120,14 +150,27 @@ export class LiveDataPanel {
             );
             return;
         }
-        const cfg = readConfig();
-        if (cfg.channel.length === 0 && cfg.interface !== 'virtual') {
+        if (
+            this.capturedChannel.length === 0 &&
+            this.capturedInterface !== 'virtual'
+        ) {
             this.postStatus(
                 'error',
-                'No adapter selected. Pick one via the status bar or `ISC CAN: Select adapter…`.',
+                'No adapter selected when this panel was opened. Close it and re-open after selecting one.',
             );
             return;
         }
+        // Lock the controller to the adapter we captured at panel
+        // creation, regardless of whether the operator has since
+        // switched the global setting to a different board. Every
+        // other field is read fresh so rate / timeouts / nodeId
+        // changes still take effect on the next Start.
+        const liveCfg = readConfig();
+        const lockedCfg: Config = {
+            ...liveCfg,
+            interface: this.capturedInterface,
+            channel: this.capturedChannel,
+        };
         const rateHz = vscode.workspace
             .getConfiguration('iscFs')
             .get<number>('liveDataRateHz', 10);
@@ -135,7 +178,7 @@ export class LiveDataPanel {
         // session so the chart isn't confused by a discontinuity.
         this.panel.webview.postMessage({ type: 'reset' });
         this.controller.start({
-            cfg,
+            cfg: lockedCfg,
             cwd: workspace.uri.fsPath,
             rateHz,
         });
@@ -222,4 +265,20 @@ function randomNonce(): string {
         out += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return out;
+}
+
+/** Map-key for one panel — unique per (interface, channel) pair. */
+function panelKey(iface: InterfaceType, channel: string): string {
+    return `${iface}:${channel}`;
+}
+
+/** Editor-tab title — includes the adapter so the multi-panel case
+ *  is visually distinguishable. */
+function panelTitle(iface: InterfaceType, channel: string): string {
+    if (iface === 'virtual') {
+        return 'ISC CAN — Live data (virtual)';
+    }
+    return channel.length > 0
+        ? `ISC CAN — Live data (${iface} · ${channel})`
+        : `ISC CAN — Live data (${iface})`;
 }

@@ -85,7 +85,11 @@ DTC display lives in the **output channel** rather than the Problems panel. DTCs
 
 | Command | What it does |
 |---|---|
-| `iscFs.liveData` | Opens (or focuses) a webview panel titled **ISC CAN — Live data**. **Start** spawns `can-flasher diagnose live-data --rate-hz N --json`; each snapshot updates a sliding-window Chart.js line chart (frames/sec RX + TX), a row of state-pill indicators (`session active`, `valid app`, `WRP`, `log stream`, `live-data stream`), and a grid of numeric counters (uptime, session age, DTC count, NACK count, last opcode, last flash addr, ISO-TP RX progress). **Stop** kills the child process and freezes the chart. **Clear chart** wipes accumulated points without restarting. |
+| `iscFs.liveData` | Opens (or focuses) a webview panel titled **ISC CAN — Live data (`interface`·`channel`)**. **Start** spawns `can-flasher diagnose live-data --rate-hz N --json`; each snapshot updates a sliding-window Chart.js line chart (frames/sec RX + TX), a row of state-pill indicators (`session active`, `valid app`, `WRP`, `log stream`, `live-data stream`), and a grid of numeric counters (uptime, session age, DTC count, NACK count, last opcode, last flash addr, ISO-TP RX progress). **Stop** kills the child process and freezes the chart. **Clear chart** wipes accumulated points without restarting. |
+
+**Multi-panel**: one panel per (interface, channel) pair. Each panel captures its adapter identity at creation time, so a running stream stays locked to its adapter even if the operator later switches `iscFs.interface`/`iscFs.channel` to a different board. Open the command, switch adapters, open it again — two panels, two boards, side-by-side, independent streams.
+
+**Theme reactivity**: chart axis ticks / grid / legend colours re-read from `var(--vscode-*)` whenever the body class changes (light ↔ dark ↔ high-contrast). No need to close and re-open the panel after a theme switch.
 
 Bundled assets ship under `editor/vscode/media/`:
 
@@ -100,7 +104,7 @@ Two new settings:
 | `iscFs.liveDataRateHz` | `10` | `1`–`50` (CLI constraint) |
 | `iscFs.liveDataWindowSeconds` | `60` | `5`–`600` |
 
-The CLI child is owned by a single host-side `LiveDataController`. When the webview panel closes, the controller disposes and kills the in-flight child — no orphan `can-flasher` processes. When the extension deactivates the same dispose chain fires via `context.subscriptions`.
+Each panel owns one host-side `LiveDataController`. When the panel closes, the controller disposes and kills the in-flight child — no orphan `can-flasher` processes. When the extension deactivates the same dispose chain fires via `context.subscriptions` for every panel in the `byKey` map.
 
 Webview is configured with a strict CSP: `default-src 'none'`, `script-src` gated on a nonce regenerated per panel, `connect-src 'none'` so the chart can never phone home. All data flows in through `postMessage` from the host.
 

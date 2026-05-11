@@ -17,6 +17,7 @@
 
 import * as vscode from 'vscode';
 
+import { readConfig } from './config';
 import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
 import { runFlash } from './flash';
 import { LiveDataPanel } from './liveDataPanel';
@@ -73,10 +74,18 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 
     // ---- Tier C.2 (streaming diagnostics) ----
+    //
+    // Capture the *current* adapter at command-invocation time and
+    // pass it through to the panel. The panel is keyed on
+    // (interface, channel), so the operator can open the command,
+    // switch the global setting to a different adapter, open the
+    // command again, and end up with two panels streaming from two
+    // boards independently.
     context.subscriptions.push(
-        vscode.commands.registerCommand('iscFs.liveData', () =>
-            LiveDataPanel.createOrShow(context),
-        ),
+        vscode.commands.registerCommand('iscFs.liveData', () => {
+            const cfg = readConfig();
+            LiveDataPanel.createOrShow(context, cfg.interface, cfg.channel);
+        }),
     );
 }
 
