@@ -36,6 +36,8 @@
     "onCommand:iscFs.readDtcs",
     "onCommand:iscFs.clearDtcs",
     "onCommand:iscFs.health",
+    "onCommand:iscFs.liveData",
+    "onWebviewPanel:iscFs.liveData",
     "onView:iscFs.devices",
     "onStartupFinished"
   ],
@@ -86,6 +88,11 @@
       {
         "command": "iscFs.flashThisDevice",
         "title": "Flash this device…",
+        "category": "ISC CAN"
+      },
+      {
+        "command": "iscFs.liveData",
+        "title": "Open live-data panel",
         "category": "ISC CAN"
       }
     ],
@@ -162,6 +169,20 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Pass `--jump` (default) to jump to the application after a successful flash. Disable to stay in bootloader mode."
+        },
+        "iscFs.liveDataRateHz": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 50,
+          "markdownDescription": "Rate at which the bootloader emits `NOTIFY_LIVE_DATA` snapshots to the live-data webview panel. Higher rates are smoother but increase bus load."
+        },
+        "iscFs.liveDataWindowSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "maximum": 600,
+          "markdownDescription": "Sliding-window size (seconds) shown on the live-data chart's x-axis. Older snapshots scroll off the left edge."
         }
       }
     },

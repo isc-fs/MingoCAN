@@ -1,16 +1,16 @@
 // ISC STM32 CAN Flasher — VS Code extension entry point.
 //
-// All command handlers are live now. The only remaining stubbed
-// surface is the live-data webview, which doesn't yet have a
-// command on the manifest — it ships in a follow-up.
+// Every roadmap surface is now live.
 //
 //   Tier A — Build + Flash:
 //     iscFs.flash, iscFs.flashWithoutBuild
 //   Tier B — Device awareness:
 //     iscFs.discover, iscFs.refreshDevices, iscFs.selectAdapter,
 //     iscFs.devices (live tree data provider), iscFs.flashThisDevice
-//   Tier C — Diagnostics:
+//   Tier C.1 — Diagnostics (one-shot):
 //     iscFs.readDtcs, iscFs.clearDtcs, iscFs.health
+//   Tier C.2 — Diagnostics (streaming):
+//     iscFs.liveData (webview panel with Chart.js chart)
 //
 // All real work shells out to the `can-flasher` CLI in `--json`
 // mode; we never speak the bootloader protocol directly.
@@ -19,6 +19,7 @@ import * as vscode from 'vscode';
 
 import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
 import { runFlash } from './flash';
+import { LiveDataPanel } from './liveDataPanel';
 import { selectAdapter } from './picker';
 import { registerStatusBarItem } from './statusBar';
 import { DeviceTreeProvider, type IscFsTreeNode } from './tree';
@@ -64,11 +65,18 @@ export function activate(context: vscode.ExtensionContext): void {
     // Status-bar item (Tier B): shows current adapter + node, click to re-pick.
     registerStatusBarItem(context);
 
-    // ---- Tier C (diagnostics) ----
+    // ---- Tier C.1 (one-shot diagnostics) ----
     context.subscriptions.push(
         vscode.commands.registerCommand('iscFs.health', () => runHealth()),
         vscode.commands.registerCommand('iscFs.readDtcs', () => runReadDtcs()),
         vscode.commands.registerCommand('iscFs.clearDtcs', () => runClearDtcs()),
+    );
+
+    // ---- Tier C.2 (streaming diagnostics) ----
+    context.subscriptions.push(
+        vscode.commands.registerCommand('iscFs.liveData', () =>
+            LiveDataPanel.createOrShow(context),
+        ),
     );
 }
 

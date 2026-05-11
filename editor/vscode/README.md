@@ -4,14 +4,12 @@ VS Code wrapper around the [`can-flasher`](../../README.md) CLI: build
 the current STM32 firmware project and flash it to a CAN-connected
 node from inside the editor.
 
-**Status: every palette command is live.** Build / flash, adapter
-detection + the device tree + status-bar selector, plus the three
-diagnostics commands (DTC read / clear / session-health) all work
-against a real `can-flasher` binary. The only remaining gap on the
-roadmap is the live-data webview (Tier C.2) — a streaming
-real-time chart of `diagnose live-data --json` snapshots that needs
-its own webview surface and chart library, deferred to a follow-up
-PR. See [Roadmap](#roadmap) for details.
+**Status: every roadmap surface is live.** Build / flash, adapter
+detection + the device tree + status-bar selector, the three
+one-shot diagnostics commands (DTC read / clear / session-health),
+*and* the streaming live-data webview all work against a real
+`can-flasher` binary. See [Roadmap](#roadmap) for the
+command-by-command summary.
 
 ## What it's for
 
@@ -83,13 +81,28 @@ The tree populates lazily — opening the view triggers the first `adapters` + `
 
 DTC display lives in the **output channel** rather than the Problems panel. DTCs are hardware fault codes that don't map to source-file ranges, so VS Code's diagnostic-collection plumbing doesn't fit them well; structured text in the dedicated channel keeps copy-paste, scrollback, and a deterministic record at hardware-test time.
 
-### Tier C.2 — Live-data webview (planned)
+### Tier C.2 — Live-data webview (v0.4, ✅ live)
 
-Streaming visualisation of `diagnose live-data --rate-hz N --json`. Per the source contract this is one `LiveDataJson` per line — uptime, frame counts, NACK count, DTC count, session-age, flags. The right shape is a webview panel with a small chart library, periodic snapshot refresh, and a start/stop toggle that drives the underlying CLI lifetime. Deferred to its own PR because:
+| Command | What it does |
+|---|---|
+| `iscFs.liveData` | Opens (or focuses) a webview panel titled **ISC CAN — Live data**. **Start** spawns `can-flasher diagnose live-data --rate-hz N --json`; each snapshot updates a sliding-window Chart.js line chart (frames/sec RX + TX), a row of state-pill indicators (`session active`, `valid app`, `WRP`, `log stream`, `live-data stream`), and a grid of numeric counters (uptime, session age, DTC count, NACK count, last opcode, last flash addr, ISO-TP RX progress). **Stop** kills the child process and freezes the chart. **Clear chart** wipes accumulated points without restarting. |
 
-- HTML/CSS/JS surface is substantial (~200+ lines)
-- A chart dependency (Chart.js or similar) needs to land alongside it
-- The data-stream lifecycle (start / pause / stop) needs message passing between the extension host and the webview, distinct from every other command's one-shot model
+Bundled assets ship under `editor/vscode/media/`:
+
+- `chart.umd.min.js` — Chart.js v4.4.7 (vendored, ~200 KB) so the `.vsix` is fully self-contained and works offline
+- `live-data.css` — VS Code-theme-aware styles (uses `var(--vscode-*)` colour tokens; light / dark / high-contrast carry through)
+- `live-data.js` — webview-side renderer: chart init, message handling, rate computation (snapshot deltas → frames/sec), sliding-window pruning
+
+Two new settings:
+
+| Setting | Default | Range |
+|---|---|---|
+| `iscFs.liveDataRateHz` | `10` | `1`–`50` (CLI constraint) |
+| `iscFs.liveDataWindowSeconds` | `60` | `5`–`600` |
+
+The CLI child is owned by a single host-side `LiveDataController`. When the webview panel closes, the controller disposes and kills the in-flight child — no orphan `can-flasher` processes. When the extension deactivates the same dispose chain fires via `context.subscriptions`.
+
+Webview is configured with a strict CSP: `default-src 'none'`, `script-src` gated on a nonce regenerated per panel, `connect-src 'none'` so the chart can never phone home. All data flows in through `postMessage` from the host.
 
 ### Out of scope (for now)
 
