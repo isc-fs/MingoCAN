@@ -31,7 +31,6 @@ Global Options:
       --node-id <ID>        Target node ID hex or decimal [default: broadcast]
       --timeout <MS>        Per-frame timeout in ms [default: 500]
       --json                Machine-readable JSON output on stdout
-      --log <PATH>          Append session to audit log (SQLite)
       --verbose             Trace-level logging
       --operator <NAME>     Override operator name in audit log
 ```
@@ -39,9 +38,36 @@ Global Options:
 Every subcommand has its own `--help` with the full flag list —
 treat the snippets below as the 80 % path.
 
-> The audit-log plumbing (`--log`) is stubbed: the flag parses but
-> the SQLite sink is deferred to post-v1 per
-> [../ROADMAP.md](../ROADMAP.md).
+---
+
+## Typical first flash: stitched command sequence
+
+Four-step happy path for a new board. Each step checks the one
+before it so you know which step broke when something does.
+
+```bash
+# 1. Adapter plugged in, visible to the OS?
+can-flasher adapters
+
+# 2. Bootloader on the target, listening for CAN?
+can-flasher --interface slcan --channel /dev/ttyACM0 discover
+
+# 3. Program the firmware, verify the CRC, jump to it.
+can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0x3 \
+  flash build/firmware.elf --verify-after --jump
+
+# 4. (Optional) Re-read + CRC-match the installed image,
+#    e.g. in a CI post-deploy gate. Exits 0 on match, 2 on mismatch.
+can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0x3 \
+  verify build/firmware.elf
+```
+
+If step 1 returns `(none detected)`, fix the OS/adapter setup
+(see [INSTALL.md](INSTALL.md)). If step 2 times out, the adapter's
+probably not wired to the board or the bitrate is wrong. If step 3
+fails with exit 3 (ProtectionViolation), the binary's linker targets
+the bootloader's sector — see [../demo/README.md](../demo/README.md)
+for a known-good linker script.
 
 ---
 
@@ -98,22 +124,22 @@ can-flasher --json --interface virtual \
   flash build/firmware.elf --dry-run --no-jump
 ```
 
-Most-used flags:
+Most-used flags. The default behaviour is the happy path for dev
+iteration; production deploy scripts typically add
+`--require-wrp --apply-wrp`.
 
 | Flag | Effect |
 |---|---|
 | `--address <HEX>` | Load address for raw `.bin` (ignored for ELF / HEX) |
 | `--require-wrp` | Abort with exit 7 if sector 0 isn't WRP-latched |
 | `--apply-wrp` | Latch WRP before flashing when it isn't |
-| `--no-diff` | Force-write every sector even if the CRC already matches |
+| `--diff` *[default]* | Skip sectors whose device-side CRC already matches |
+| `--no-diff` | Force-write every sector regardless of CRC |
 | `--dry-run` | Validate + plan but send no erase / write / verify commands |
+| `--verify-after` *[default]* | Re-read each written sector and CRC-match before ACKing success |
 | `--no-verify-after` | Skip the post-write per-sector CRC check |
+| `--jump` *[default]* | Issue `CMD_JUMP` to the installed app after a successful flash |
 | `--no-jump` | Stay in bootloader mode after a successful flash |
-
-The default behaviour (`--diff`, `--verify-after`, `--jump`,
-no WRP enforcement) is the happy path for dev iteration. A
-production deploy script typically adds
-`--require-wrp --apply-wrp`.
 
 Full argument reference: `can-flasher flash --help`.
 
@@ -192,8 +218,8 @@ replay them against a `vcan` interface externally if the need arises.
 ## Exit codes
 
 CI pipelines should branch on the numeric exit code, not the stderr
-text. The table below mirrors
-[../REQUIREMENTS.md § Exit codes](../REQUIREMENTS.md#exit-codes).
+text. This table is the canonical list; other docs (REQUIREMENTS.md,
+CONTRIBUTING.md) reference it rather than duplicating.
 
 | Code | Meaning |
 |---|---|
@@ -205,10 +231,11 @@ text. The table below mirrors
 | `7` | WRP not applied (when `--require-wrp` is set and `--apply-wrp` isn't) |
 | `8` | Input file error — bad format, missing `--address` on `.bin`, file doesn't exist |
 | `9` | Adapter not found or SDK missing |
+| `130` | Interrupted by user (SIGINT / Ctrl-C) |
 | `99` | Unclassified error — check stderr |
 
 Codes `5` (signature failed) and `6` (replay rejection) are reserved
-for the post-v1 security phase and never returned by v1.0.0.
+for the post-v1 security phase and not returned today.
 
 ---
 

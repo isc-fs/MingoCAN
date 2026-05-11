@@ -58,7 +58,16 @@ pub const FLASHWORD_SIZE: u32 = 32;
 /// Default bytes per `CMD_FLASH_WRITE` payload. Matches
 /// REQUIREMENTS.md § Write chunk size — 256 B, i.e. one ISO-TP
 /// FF + ~37 CFs at 8-byte frames on classic CAN.
-pub const DEFAULT_WRITE_CHUNK: usize = 128;
+///
+/// **v1.2.0**: restored to 256 B (was 128 B in v1.1.x). PR #57 had
+/// dropped it to 128 to work around CANable TX-buffer overflows at
+/// 256 B × 37 CFs in one burst, when pacing was a naive
+/// `tokio::time::sleep(1ms)` whose actual median was ~2.3 ms on
+/// macOS. On hardware re-measurement (fix/20 bench), the paired
+/// BL+host behaviour tolerates 256 B bursts at the same pacing, and
+/// halving the chunk count for the same image is the single biggest
+/// win toward the v1.2.0 speedup target in PERFORMANCE.md.
+pub const DEFAULT_WRITE_CHUNK: usize = 256;
 
 /// Tunable knobs for a single [`FlashManager::run`] invocation.
 ///

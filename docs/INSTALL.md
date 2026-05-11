@@ -1,16 +1,21 @@
 # Installing can-flasher
 
-Covers building from source, per-OS CAN-adapter setup, and a quick
-no-hardware smoke test so you can verify the binary works before
-plugging anything into the car.
+Per-OS CAN-adapter setup (canonical — [../REQUIREMENTS.md](../REQUIREMENTS.md)
+points here), build-from-source options, and a quick no-hardware
+smoke test so you can verify the binary works before plugging
+anything into the car.
 
 For the list of subcommands and their flags see
 [USAGE.md](USAGE.md); for the protocol the flasher speaks, see
 [../REQUIREMENTS.md](../REQUIREMENTS.md).
 
+Most users want the [prebuilt binary path in the
+README](../README.md#install) — no clone, no build directory.
+What follows is for people who cloned the repo.
+
 ---
 
-## Build from source
+## Install from a clone
 
 ```bash
 # One-time: install Rust (stable channel)
@@ -19,23 +24,29 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # Linux only: install libudev + pkg-config for USB port enumeration
 sudo apt-get install libudev-dev pkg-config
 
-# Build
+# Clone and pick one of the two options below.
 git clone https://github.com/isc-fs/can-flasher.git
 cd can-flasher
-cargo build --release
+```
 
-# Run — the binary ends up at target/release/can-flasher
+**Option A — Install `can-flasher` on your PATH:**
+
+```bash
+cargo install --path .
+can-flasher --help        # works from any directory
+```
+
+**Option B — Just build in place:**
+
+```bash
+cargo build --release
 ./target/release/can-flasher --help
 ```
 
-The release profile uses `lto = "thin"`, `codegen-units = 1`, and
-`strip = "symbols"`, so you end up with a single lean static binary
-that you can copy to any machine of the same OS/arch without further
-setup.
-
-Toolchain versions: pinned to the stable channel via
-`rust-toolchain.toml`. Current MSRV is **1.95**. If you contribute,
-see [CONTRIBUTING.md](CONTRIBUTING.md) for the full dev setup.
+Contributors working on the tool itself want Option B — it's the
+path `cargo test`, `cargo clippy`, and rust-analyzer all expect.
+Dev-setup details (MSRV, release-profile knobs, test suite, CI
+hooks) live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

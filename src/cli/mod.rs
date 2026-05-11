@@ -185,6 +185,8 @@ pub enum InterfaceType {
     Socketcan,
     /// PEAK PCAN — SocketCAN on Linux, PCAN-Basic SDK on Win/macOS
     Pcan,
+    /// Vector XL Driver Library — VN-series adapters (Windows; Linux planned)
+    Vector,
     /// In-process virtual bus for testing
     Virtual,
 }
