@@ -4,10 +4,10 @@ VS Code wrapper around the [`can-flasher`](../../README.md) CLI: build
 the current STM32 firmware project and flash it to a CAN-connected
 node from inside the editor.
 
-**Status: v0 sketch.** The extension manifest is complete (commands,
-settings, view container), but every command currently surfaces a
-"not implemented" toast. Real handlers land in subsequent PRs — see
-[Roadmap](#roadmap) below.
+**Status: Tier A live.** `iscFs.flash` and `iscFs.flashWithoutBuild`
+run real `can-flasher` invocations with phase-aware progress reporting
+and exit-code-aware error toasts. Tier B and Tier C commands are
+still stubs — see [Roadmap](#roadmap) below.
 
 ## What it's for
 
@@ -47,14 +47,14 @@ an ELF/HEX/BIN at the configured path works.
 The sketch lays the package surface for all three tiers; each tier
 lands as its own PR.
 
-### Tier A — Build + Flash (v0.1, MVP)
+### Tier A — Build + Flash (v0.1, ✅ live)
 
 | Command | What it does |
 |---|---|
-| `iscFs.flash` | Run `iscFs.buildCommand`, then `can-flasher flash <iscFs.firmwareArtifact>` with the configured adapter |
-| `iscFs.flashWithoutBuild` | Skip the build step; flash the existing artifact |
+| `iscFs.flash` | Runs `iscFs.buildCommand` via the user's shell, then `can-flasher flash <iscFs.firmwareArtifact>` with the configured adapter. Progress notification shows the live flash phase (erasing / writing N% / verifying / committing); the **ISC CAN** output channel carries the full argv + stdout/stderr; success / failure toasts include duration and an exit-code label that maps to REQUIREMENTS.md § Output and CI integration. |
+| `iscFs.flashWithoutBuild` | Same as above, build step skipped — useful when iterating on flash parameters with a pre-built artifact. |
 
-This is the minimum useful surface — one keybinding, one CAN flash.
+Glob patterns are accepted in `iscFs.firmwareArtifact`; multiple matches trigger a Quick Pick.
 
 ### Tier B — Device awareness (v0.2)
 

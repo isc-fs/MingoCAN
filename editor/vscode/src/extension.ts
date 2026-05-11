@@ -1,67 +1,80 @@
 // ISC STM32 CAN Flasher — VS Code extension entry point.
 //
-// This is the v0 sketch: every command is wired into the VS Code
-// command palette and the Explorer view container is registered, but
-// none of them do real work yet — they each pop a "not implemented"
-// toast. Subsequent PRs replace the stub handlers one at a time:
+// Tier A is live: `iscFs.flash` and `iscFs.flashWithoutBuild` run
+// real `can-flasher` invocations with progress reporting and exit-
+// code-aware error toasts. The rest of the commands are still v0
+// stubs and surface a "not implemented yet" toast — they land in
+// follow-up Tier B / Tier C PRs.
 //
-//   Tier A (Build + Flash):
+//   Tier A (live):
 //     iscFs.flash, iscFs.flashWithoutBuild
-//   Tier B (Device awareness):
+//   Tier B (next):
 //     iscFs.discover, iscFs.refreshDevices, iscFs.selectAdapter,
 //     iscFs.devices (tree data provider)
-//   Tier C (Diagnostics, post-MVP):
+//   Tier C (later):
 //     iscFs.readDtcs, iscFs.clearDtcs, iscFs.health
 //
-// All real work shells out to the `can-flasher` CLI (`--json` mode
-// for structured output). The extension never speaks the bootloader
-// protocol directly — `can-flasher` is the single source of truth
-// for wire-format and exit-code semantics.
+// All real work shells out to the `can-flasher` CLI in `--json`
+// mode; we never speak the bootloader protocol directly.
 
 import * as vscode from 'vscode';
 
-const COMMANDS: ReadonlyArray<readonly [string, string]> = [
-    ['iscFs.flash', 'Build & Flash'],
-    ['iscFs.flashWithoutBuild', 'Flash (skip build)'],
-    ['iscFs.discover', 'Discover devices'],
-    ['iscFs.selectAdapter', 'Select adapter'],
-    ['iscFs.refreshDevices', 'Refresh device list'],
-    ['iscFs.readDtcs', 'Read DTCs'],
-    ['iscFs.clearDtcs', 'Clear DTCs'],
-    ['iscFs.health', 'Session health'],
+import { runFlash } from './flash';
+
+interface StubCommand {
+    readonly id: string;
+    readonly label: string;
+}
+
+const STUB_COMMANDS: ReadonlyArray<StubCommand> = [
+    { id: 'iscFs.discover', label: 'Discover devices' },
+    { id: 'iscFs.selectAdapter', label: 'Select adapter' },
+    { id: 'iscFs.refreshDevices', label: 'Refresh device list' },
+    { id: 'iscFs.readDtcs', label: 'Read DTCs' },
+    { id: 'iscFs.clearDtcs', label: 'Clear DTCs' },
+    { id: 'iscFs.health', label: 'Session health' },
 ];
 
 export function activate(context: vscode.ExtensionContext): void {
-    for (const [id, label] of COMMANDS) {
+    // Tier A — real handlers.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('iscFs.flash', () =>
+            runFlash({ skipBuild: false }),
+        ),
+        vscode.commands.registerCommand('iscFs.flashWithoutBuild', () =>
+            runFlash({ skipBuild: true }),
+        ),
+    );
+
+    // Tier B + C — still stubs.
+    for (const cmd of STUB_COMMANDS) {
         context.subscriptions.push(
-            vscode.commands.registerCommand(id, () => notImplemented(label)),
+            vscode.commands.registerCommand(cmd.id, () => notImplemented(cmd.label)),
         );
     }
 
-    const devices = new StubDeviceTreeProvider();
+    // Stub tree until Tier B replaces it with a live device list.
     context.subscriptions.push(
-        vscode.window.registerTreeDataProvider('iscFs.devices', devices),
+        vscode.window.registerTreeDataProvider(
+            'iscFs.devices',
+            new StubDeviceTreeProvider(),
+        ),
     );
 }
 
 export function deactivate(): void {
-    // Nothing to tear down in the sketch. Real handlers that spawn
-    // long-running child processes (log streaming, live-data) will
-    // register disposables here in later PRs.
+    // Output channel disposal is handled via `context.subscriptions`
+    // (the OutputChannel created in output.ts is implicitly disposed
+    // when the extension host unloads).
 }
 
 function notImplemented(label: string): void {
     void vscode.window.showInformationMessage(
         `ISC CAN — ${label}: not implemented yet. ` +
-            `This is the v0 sketch; the next PR wires it to can-flasher.`,
+            `Tier B (device awareness) and Tier C (diagnostics) land in follow-up PRs.`,
     );
 }
 
-/**
- * Placeholder so the `iscFs.devices` view renders an empty state
- * (with the welcome view's default "no devices detected" message)
- * rather than throwing. Real implementation in Tier B PR.
- */
 class StubDeviceTreeProvider implements vscode.TreeDataProvider<never> {
     getTreeItem(_element: never): vscode.TreeItem {
         throw new Error('StubDeviceTreeProvider has no items');
