@@ -4,10 +4,11 @@ VS Code wrapper around the [`can-flasher`](../../README.md) CLI: build
 the current STM32 firmware project and flash it to a CAN-connected
 node from inside the editor.
 
-**Status: Tier A live.** `iscFs.flash` and `iscFs.flashWithoutBuild`
-run real `can-flasher` invocations with phase-aware progress reporting
-and exit-code-aware error toasts. Tier B and Tier C commands are
-still stubs — see [Roadmap](#roadmap) below.
+**Status: Tier A + B live.** Build / flash, adapter detection, the
+device tree, the adapter picker, and the status-bar selector all
+work against a real `can-flasher` binary. Tier C (DTC viewer,
+session-health output, live-data webview) is still stubbed — see
+[Roadmap](#roadmap) below.
 
 ## What it's for
 
@@ -56,14 +57,18 @@ lands as its own PR.
 
 Glob patterns are accepted in `iscFs.firmwareArtifact`; multiple matches trigger a Quick Pick.
 
-### Tier B — Device awareness (v0.2)
+### Tier B — Device awareness (v0.2, ✅ live)
 
 | Command / View | What it does |
 |---|---|
-| `iscFs.devices` (tree) | Live list of detected bootloader-mode nodes; refreshed via `discover --json` |
-| `iscFs.refreshDevices` | Force a fresh `adapters` + `discover` poll |
-| `iscFs.discover` | One-shot bus scan, results in output channel |
-| `iscFs.selectAdapter` | Quick-pick across `slcan`/`socketcan`/`pcan`/`vector`/`virtual` populated from `adapters --json` |
+| `iscFs.devices` (tree, Explorer panel) | Hierarchical view: every detected adapter, with the active adapter expanded to show its bootloader-mode devices. Each device row shows product name, firmware version, WRP status, reset cause. Tooltip carries the full record. |
+| `iscFs.refreshDevices` (⟳ on the view title bar) | Re-runs `adapters --json` + `discover --json` against the active adapter. No background polling — refresh is always operator-initiated so no frame goes on the bus uninvited. |
+| `iscFs.discover` (palette) | Same code path as the refresh button; reveals the ISC CAN output channel so keyboard-driven operators get a textual summary alongside the tree update. |
+| `iscFs.selectAdapter` (palette + status-bar click) | Quick-pick across every detected adapter plus the in-process virtual loopback. Selection prompts for **Workspace** (default — moves with the project) or **User** (global) settings scope. |
+| `iscFs.flashThisDevice` (right-click in tree) | Sets `iscFs.nodeId` to the clicked device's ID for one flash, then restores the previous value. Lets the operator target a specific node from a multi-node bus without editing settings by hand. |
+| **Status-bar item** (bottom-left) | `🔌 vector: 0 → 0x3` — current adapter + channel + node. Click to open the adapter picker. Goes warning-yellow with `⊘ ISC CAN: no adapter` when no channel is configured. |
+
+The tree populates lazily — opening the view triggers the first `adapters` + `discover` round-trip, after which it caches until the operator hits ⟳. Inactive adapters are listed but collapsed (no `discover` is run against them); to inspect another adapter's devices, select it first.
 
 ### Tier C — Diagnostics (v0.3, post-MVP)
 

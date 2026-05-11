@@ -32,10 +32,12 @@
     "onCommand:iscFs.discover",
     "onCommand:iscFs.selectAdapter",
     "onCommand:iscFs.refreshDevices",
+    "onCommand:iscFs.flashThisDevice",
     "onCommand:iscFs.readDtcs",
     "onCommand:iscFs.clearDtcs",
     "onCommand:iscFs.health",
-    "onView:iscFs.devices"
+    "onView:iscFs.devices",
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -79,6 +81,11 @@
       {
         "command": "iscFs.health",
         "title": "Show session health",
+        "category": "ISC CAN"
+      },
+      {
+        "command": "iscFs.flashThisDevice",
+        "title": "Flash this device…",
         "category": "ISC CAN"
       }
     ],
@@ -175,8 +182,32 @@
           "when": "view == iscFs.devices",
           "group": "navigation"
         }
+      ],
+      "view/item/context": [
+        {
+          "command": "iscFs.flashThisDevice",
+          "when": "view == iscFs.devices && viewItem == iscFsDevice",
+          "group": "inline"
+        },
+        {
+          "command": "iscFs.flashThisDevice",
+          "when": "view == iscFs.devices && viewItem == iscFsDevice",
+          "group": "1_flash"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "iscFs.flashThisDevice",
+          "when": "false"
+        }
       ]
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "iscFs.devices",
+        "contents": "No CAN adapters detected yet.\n\n[Refresh](command:iscFs.refreshDevices)\n\n[Select adapter…](command:iscFs.selectAdapter)\n\nMake sure your CAN adapter is plugged in and the `can-flasher` binary is on PATH (or set `iscFs.canFlasherPath`).\n\nFor a no-hardware smoke test, set `iscFs.interface` to `virtual`."
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

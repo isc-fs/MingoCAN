@@ -1,17 +1,14 @@
 // ISC STM32 CAN Flasher — VS Code extension entry point.
 //
-// Tier A is live: `iscFs.flash` and `iscFs.flashWithoutBuild` run
-// real `can-flasher` invocations with progress reporting and exit-
-// code-aware error toasts. The rest of the commands are still v0
-// stubs and surface a "not implemented yet" toast — they land in
-// follow-up Tier B / Tier C PRs.
+// Tier A + Tier B are live. Tier C (DTC viewer, session-health,
+// live-data webview) is still stubs.
 //
-//   Tier A (live):
+//   Tier A — Build + Flash:
 //     iscFs.flash, iscFs.flashWithoutBuild
-//   Tier B (next):
+//   Tier B — Device awareness:
 //     iscFs.discover, iscFs.refreshDevices, iscFs.selectAdapter,
-//     iscFs.devices (tree data provider)
-//   Tier C (later):
+//     iscFs.devices (live tree data provider), iscFs.flashThisDevice
+//   Tier C — Diagnostics (stubs):
 //     iscFs.readDtcs, iscFs.clearDtcs, iscFs.health
 //
 // All real work shells out to the `can-flasher` CLI in `--json`
@@ -20,6 +17,11 @@
 import * as vscode from 'vscode';
 
 import { runFlash } from './flash';
+import { selectAdapter } from './picker';
+import { registerStatusBarItem } from './statusBar';
+import { DeviceTreeProvider, type IscFsTreeNode } from './tree';
+import { getOutputChannel, showOutputChannel } from './output';
+import { formatNodeId } from './discover';
 
 interface StubCommand {
     readonly id: string;
@@ -27,16 +29,13 @@ interface StubCommand {
 }
 
 const STUB_COMMANDS: ReadonlyArray<StubCommand> = [
-    { id: 'iscFs.discover', label: 'Discover devices' },
-    { id: 'iscFs.selectAdapter', label: 'Select adapter' },
-    { id: 'iscFs.refreshDevices', label: 'Refresh device list' },
     { id: 'iscFs.readDtcs', label: 'Read DTCs' },
     { id: 'iscFs.clearDtcs', label: 'Clear DTCs' },
     { id: 'iscFs.health', label: 'Session health' },
 ];
 
 export function activate(context: vscode.ExtensionContext): void {
-    // Tier A — real handlers.
+    // ---- Tier A (flash) ----
     context.subscriptions.push(
         vscode.commands.registerCommand('iscFs.flash', () =>
             runFlash({ skipBuild: false }),
@@ -46,41 +45,78 @@ export function activate(context: vscode.ExtensionContext): void {
         ),
     );
 
-    // Tier B + C — still stubs.
+    // ---- Tier B (device awareness) ----
+    const treeProvider = new DeviceTreeProvider();
+    const treeView = vscode.window.createTreeView('iscFs.devices', {
+        treeDataProvider: treeProvider,
+        showCollapseAll: true,
+    });
+    context.subscriptions.push(treeView);
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('iscFs.refreshDevices', () =>
+            treeProvider.refresh(),
+        ),
+        vscode.commands.registerCommand('iscFs.discover', async () => {
+            // Palette `discover` reuses the tree's refresh path and
+            // surfaces the output channel so keyboard-driven
+            // operators get the same single source of truth.
+            showOutputChannel();
+            await treeProvider.refresh();
+        }),
+        vscode.commands.registerCommand('iscFs.selectAdapter', () => selectAdapter()),
+        vscode.commands.registerCommand('iscFs.flashThisDevice', (node?: IscFsTreeNode) =>
+            flashThisDevice(node),
+        ),
+    );
+
+    // Status-bar item (Tier B): shows current adapter + node, click to re-pick.
+    registerStatusBarItem(context);
+
+    // ---- Tier C (stubs) ----
     for (const cmd of STUB_COMMANDS) {
         context.subscriptions.push(
             vscode.commands.registerCommand(cmd.id, () => notImplemented(cmd.label)),
         );
     }
-
-    // Stub tree until Tier B replaces it with a live device list.
-    context.subscriptions.push(
-        vscode.window.registerTreeDataProvider(
-            'iscFs.devices',
-            new StubDeviceTreeProvider(),
-        ),
-    );
 }
 
 export function deactivate(): void {
-    // Output channel disposal is handled via `context.subscriptions`
-    // (the OutputChannel created in output.ts is implicitly disposed
-    // when the extension host unloads).
+    // No global cleanup — every long-lived resource (status bar
+    // item, output channel, tree view) is registered in
+    // `context.subscriptions` and disposed by the extension host.
+}
+
+// ---- Per-device "Flash this device…" context-menu handler ----
+
+async function flashThisDevice(node?: IscFsTreeNode): Promise<void> {
+    if (node === undefined || node.kind !== 'device') {
+        void vscode.window.showInformationMessage(
+            'ISC CAN: right-click a device in the ISC CAN Devices view, then choose "Flash this device…".',
+        );
+        return;
+    }
+    const id = formatNodeId(node.row.node_id);
+    const cfg = vscode.workspace.getConfiguration('iscFs');
+    // Stash the original node-id so we can restore it after the
+    // flash completes. Workspace-scoped so we don't accidentally
+    // pollute user (global) settings with a temporary override.
+    const original = cfg.get<string>('nodeId', '');
+    await cfg.update('nodeId', id, vscode.ConfigurationTarget.Workspace);
+    getOutputChannel().appendLine(`[info] override iscFs.nodeId → ${id} for this run`);
+    try {
+        await runFlash({ skipBuild: false });
+    } finally {
+        await cfg.update(
+            'nodeId',
+            original.length > 0 ? original : undefined,
+            vscode.ConfigurationTarget.Workspace,
+        );
+    }
 }
 
 function notImplemented(label: string): void {
     void vscode.window.showInformationMessage(
-        `ISC CAN — ${label}: not implemented yet. ` +
-            `Tier B (device awareness) and Tier C (diagnostics) land in follow-up PRs.`,
+        `ISC CAN — ${label}: not implemented yet. Tier C lands in a follow-up PR.`,
     );
-}
-
-class StubDeviceTreeProvider implements vscode.TreeDataProvider<never> {
-    getTreeItem(_element: never): vscode.TreeItem {
-        throw new Error('StubDeviceTreeProvider has no items');
-    }
-
-    getChildren(_element?: never): Thenable<never[]> {
-        return Promise.resolve([]);
-    }
 }

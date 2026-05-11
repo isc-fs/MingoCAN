@@ -226,6 +226,44 @@ export function parseFlashReport(stdout: string): FlashReport | null {
     return null;
 }
 
+// ---- One-shot JSON capture ----
+
+export interface JsonResult<T> {
+    /** Parsed JSON value, or `null` if the command exited non-zero or
+     *  emitted output that didn't parse. */
+    value: T | null;
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+}
+
+/**
+ * Run a `can-flasher` invocation that emits a single JSON document
+ * (object or array) on stdout — `adapters --json`, `discover --json`,
+ * `config nvm read --json`, etc. Captures the whole stdout and parses
+ * it as JSON.
+ *
+ * Long-running flash-style commands that emit a *stream* of JSON
+ * events should use `spawnCommand` with `onStdoutLine` instead.
+ */
+export async function runJson<T>(
+    canFlasherPath: string,
+    args: readonly string[],
+    cwd: string,
+    cancellation?: vscode.CancellationToken,
+): Promise<JsonResult<T>> {
+    const result = await spawnCommand(canFlasherPath, args, { cwd, cancellation });
+    if (result.exitCode !== 0) {
+        return { value: null, ...result };
+    }
+    try {
+        const value = JSON.parse(result.stdout) as T;
+        return { value, ...result };
+    } catch {
+        return { value: null, ...result };
+    }
+}
+
 // ---- Argv quoting (display only) ----
 
 function quoteArgv(argv: readonly string[]): string {
