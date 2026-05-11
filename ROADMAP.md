@@ -28,7 +28,9 @@ sequencing against the bootloader counterpart at
 | 3 | Session + adapters subcommand | ✅ done `feat/8-adapter-detect` · ✅ done `feat/9-session-lifecycle` | `v0.3.0-session` |
 | 4 | Remaining subcommands | ✅ done `feat/10-discover-subcommand` · ✅ done `feat/11-diagnose-subcommand` · ✅ done `feat/12-verify-subcommand` · ✅ done `feat/13-config-subcommand` · ✅ done `feat/14-replay-subcommand` | `v0.4.0-subcommands` |
 | 5 | Flash pipeline | ✅ done `feat/15-firmware-loader` · ✅ done `feat/16-flash-manager` · ✅ done `feat/17-flash-subcommand` | `v1.0.0` |
+| 6 | Post-v1 adapter coverage | 🔄 active `feat/18-vector-backend` | `v1.2.0` |
 | — | Plantilla sync _(sidequest)_ | ✅ done `feat/1-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` | — |
+| — | Release tooling _(sidequest)_ | 🔄 active `fix/2-release-sync-dev` · 🔄 active `fix/3-docs-revamp-vector` | — |
 
 ## Branch diagram
 
@@ -131,6 +133,15 @@ gitGraph
     merge feat/17-flash-subcommand
     checkout main
     merge dev tag: "v1.0.0"
+    checkout dev
+
+    %% Phase 6 — Post-v1 adapter coverage
+    branch feat/18-vector-backend
+    commit id: "… Vector XL Driver Library (VN1610 / VN16xx, Windows)"
+    checkout dev
+    merge feat/18-vector-backend
+    checkout main
+    merge dev tag: "v1.2.0"
     checkout dev
 
 ```
