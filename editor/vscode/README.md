@@ -4,11 +4,14 @@ VS Code wrapper around the [`can-flasher`](../../README.md) CLI: build
 the current STM32 firmware project and flash it to a CAN-connected
 node from inside the editor.
 
-**Status: Tier A + B live.** Build / flash, adapter detection, the
-device tree, the adapter picker, and the status-bar selector all
-work against a real `can-flasher` binary. Tier C (DTC viewer,
-session-health output, live-data webview) is still stubbed — see
-[Roadmap](#roadmap) below.
+**Status: every palette command is live.** Build / flash, adapter
+detection + the device tree + status-bar selector, plus the three
+diagnostics commands (DTC read / clear / session-health) all work
+against a real `can-flasher` binary. The only remaining gap on the
+roadmap is the live-data webview (Tier C.2) — a streaming
+real-time chart of `diagnose live-data --json` snapshots that needs
+its own webview surface and chart library, deferred to a follow-up
+PR. See [Roadmap](#roadmap) for details.
 
 ## What it's for
 
@@ -70,14 +73,23 @@ Glob patterns are accepted in `iscFs.firmwareArtifact`; multiple matches trigger
 
 The tree populates lazily — opening the view triggers the first `adapters` + `discover` round-trip, after which it caches until the operator hits ⟳. Inactive adapters are listed but collapsed (no `discover` is run against them); to inspect another adapter's devices, select it first.
 
-### Tier C — Diagnostics (v0.3, post-MVP)
+### Tier C — Diagnostics (v0.3, ✅ commands live)
 
-| Command / View | What it does |
+| Command | What it does |
 |---|---|
-| `iscFs.readDtcs` | Pretty-print active DTCs in the Problems panel |
-| `iscFs.clearDtcs` | Issue `CMD_DTC_CLEAR` (with confirmation) |
-| `iscFs.health` | Session-health output panel |
-| Live data webview | Periodically poll `diagnose live-data --json` and chart it |
+| `iscFs.health` | Runs `diagnose health --json`. Pretty-prints uptime, reset cause, session/app/WRP state, flash-write count, last DTC code, raw flags into the ISC CAN output channel. |
+| `iscFs.readDtcs` | Runs `diagnose read-dtc --json`. Formats entries into a column-aligned table in the output channel. Severity-aware toast: info on empty, warning on `WARN`, error on `ERROR`/`FATAL`. |
+| `iscFs.clearDtcs` | Modal confirmation ("This cannot be undone."), then runs `diagnose clear-dtc --yes --json`. Success / failure toast. |
+
+DTC display lives in the **output channel** rather than the Problems panel. DTCs are hardware fault codes that don't map to source-file ranges, so VS Code's diagnostic-collection plumbing doesn't fit them well; structured text in the dedicated channel keeps copy-paste, scrollback, and a deterministic record at hardware-test time.
+
+### Tier C.2 — Live-data webview (planned)
+
+Streaming visualisation of `diagnose live-data --rate-hz N --json`. Per the source contract this is one `LiveDataJson` per line — uptime, frame counts, NACK count, DTC count, session-age, flags. The right shape is a webview panel with a small chart library, periodic snapshot refresh, and a start/stop toggle that drives the underlying CLI lifetime. Deferred to its own PR because:
+
+- HTML/CSS/JS surface is substantial (~200+ lines)
+- A chart dependency (Chart.js or similar) needs to land alongside it
+- The data-stream lifecycle (start / pause / stop) needs message passing between the extension host and the webview, distinct from every other command's one-shot model
 
 ### Out of scope (for now)
 

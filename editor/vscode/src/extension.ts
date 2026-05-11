@@ -1,14 +1,15 @@
 // ISC STM32 CAN Flasher — VS Code extension entry point.
 //
-// Tier A + Tier B are live. Tier C (DTC viewer, session-health,
-// live-data webview) is still stubs.
+// All command handlers are live now. The only remaining stubbed
+// surface is the live-data webview, which doesn't yet have a
+// command on the manifest — it ships in a follow-up.
 //
 //   Tier A — Build + Flash:
 //     iscFs.flash, iscFs.flashWithoutBuild
 //   Tier B — Device awareness:
 //     iscFs.discover, iscFs.refreshDevices, iscFs.selectAdapter,
 //     iscFs.devices (live tree data provider), iscFs.flashThisDevice
-//   Tier C — Diagnostics (stubs):
+//   Tier C — Diagnostics:
 //     iscFs.readDtcs, iscFs.clearDtcs, iscFs.health
 //
 // All real work shells out to the `can-flasher` CLI in `--json`
@@ -16,23 +17,13 @@
 
 import * as vscode from 'vscode';
 
+import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
 import { runFlash } from './flash';
 import { selectAdapter } from './picker';
 import { registerStatusBarItem } from './statusBar';
 import { DeviceTreeProvider, type IscFsTreeNode } from './tree';
 import { getOutputChannel, showOutputChannel } from './output';
 import { formatNodeId } from './discover';
-
-interface StubCommand {
-    readonly id: string;
-    readonly label: string;
-}
-
-const STUB_COMMANDS: ReadonlyArray<StubCommand> = [
-    { id: 'iscFs.readDtcs', label: 'Read DTCs' },
-    { id: 'iscFs.clearDtcs', label: 'Clear DTCs' },
-    { id: 'iscFs.health', label: 'Session health' },
-];
 
 export function activate(context: vscode.ExtensionContext): void {
     // ---- Tier A (flash) ----
@@ -73,12 +64,12 @@ export function activate(context: vscode.ExtensionContext): void {
     // Status-bar item (Tier B): shows current adapter + node, click to re-pick.
     registerStatusBarItem(context);
 
-    // ---- Tier C (stubs) ----
-    for (const cmd of STUB_COMMANDS) {
-        context.subscriptions.push(
-            vscode.commands.registerCommand(cmd.id, () => notImplemented(cmd.label)),
-        );
-    }
+    // ---- Tier C (diagnostics) ----
+    context.subscriptions.push(
+        vscode.commands.registerCommand('iscFs.health', () => runHealth()),
+        vscode.commands.registerCommand('iscFs.readDtcs', () => runReadDtcs()),
+        vscode.commands.registerCommand('iscFs.clearDtcs', () => runClearDtcs()),
+    );
 }
 
 export function deactivate(): void {
@@ -115,8 +106,3 @@ async function flashThisDevice(node?: IscFsTreeNode): Promise<void> {
     }
 }
 
-function notImplemented(label: string): void {
-    void vscode.window.showInformationMessage(
-        `ISC CAN — ${label}: not implemented yet. Tier C lands in a follow-up PR.`,
-    );
-}
