@@ -1,31 +1,52 @@
 {
   "name": "vscode-stm32-can",
   "displayName": "ISC STM32 CAN Flasher",
-  "description": "Build and flash STM32 firmware over CAN from inside VS Code, via the can-flasher CLI.",
+  "description": "Build, flash, and diagnose STM32 firmware over CAN — one button, four adapters, live telemetry. Wraps the can-flasher CLI.",
   "version": "0.1.1",
   "publisher": "isc-fs",
   "license": "MIT",
-  "private": true,
   "preview": true,
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Visualization",
+    "Debuggers"
   ],
   "keywords": [
     "stm32",
+    "stm32h7",
     "can",
     "canbus",
     "embedded",
     "flash",
+    "bootloader",
+    "iso-tp",
+    "isotp",
+    "slcan",
+    "socketcan",
+    "pcan",
+    "vector",
+    "vn1610",
+    "canable",
+    "formula-student",
     "isc-fs"
   ],
   "repository": {
     "type": "git",
     "url": "https://github.com/isc-fs/can-flasher.git",
     "directory": "editor/vscode"
+  },
+  "homepage": "https://github.com/isc-fs/can-flasher/tree/main/editor/vscode#readme",
+  "bugs": {
+    "url": "https://github.com/isc-fs/can-flasher/issues"
+  },
+  "qna": "https://github.com/isc-fs/can-flasher/discussions",
+  "galleryBanner": {
+    "color": "#1F1F1F",
+    "theme": "dark"
   },
   "activationEvents": [
     "onCommand:iscFs.flash",

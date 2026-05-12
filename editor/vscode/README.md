@@ -1,213 +1,131 @@
-# ISC STM32 CAN Flasher — VS Code extension
+# ISC STM32 CAN Flasher
 
-VS Code wrapper around the [`can-flasher`](../../README.md) CLI: build
-the current STM32 firmware project and flash it to a CAN-connected
-node from inside the editor.
+> One-button **build + flash + diagnose** of STM32 firmware over CAN, from inside VS Code.
 
-**Status: every roadmap surface is live.** Build / flash, adapter
-detection + the device tree + status-bar selector, the three
-one-shot diagnostics commands (DTC read / clear / session-health),
-*and* the streaming live-data webview all work against a real
-`can-flasher` binary. See [Roadmap](#roadmap) for the
-command-by-command summary.
+Wraps the [`can-flasher`](https://github.com/isc-fs/can-flasher) Rust CLI in a VS Code
+surface: a single command builds your firmware project, flashes it through whichever CAN
+adapter you have plugged in, and surfaces live telemetry and fault codes in panels next
+to your code. Built for the [ISC Racing Team](https://iscracingteam.com)'s Formula
+Student development inner loop; published unlisted on the Marketplace so the team picks
+up updates automatically.
 
-## What it's for
+## Features
 
-Right now the ISC racing-team workflow is:
+- **Build & Flash** — `ISC CAN: Build & Flash firmware` runs your configured CMake (or
+  any) build command, resolves the firmware artifact, and flashes it via `can-flasher`
+  with a phase-aware progress notification (`erased sector 3` → `writing sector 3: 67 %`
+  → `verified sector 3` → `committing` → `done in 51 234 ms`).
+- **Adapter coverage** — supports **SLCAN** (CANable, all OSes), **SocketCAN** (Linux),
+  **PCAN-Basic** (Windows / macOS), and **Vector XL Driver Library** (VN1610 / VN16xx on
+  Windows), plus an in-process **virtual** loopback for hardware-free tests.
+- **Device tree** — Explorer-pane view listing every CAN adapter the host can see, with
+  the active adapter expanded to show its bootloader-mode devices (firmware version,
+  product name, WRP status, reset cause).
+- **Status-bar adapter picker** — `🔌 vector: 0 → 0x3` in the status bar; click to swap
+  adapters, with a Workspace / User settings-scope sub-prompt.
+- **DTC viewer** — `Read DTCs` produces a severity-aware table in the output channel;
+  `Clear DTCs` gates a destructive clear behind a modal confirmation.
+- **Live-data webview** — `Open live-data panel` opens a Chart.js streaming chart with
+  frames/sec RX + TX, plus state-pill indicators and a counter grid. One panel per
+  (interface, channel) pair so you can watch two boards side-by-side. Theme-reactive —
+  axis colours rebind on light ↔ dark switches.
+- **Per-device "Flash this device…"** — right-click a node in the device tree to target
+  that node for one flash and restore the previous setting afterward.
 
-1. Build firmware (toolchain-specific — CMake invocation, `west build`, IDE-specific button, …)
-2. Drop to a terminal: `can-flasher --interface … --channel … flash build/firmware.elf`
-3. Read the result, decide what to do next
+Every action shells out to `can-flasher --json` — the wire protocol lives in one place
+(the CLI), and the extension is a thin orchestration layer that can never drift from it.
 
-This extension collapses (1) and (2) into a single command — and adds
-the small ergonomic wins that make a development inner-loop pleasant:
-device discovery in a sidebar, adapter selection from a quick-pick,
-DTC viewer, live-data panel.
+## Requirements
 
-## How it talks to hardware
+- **VS Code 1.85** or later.
+- **[`can-flasher`](https://github.com/isc-fs/can-flasher) CLI v1.2.0+** on your `PATH`
+  (or point `iscFs.canFlasherPath` at the binary).
+  - Install from prebuilt binary: see the
+    [`can-flasher` releases page](https://github.com/isc-fs/can-flasher/releases).
+  - Or from source: `cargo install --git https://github.com/isc-fs/can-flasher.git`.
+- A CAN adapter — CANable / CANtact (SLCAN), PEAK PCAN, Vector VN1610, or any kernel
+  CAN interface on Linux. See
+  [adapter setup](https://github.com/isc-fs/can-flasher/blob/main/docs/INSTALL.md) in
+  the CLI repo.
 
-The extension **shells out to `can-flasher`** for every action that
-touches the bus. It never speaks the bootloader protocol directly.
-That means:
+## First-run setup
 
-- One canonical implementation of the wire format (`can-flasher`'s
-  `protocol/` module). The extension can't drift.
-- The CLI's `--json` mode (already exhaustive on `adapters`,
-  `discover`, `flash`, `diagnose`) is the API surface — stable and
-  documented in [REQUIREMENTS.md](../../REQUIREMENTS.md).
-- Adding a new adapter (e.g. when Vector Linux support lands) is
-  purely a `can-flasher` change; the extension picks it up
-  automatically the next time it runs `can-flasher adapters --json`.
+After install, open VS Code's Settings UI and search for **ISC CAN**:
 
-The build side runs whatever shell command is in
-`iscFs.buildCommand` (defaults to `cmake --build build`). It's not
-locked to any particular STM32 build system — anything that produces
-an ELF/HEX/BIN at the configured path works.
+1. **`iscFs.canFlasherPath`** — leave as `can-flasher` if the binary is on PATH;
+   otherwise point at it.
+2. **`iscFs.interface`** + **`iscFs.channel`** — pick your adapter. Easier route: open
+   the Command Palette and run **`ISC CAN: Select CAN adapter…`** — the extension
+   enumerates everything the host can see and writes the choice into your workspace's
+   `.vscode/settings.json`.
+3. **`iscFs.firmwareArtifact`** — path or glob to the firmware binary, relative to the
+   workspace root. Examples: `build/firmware.elf`, `build/*.elf`. Multi-match globs
+   trigger a Quick Pick at flash time.
+4. **`iscFs.buildCommand`** — defaults to `cmake --build build`. Set to an empty string
+   to skip the build step entirely (or use `ISC CAN: Flash firmware (skip build)`).
 
-## Roadmap
+For a no-hardware smoke test set `iscFs.interface` to `virtual` — the extension drives
+an in-process bootloader stub built into the CLI.
 
-The sketch lays the package surface for all three tiers; each tier
-lands as its own PR.
+## Commands
 
-### Tier A — Build + Flash (v0.1, ✅ live)
+All commands are available from the Command Palette under the **ISC CAN** category.
 
-| Command | What it does |
+| Command | Purpose |
 |---|---|
-| `iscFs.flash` | Runs `iscFs.buildCommand` via the user's shell, then `can-flasher flash <iscFs.firmwareArtifact>` with the configured adapter. Progress notification shows the live flash phase (erasing / writing N% / verifying / committing); the **ISC CAN** output channel carries the full argv + stdout/stderr; success / failure toasts include duration and an exit-code label that maps to REQUIREMENTS.md § Output and CI integration. |
-| `iscFs.flashWithoutBuild` | Same as above, build step skipped — useful when iterating on flash parameters with a pre-built artifact. |
+| `ISC CAN: Build & Flash firmware` | Build, then flash the configured artifact. |
+| `ISC CAN: Flash firmware (skip build)` | Flash the existing artifact without rebuilding. |
+| `ISC CAN: Discover devices on bus` | Refresh the device tree + scroll the output channel. |
+| `ISC CAN: Refresh device list` | Same as ⟳ in the device-tree view. |
+| `ISC CAN: Select CAN adapter…` | Quick Pick across detected adapters. |
+| `ISC CAN: Show session health` | `diagnose health --json` summary. |
+| `ISC CAN: Read DTCs` | Column-aligned DTC table, severity-aware toast. |
+| `ISC CAN: Clear DTCs` | Modal confirmation, then clear. |
+| `ISC CAN: Open live-data panel` | Streaming chart + state pills + counters. |
 
-Glob patterns are accepted in `iscFs.firmwareArtifact`; multiple matches trigger a Quick Pick.
+The **ISC CAN Devices** view in the Explorer pane carries the device tree. Right-click
+a node row for **Flash this device…**.
 
-### Tier B — Device awareness (v0.2, ✅ live)
-
-| Command / View | What it does |
-|---|---|
-| `iscFs.devices` (tree, Explorer panel) | Hierarchical view: every detected adapter, with the active adapter expanded to show its bootloader-mode devices. Each device row shows product name, firmware version, WRP status, reset cause. Tooltip carries the full record. |
-| `iscFs.refreshDevices` (⟳ on the view title bar) | Re-runs `adapters --json` + `discover --json` against the active adapter. No background polling — refresh is always operator-initiated so no frame goes on the bus uninvited. |
-| `iscFs.discover` (palette) | Same code path as the refresh button; reveals the ISC CAN output channel so keyboard-driven operators get a textual summary alongside the tree update. |
-| `iscFs.selectAdapter` (palette + status-bar click) | Quick-pick across every detected adapter plus the in-process virtual loopback. Selection prompts for **Workspace** (default — moves with the project) or **User** (global) settings scope. |
-| `iscFs.flashThisDevice` (right-click in tree) | Sets `iscFs.nodeId` to the clicked device's ID for one flash, then restores the previous value. Lets the operator target a specific node from a multi-node bus without editing settings by hand. |
-| **Status-bar item** (bottom-left) | `🔌 vector: 0 → 0x3` — current adapter + channel + node. Click to open the adapter picker. Goes warning-yellow with `⊘ ISC CAN: no adapter` when no channel is configured. |
-
-The tree populates lazily — opening the view triggers the first `adapters` + `discover` round-trip, after which it caches until the operator hits ⟳. Inactive adapters are listed but collapsed (no `discover` is run against them); to inspect another adapter's devices, select it first.
-
-### Tier C — Diagnostics (v0.3, ✅ commands live)
-
-| Command | What it does |
-|---|---|
-| `iscFs.health` | Runs `diagnose health --json`. Pretty-prints uptime, reset cause, session/app/WRP state, flash-write count, last DTC code, raw flags into the ISC CAN output channel. |
-| `iscFs.readDtcs` | Runs `diagnose read-dtc --json`. Formats entries into a column-aligned table in the output channel. Severity-aware toast: info on empty, warning on `WARN`, error on `ERROR`/`FATAL`. |
-| `iscFs.clearDtcs` | Modal confirmation ("This cannot be undone."), then runs `diagnose clear-dtc --yes --json`. Success / failure toast. |
-
-DTC display lives in the **output channel** rather than the Problems panel. DTCs are hardware fault codes that don't map to source-file ranges, so VS Code's diagnostic-collection plumbing doesn't fit them well; structured text in the dedicated channel keeps copy-paste, scrollback, and a deterministic record at hardware-test time.
-
-### Tier C.2 — Live-data webview (v0.4, ✅ live)
-
-| Command | What it does |
-|---|---|
-| `iscFs.liveData` | Opens (or focuses) a webview panel titled **ISC CAN — Live data (`interface`·`channel`)**. **Start** spawns `can-flasher diagnose live-data --rate-hz N --json`; each snapshot updates a sliding-window Chart.js line chart (frames/sec RX + TX), a row of state-pill indicators (`session active`, `valid app`, `WRP`, `log stream`, `live-data stream`), and a grid of numeric counters (uptime, session age, DTC count, NACK count, last opcode, last flash addr, ISO-TP RX progress). **Stop** kills the child process and freezes the chart. **Clear chart** wipes accumulated points without restarting. |
-
-**Multi-panel**: one panel per (interface, channel) pair. Each panel captures its adapter identity at creation time, so a running stream stays locked to its adapter even if the operator later switches `iscFs.interface`/`iscFs.channel` to a different board. Open the command, switch adapters, open it again — two panels, two boards, side-by-side, independent streams.
-
-**Theme reactivity**: chart axis ticks / grid / legend colours re-read from `var(--vscode-*)` whenever the body class changes (light ↔ dark ↔ high-contrast). No need to close and re-open the panel after a theme switch.
-
-Bundled assets ship under `editor/vscode/media/`:
-
-- `chart.umd.min.js` — Chart.js v4.4.7 (vendored, ~200 KB) so the `.vsix` is fully self-contained and works offline
-- `live-data.css` — VS Code-theme-aware styles (uses `var(--vscode-*)` colour tokens; light / dark / high-contrast carry through)
-- `live-data.js` — webview-side renderer: chart init, message handling, rate computation (snapshot deltas → frames/sec), sliding-window pruning
-
-Two new settings:
-
-| Setting | Default | Range |
-|---|---|---|
-| `iscFs.liveDataRateHz` | `10` | `1`–`50` (CLI constraint) |
-| `iscFs.liveDataWindowSeconds` | `60` | `5`–`600` |
-
-Each panel owns one host-side `LiveDataController`. When the panel closes, the controller disposes and kills the in-flight child — no orphan `can-flasher` processes. When the extension deactivates the same dispose chain fires via `context.subscriptions` for every panel in the `byKey` map.
-
-Webview is configured with a strict CSP: `default-src 'none'`, `script-src` gated on a nonce regenerated per panel, `connect-src 'none'` so the chart can never phone home. All data flows in through `postMessage` from the host.
-
-### Out of scope (for now)
-
-- Build-system integration tighter than "shell out and parse exit
-  code" — no `gcc` diagnostic squiggles, no `tasks.json` provider
-- Marketplace publication — distribution is `.vsix` files shared
-  within ISC
-- Multi-workspace support beyond "the active folder" — single-board
-  flashing only, no fleet management
-
-## Settings
-
-All extension settings live under `iscFs.*` in VS Code's settings.
-See `package.json`'s `contributes.configuration.properties` for the
-canonical list. Highlights:
+## Settings reference
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `iscFs.canFlasherPath` | `can-flasher` | Path / binary name |
-| `iscFs.interface` | `slcan` | `--interface` |
-| `iscFs.channel` | _(empty)_ | `--channel` (format depends on backend) |
-| `iscFs.bitrate` | `500000` | `--bitrate` |
-| `iscFs.nodeId` | _(empty)_ | `--node-id`, omit for broadcast |
-| `iscFs.buildCommand` | `cmake --build build` | Run before flash (empty = skip) |
-| `iscFs.firmwareArtifact` | _(empty)_ | Path / glob to .elf/.hex/.bin |
-| `iscFs.timeoutMs` | `500` | `--timeout` |
-| `iscFs.requireWrp` / `iscFs.applyWrp` | `false` / `false` | WRP gating policy on `flash` |
-| `iscFs.profile` | `false` | Pass `--profile` for timing diagnostics |
-| `iscFs.jumpAfterFlash` | `true` | Pass `--jump` (false → stays in BL) |
+| `iscFs.canFlasherPath` | `can-flasher` | Path / binary name. |
+| `iscFs.interface` | `slcan` | `slcan` / `socketcan` / `pcan` / `vector` / `virtual`. |
+| `iscFs.channel` | _(empty)_ | Adapter channel string — format depends on backend. |
+| `iscFs.bitrate` | `500000` | Nominal CAN bitrate, bps. |
+| `iscFs.nodeId` | _(empty)_ | Target node ID (hex `0x0`–`0xF` or decimal). Empty = broadcast. |
+| `iscFs.buildCommand` | `cmake --build build` | Pre-flash shell command. |
+| `iscFs.firmwareArtifact` | _(empty)_ | Path or glob to `.elf` / `.hex` / `.bin`. |
+| `iscFs.timeoutMs` | `500` | Per-frame timeout. |
+| `iscFs.requireWrp` / `iscFs.applyWrp` | `false` / `false` | WRP policy on `flash`. |
+| `iscFs.profile` | `false` | Pass `--profile` to `flash` for per-phase timing. |
+| `iscFs.jumpAfterFlash` | `true` | Jump to the application after a successful flash. |
+| `iscFs.liveDataRateHz` | `10` | Snapshot rate for the live-data webview (1–50). |
+| `iscFs.liveDataWindowSeconds` | `60` | Sliding-window size on the live-data chart (5–600). |
 
-## Development
+## Logs
 
-This sketch doesn't ship `node_modules` — install before first
-compile.
+Every shell-out to `can-flasher` writes its argv plus the raw stdout/stderr to a
+dedicated **ISC CAN** output channel. Open it via **View → Output → ISC CAN**. Useful
+when something misbehaves at a bench: deterministic record of exactly what was run.
 
-```bash
-cd editor/vscode
-npm install
-npm run compile     # one-shot
-npm run watch       # tsc -watch
-```
+## Repository
 
-In VS Code, open the `editor/vscode/` folder as a separate window and
-press `F5` to launch a development host with the extension loaded.
-Every command should appear in the palette as `ISC CAN: …` and pop
-a "not implemented" toast.
+The extension lives inside the [`can-flasher`](https://github.com/isc-fs/can-flasher)
+monorepo under [`editor/vscode/`](https://github.com/isc-fs/can-flasher/tree/main/editor/vscode).
+Contributor / development notes:
+[CONTRIBUTING.md](https://github.com/isc-fs/can-flasher/blob/main/docs/CONTRIBUTING.md).
 
-To produce a `.vsix` for sideload installation:
+- Bugs and feature requests:
+  [github.com/isc-fs/can-flasher/issues](https://github.com/isc-fs/can-flasher/issues)
+- Discussion:
+  [github.com/isc-fs/can-flasher/discussions](https://github.com/isc-fs/can-flasher/discussions)
 
-```bash
-npm run package
-# → vscode-stm32-can-0.1.0.vsix
-```
+## Release notes
 
-Then in the target VS Code: **Extensions → … menu → Install from VSIX**.
+See [CHANGELOG.md](https://github.com/isc-fs/can-flasher/blob/main/editor/vscode/CHANGELOG.md).
 
-## Releasing
+## Licence
 
-Official `.vsix` builds are produced by the [`Editor release`](../../.github/workflows/editor-release.yml) GitHub Actions workflow. To cut a new release:
-
-1. Bump `version` in [package.json](package.json) (and commit + merge through the normal feat-branch + PR flow).
-2. Push a tag of the form `editor-vX.Y.Z` matching the bumped version:
-   ```bash
-   git tag editor-v0.1.0
-   git push origin editor-v0.1.0
-   ```
-3. The workflow's `verify-version` gate cross-checks the tag against `package.json`. On match it compiles, packages with `vsce`, and creates a GitHub Release with the `.vsix` attached as the only asset.
-4. Team members install from the Release page (Extensions → ⋯ menu → Install from VSIX…).
-
-Manual dispatch (`Run workflow` button) on the Actions UI produces a `.vsix` as a workflow artifact (14-day retention) without creating a Release — useful for testing a build before tagging.
-
-The Rust CLI and the extension have **independent release cadences and tag spaces**: `v*` triggers the binary build, `editor-v*` triggers the extension build, neither interferes with the other.
-
-## Design notes
-
-### Why in-repo (vs. its own repo)?
-
-The extension's API surface is `can-flasher`'s `--json` output. Two
-people changing both in lockstep is much easier when they're in the
-same PR — schema changes can ship as a single atomic update. If the
-extension ever needs to be released independently (different cadence,
-different versioning, different lifecycle), splitting it out later is
-cheap.
-
-### Command-ID prefix
-
-`iscFs.*` — short, recognisable, doesn't collide with anything else
-likely to appear in a VS Code workspace. The marketplace publisher
-field uses the same `isc-fs` identifier.
-
-### Tree provider over webview
-
-The "Detected devices" sidebar is a `TreeView`, not a webview. Tree
-views render natively in the Explorer panel, get keyboard navigation
-and command-bar buttons for free, and are cheap to refresh. Webviews
-are reserved for the Tier C live-data panel where a chart is needed.
-
-### Output channel as logging
-
-Every shell-out to `can-flasher` writes both its argv and its
-stdout/stderr to a dedicated `ISC CAN` Output channel. Operators
-clicking a button in the UI get a deterministic record of what was
-actually run, which is essential when something goes wrong on a
-hardware test bench.
+MIT — see [LICENSE](https://github.com/isc-fs/can-flasher/blob/main/editor/vscode/LICENSE).
