@@ -103,14 +103,20 @@ jobs:
           fail_on_unmatched_files: true
           name: VS Code extension ${{ steps.package.outputs.version }}
           body: |
-            Same `.vsix` that `vsce publish` ships to the VS Code Marketplace (unlisted under publisher `isc-fs`). Mirrored here for sideload + archive.
+            Internal ISC racing-team build of the VS Code extension. Distributed via GitHub Releases (not the VS Code Marketplace).
 
-            ### Install (any of):
+            ### Install / update
 
-            - **From the Marketplace** (preferred, gives auto-update):
-              `code --install-extension isc-fs.vscode-stm32-can`
-              or in VS Code: **Extensions panel → search `isc-fs.vscode-stm32-can`** (unlisted — paste the ID).
-            - **Sideload the `.vsix`**: download below → **Extensions panel → ⋯ menu → Install from VSIX…**
+            1. Download `vscode-stm32-can-${{ steps.package.outputs.version }}.vsix` from the assets below
+               (or grab the always-latest URL: <https://github.com/isc-fs/can-flasher/releases/latest>)
+            2. In VS Code: **Extensions panel → ⋯ menu → Install from VSIX…**
+            3. Pick the downloaded file. The extension activates on the next reload.
+
+            On the command line:
+
+            ```
+            code --install-extension vscode-stm32-can-${{ steps.package.outputs.version }}.vsix
+            ```
 
             ### Configure
 
@@ -119,31 +125,3 @@ jobs:
             - `iscFs.firmwareArtifact` — path or glob to the .elf/.hex/.bin to flash
 
             See [`editor/vscode/README.md`](https://github.com/isc-fs/can-flasher/blob/main/editor/vscode/README.md) for the full settings reference, command list, and adapter setup.
-
-      # ---- VS Code Marketplace publish ----
-      #
-      # Runs after the GitHub Release upload, only on tag pushes, and
-      # only if the VSCE_PAT secret is configured. Skipping silently
-      # when the secret is missing means a clone of this repo (or a
-      # PAT-not-yet-set state) won't fail the workflow — the .vsix is
-      # still in the GitHub Release for sideload.
-      #
-      # The PAT is an Azure DevOps Personal Access Token scoped to
-      # "Marketplace › Manage" (the only scope vsce needs). Generate
-      # at https://dev.azure.com/<your-org>/_usersSettings/tokens and
-      # save it as the `VSCE_PAT` repo secret.
-      - name: Publish to VS Code Marketplace
-        if: github.ref_type == 'tag'
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-          VSIX: editor/vscode/vscode-stm32-can-${{ steps.package.outputs.version }}.vsix
-        run: |
-          if [ -z "$VSCE_PAT" ]; then
-            echo "::warning::VSCE_PAT secret not set; skipping Marketplace publish. The .vsix is still attached to the GitHub Release for sideload."
-            exit 0
-          fi
-          npx --yes @vscode/vsce@^2.24.0 publish \
-            --no-dependencies \
-            --packagePath "$VSIX" \
-            --pat "$VSCE_PAT"
-          echo "✓ published isc-fs.vscode-stm32-can@${{ steps.package.outputs.version }}"

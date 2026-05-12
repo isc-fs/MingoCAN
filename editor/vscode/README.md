@@ -6,8 +6,33 @@ Wraps the [`can-flasher`](https://github.com/isc-fs/can-flasher) Rust CLI in a V
 surface: a single command builds your firmware project, flashes it through whichever CAN
 adapter you have plugged in, and surfaces live telemetry and fault codes in panels next
 to your code. Built for the [ISC Racing Team](https://iscracingteam.com)'s Formula
-Student development inner loop; published unlisted on the Marketplace so the team picks
-up updates automatically.
+Student development inner loop and distributed internally via GitHub Releases — not
+listed on the VS Code Marketplace.
+
+## Install
+
+The team distributes the extension as a `.vsix` attached to each GitHub Release. The latest release is always at:
+
+<https://github.com/isc-fs/can-flasher/releases/latest>
+
+Then, in VS Code:
+
+1. Download `vscode-stm32-can-<version>.vsix` from the release assets.
+2. **Extensions panel → ⋯ menu → Install from VSIX…** → pick the downloaded file.
+
+Or from the command line:
+
+```bash
+code --install-extension vscode-stm32-can-<version>.vsix
+```
+
+The extension activates on the next reload.
+
+### Staying up to date
+
+VS Code does not auto-update sideloaded extensions. To pick up a new release, repeat the install steps with the newer `.vsix` — VS Code overwrites the previous install.
+
+If you want a hands-off updater, a small shell script that polls the [GitHub Releases API](https://docs.github.com/en/rest/releases/releases) and reinstalls when a newer version appears is the usual approach; it's a follow-up if/when the team finds the manual reinstall friction.
 
 ## Features
 

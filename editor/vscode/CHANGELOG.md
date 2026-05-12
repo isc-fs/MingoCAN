@@ -10,15 +10,24 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - Team-supplied extension icon (yellow ISC shield + key + subtle circuit motif).
 - `LICENSE` (MIT) inside the extension package — silences the `vsce` warning
-  and surfaces a License tab on the Marketplace listing.
+  on package build.
 - This `CHANGELOG.md`.
 
 ### Changed
-- README rewritten for the Marketplace listing surface: consumer-facing intro,
-  install + first-run, command and settings references, with contributor /
-  development notes moved toward the bottom.
+- README rewritten: consumer-facing intro, install + first-run, command and
+  settings references, with contributor / development notes moved to the
+  parent-repo `docs/CONTRIBUTING.md`. The text reads well both inside VS
+  Code's Extensions pane and on the GitHub Release page.
 - Manifest metadata expanded (description, categories, keywords, `bugs` /
-  `homepage` / `qna` URLs) for better Marketplace discoverability.
+  `homepage` / `qna` URLs). Most of these only matter for the Marketplace
+  surface but are harmless for sideload too.
+
+### Decided not to do
+- **VS Code Marketplace publish.** The Azure DevOps account + PAT + scope
+  dance is more setup than the team-internal use case warrants. Distribution
+  stays on GitHub Releases. Manifest still carries Marketplace-friendly
+  metadata so the decision is reversible without changes; just add a
+  `VSCE_PAT` secret and the publish step back to the release workflow.
 
 ## [0.1.0] — 2026-05-12 — First internal release
 
