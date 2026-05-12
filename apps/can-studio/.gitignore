@@ -1,0 +1,22 @@
+# Frontend
+node_modules/
+dist/
+
+# Tauri build outputs (the workspace's target/ at the repo root
+# already catches the Rust side; these are anything Tauri or the
+# bundler drops inside src-tauri/).
+src-tauri/target/
+src-tauri/gen/
+
+# Tauri icon generation outputs that aren't the source `icon.png`
+src-tauri/icons/icon.icns
+src-tauri/icons/icon.ico
+src-tauri/icons/Square*.png
+src-tauri/icons/StoreLogo.png
+src-tauri/icons/32x32.png
+src-tauri/icons/128x128.png
+src-tauri/icons/128x128@2x.png
+
+# Editor / OS noise
+.vscode/settings.json
+.DS_Store

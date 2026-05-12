@@ -1,3 +1,12 @@
+[workspace]
+# Cargo workspace: the existing `can-flasher` crate lives at the
+# root (so this isn't a virtual workspace), and `apps/can-studio/`
+# adds the Tauri desktop app as a sibling member that depends on
+# `can-flasher` via a path dependency. Future apps land here too.
+members = [
+    "apps/can-studio/src-tauri",
+]
+
 [package]
 name        = "can-flasher"
 version     = "1.2.0"
