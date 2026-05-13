@@ -5,11 +5,11 @@
 // module tree without going through the Tauri runtime's
 // `generate_context!` macro (which only works once per process).
 //
-// Tier 0a-b (current): `discover_adapters` + `flash` (with
-// streaming progress events via `Emitter::emit("flash:event",
-// payload)`). Tier 0c adds `health` / `read_dtcs` / `clear_dtcs`;
-// 0d ports the live-data Chart.js view.
+// Tier 0a-c (current): `discover_adapters` + `flash` (streamed) +
+// `health` / `read_dtcs` / `clear_dtcs`. Tier 0d ports the live-data
+// Chart.js view.
 
+mod diagnose;
 mod flash;
 
 use can_flasher::cli::adapters::{collect_report, AdapterReport};
@@ -44,7 +44,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             can_flasher_version,
             discover_adapters,
-            flash::flash
+            flash::flash,
+            diagnose::health,
+            diagnose::read_dtcs,
+            diagnose::clear_dtcs
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC CAN Studio Tauri app");

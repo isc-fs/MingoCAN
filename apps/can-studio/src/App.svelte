@@ -13,6 +13,7 @@
     import Sidebar from './lib/Sidebar.svelte';
     import AdaptersView from './lib/AdaptersView.svelte';
     import FlashView from './lib/FlashView.svelte';
+    import DiagnosticsView from './lib/DiagnosticsView.svelte';
     import PlaceholderView from './lib/PlaceholderView.svelte';
 
     const initial = defaultAppState();
@@ -37,11 +38,7 @@
         {:else if activeView === 'flash'}
             <FlashView {selectedAdapter} />
         {:else if activeView === 'diagnostics'}
-            <PlaceholderView
-                title="Diagnostics"
-                tier="Tier 0c"
-                summary="DTC viewer + clear, session health snapshot. One-shot commands that wrap the diagnose subcommand."
-            />
+            <DiagnosticsView {selectedAdapter} />
         {:else if activeView === 'liveData'}
             <PlaceholderView
                 title="Live data"
