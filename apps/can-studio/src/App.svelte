@@ -12,6 +12,7 @@
 
     import Sidebar from './lib/Sidebar.svelte';
     import AdaptersView from './lib/AdaptersView.svelte';
+    import FlashView from './lib/FlashView.svelte';
     import PlaceholderView from './lib/PlaceholderView.svelte';
 
     const initial = defaultAppState();
@@ -34,11 +35,7 @@
         {#if activeView === 'adapters'}
             <AdaptersView {selectedAdapter} onSelect={selectAdapter} />
         {:else if activeView === 'flash'}
-            <PlaceholderView
-                title="Flash"
-                tier="Tier 0b"
-                summary="One-button Build + Flash. Runs the configured build command, resolves the firmware artifact, spawns the can-flasher flash pipeline against the selected adapter, and surfaces per-phase progress."
-            />
+            <FlashView {selectedAdapter} />
         {:else if activeView === 'diagnostics'}
             <PlaceholderView
                 title="Diagnostics"
