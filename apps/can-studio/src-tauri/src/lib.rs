@@ -5,29 +5,34 @@
 // module tree without going through the Tauri runtime's
 // `generate_context!` macro (which only works once per process).
 //
-// Tier 0 will add `flash`, `discover_adapters`, `health`, `dtc_read`,
-// `dtc_clear` — each one a thin `#[tauri::command]` that calls into
-// `can_flasher`'s existing modules. Tier 1 adds a `bus_monitor` event
-// stream backed by `transport::CanBackend` in promiscuous mode.
+// Tier 0a (this revision): `discover_adapters` returns the same
+// AdapterReport shape that `can-flasher adapters --json` emits.
+// Tier 0b will add `flash`; 0c adds `health` / `read_dtcs` /
+// `clear_dtcs`; 0d ports the live-data Chart.js view.
+
+use can_flasher::cli::adapters::{collect_report, AdapterReport};
 
 // ---- Tauri commands ----
-
-/// Smoke-test command — proves the Rust ↔ JS bridge is wired up.
-/// Removed once Tier 0's real commands land.
-#[tauri::command]
-fn studio_version() -> String {
-    format!("ISC CAN Studio v{} (scaffold)", env!("CARGO_PKG_VERSION"))
-}
 
 /// Returns the version of the bundled `can-flasher` crate. Useful
 /// for the UI's About panel and as a sanity check that the path
 /// dependency resolved correctly.
 #[tauri::command]
 fn can_flasher_version() -> &'static str {
-    // The library crate doesn't currently re-export this, so we
-    // inline a constant matching the workspace's Cargo.toml. When
-    // Tier 0 lands we'll move this into `can_flasher` itself.
+    // Inlined to match the workspace's Cargo.toml; the library
+    // crate doesn't currently re-export this. Move into
+    // `can_flasher` proper once we add an About panel.
     "1.2.0"
+}
+
+/// Enumerate every CAN adapter the host can see — same data the
+/// CLI's `can-flasher adapters --json` produces. `AdapterReport`
+/// derives `Serialize`, so Tauri carries it across the IPC bridge
+/// without any custom wrapping; the frontend types in
+/// `src/lib/types.ts` mirror it field-for-field.
+#[tauri::command]
+fn discover_adapters() -> AdapterReport {
+    collect_report()
 }
 
 // ---- Public app entry ----
@@ -35,8 +40,8 @@ fn can_flasher_version() -> &'static str {
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            studio_version,
-            can_flasher_version
+            can_flasher_version,
+            discover_adapters
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC CAN Studio Tauri app");

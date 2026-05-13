@@ -1,140 +1,71 @@
 <!--
-    ISC CAN Studio — scaffold root component.
-    Tier 0+ replaces this with a real toolbar / device tree / bus
-    monitor layout. For now it just proves the Rust ↔ JS bridge is
-    alive via two `#[tauri::command]` calls.
+    ISC CAN Studio — root layout.
+
+    Two-column shell: left sidebar with view selector, right main
+    area that swaps between views based on `activeView`. Selected
+    adapter state lifted here so Tier 0b's Flash view can read it
+    without a global store yet.
 -->
 <script lang="ts">
-    import { invoke } from '@tauri-apps/api/core';
-    import { onMount } from 'svelte';
+    import { defaultAppState, type ViewId } from './lib/stores';
+    import type { AdapterEntry } from './lib/types';
 
-    let studioVersion = $state<string>('loading…');
-    let cliVersion = $state<string>('loading…');
-    let bridgeError = $state<string | null>(null);
+    import Sidebar from './lib/Sidebar.svelte';
+    import AdaptersView from './lib/AdaptersView.svelte';
+    import PlaceholderView from './lib/PlaceholderView.svelte';
 
-    onMount(async () => {
-        try {
-            studioVersion = await invoke<string>('studio_version');
-            cliVersion = await invoke<string>('can_flasher_version');
-        } catch (err) {
-            bridgeError = String(err);
-        }
-    });
+    const initial = defaultAppState();
+    let activeView = $state<ViewId>(initial.activeView);
+    let selectedAdapter = $state<AdapterEntry | null>(initial.selectedAdapter);
+
+    function selectView(id: ViewId): void {
+        activeView = id;
+    }
+
+    function selectAdapter(entry: AdapterEntry): void {
+        selectedAdapter = entry;
+    }
 </script>
 
-<main>
-    <header>
-        <img src="/icon.png" alt="" class="logo" />
-        <div class="titles">
-            <h1>ISC CAN Studio</h1>
-            <p class="subtitle">{studioVersion}</p>
-        </div>
-    </header>
+<div class="shell">
+    <Sidebar {activeView} onSelect={selectView} />
 
-    <section class="status">
-        {#if bridgeError !== null}
-            <div class="error">
-                <strong>Bridge error:</strong>
-                {bridgeError}
-            </div>
-        {:else}
-            <p>
-                Bundled <code>can-flasher</code> crate: <strong>v{cliVersion}</strong>
-            </p>
-            <p class="muted">
-                Scaffold only. Tier 0 (flash · DTC · health) lands in the next PR,
-                Tier 1 (bus monitor) after that.
-            </p>
+    <main>
+        {#if activeView === 'adapters'}
+            <AdaptersView {selectedAdapter} onSelect={selectAdapter} />
+        {:else if activeView === 'flash'}
+            <PlaceholderView
+                title="Flash"
+                tier="Tier 0b"
+                summary="One-button Build + Flash. Runs the configured build command, resolves the firmware artifact, spawns the can-flasher flash pipeline against the selected adapter, and surfaces per-phase progress."
+            />
+        {:else if activeView === 'diagnostics'}
+            <PlaceholderView
+                title="Diagnostics"
+                tier="Tier 0c"
+                summary="DTC viewer + clear, session health snapshot. One-shot commands that wrap the diagnose subcommand."
+            />
+        {:else if activeView === 'liveData'}
+            <PlaceholderView
+                title="Live data"
+                tier="Tier 0d"
+                summary="Streaming snapshot view — frames/sec, session age, NACK counters, sliding-window chart. Port of the VS Code extension's live-data webview."
+            />
         {/if}
-    </section>
-
-    <footer>
-        <p class="muted">
-            <a href="https://github.com/isc-fs/can-flasher" target="_blank" rel="noreferrer">
-                isc-fs/can-flasher
-            </a>
-            — desktop companion to the can-flasher CLI.
-        </p>
-    </footer>
-</main>
+    </main>
+</div>
 
 <style>
+    .shell {
+        display: flex;
+        height: 100vh;
+        overflow: hidden;
+    }
+
     main {
-        max-width: 800px;
-        margin: 0 auto;
-        padding: 32px 24px;
+        flex: 1;
         display: flex;
         flex-direction: column;
-        gap: 24px;
-    }
-
-    header {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-    }
-
-    .logo {
-        width: 64px;
-        height: 64px;
-        border-radius: 12px;
-    }
-
-    .titles h1 {
-        margin: 0;
-        font-size: 1.6rem;
-        font-weight: 600;
-    }
-
-    .titles .subtitle {
-        margin: 4px 0 0 0;
-        color: var(--text-muted);
-        font-size: 0.9rem;
-    }
-
-    .status {
-        padding: 16px 20px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface);
-    }
-
-    .status p {
-        margin: 6px 0;
-    }
-
-    .status .muted {
-        color: var(--text-muted);
-        font-size: 0.9rem;
-    }
-
-    .status .error {
-        color: var(--error);
-    }
-
-    .status code {
-        font-family: var(--font-mono);
-        background: var(--code-bg);
-        padding: 1px 6px;
-        border-radius: 3px;
-    }
-
-    footer {
-        margin-top: auto;
-        padding-top: 16px;
-        border-top: 1px solid var(--border);
-    }
-
-    footer .muted {
-        color: var(--text-muted);
-        font-size: 0.85rem;
-        margin: 0;
-    }
-
-    footer a {
-        color: inherit;
-        text-decoration: underline;
-        text-decoration-color: var(--accent);
-        text-underline-offset: 3px;
+        overflow: hidden;
     }
 </style>
