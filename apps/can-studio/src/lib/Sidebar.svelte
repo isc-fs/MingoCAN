@@ -20,7 +20,7 @@
         <img src="/icon.png" alt="" />
         <div>
             <h1>ISC CAN Studio</h1>
-            <p class="muted">Tier 0a · adapters live</p>
+            <p class="muted">Tier 1 · bus monitor live</p>
         </div>
     </div>
 

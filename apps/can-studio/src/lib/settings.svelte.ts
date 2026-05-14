@@ -19,6 +19,7 @@ export interface Settings {
     adapter: AdapterSettings;
     flash: FlashSettings;
     liveData: LiveDataSettings;
+    busMonitor: BusMonitorSettings;
 }
 
 export interface AdapterSettings {
@@ -51,6 +52,17 @@ export interface LiveDataSettings {
     windowSeconds: number;
 }
 
+export interface BusMonitorSettings {
+    /** ID filter — comma-separated hex prefixes (e.g. "0x1A,0x20").
+     *  Empty string = show all. */
+    idFilter: string;
+    /** Max rows to retain in the Live frames buffer before dropping
+     *  the oldest. Keeps the DOM bounded under heavy traffic. */
+    maxRows: number;
+    /** Which tab to land on after a restart. */
+    activeTab: 'live' | 'byId';
+}
+
 // ---- Defaults ----
 
 export function defaultSettings(): Settings {
@@ -76,6 +88,11 @@ export function defaultSettings(): Settings {
         liveData: {
             rateHz: 10,
             windowSeconds: 60,
+        },
+        busMonitor: {
+            idFilter: '',
+            maxRows: 5000,
+            activeTab: 'byId',
         },
     };
 }
