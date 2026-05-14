@@ -167,7 +167,10 @@ pub async fn live_data_start(
 
     let mut subscriber = session.subscribe_notifications();
 
-    match session.send_command(&cmd_live_data_start(request.rate_hz)).await {
+    match session
+        .send_command(&cmd_live_data_start(request.rate_hz))
+        .await
+    {
         Ok(Response::Ack { .. }) => {}
         Ok(Response::Nack {
             rejected_opcode,
