@@ -116,6 +116,25 @@ demand.
 CI runs this step automatically before `cargo check` so the workflow is
 self-contained.
 
+## macOS Gatekeeper note
+
+The macOS bundles are **ad-hoc signed** (`bundle.macOS.signingIdentity: "-"` in
+`tauri.conf.json`) but not notarised through Apple — the team isn't paying for
+the Developer Program. On first launch macOS Gatekeeper shows
+*"… developer cannot be verified"*; the operator opens the app in `Applications`
+via **right-click → Open → confirm** and subsequent launches work normally.
+
+If Gatekeeper instead says *"… is damaged and can't be opened"* (typically
+caused by a stale download or by an older bundle that pre-dates the ad-hoc
+signing), strip the quarantine attribute manually:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/ISC CAN Studio.app"
+```
+
+The proper long-term fix is signing with an Apple Developer ID + notarising;
+that's deferred until the friction warrants the $99/year + setup time.
+
 ## Releasing
 
 Official native bundles are produced by the [`ISC CAN Studio release`](../../.github/workflows/can-studio-release.yml)

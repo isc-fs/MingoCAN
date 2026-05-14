@@ -122,7 +122,7 @@ jobs:
 
             ### Install
 
-            - **macOS**: download the `.dmg`, drag the `.app` into Applications. First open will require **right-click → Open** (the bundle isn't notarised).
+            - **macOS**: download the `.dmg`, drag the `.app` into Applications. The bundle is **ad-hoc signed** but not notarised, so the first launch will hit Gatekeeper: **right-click the app in Applications → Open → confirm**. Subsequent launches work normally. If Gatekeeper still says "damaged" instead of "developer cannot be verified", strip the quarantine xattr: `xattr -dr com.apple.quarantine "/Applications/ISC CAN Studio.app"`.
             - **Linux**: download the `.deb` (`sudo apt install ./*.deb`) or the `.AppImage` (`chmod +x`, then run).
             - **Windows**: download the `.msi` (preferred) or the `.exe` installer.
 
