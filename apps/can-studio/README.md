@@ -7,9 +7,10 @@ covers in-editor flashing for developers; this app is the surface for everyone
 else — mechanics at a workbench, hardware engineers at a test bench, race-day
 operators in the pit.
 
-**Status: v0 scaffold.** Window comes up, frontend loads, two trivial
-`#[tauri::command]` calls prove the Rust ↔ JS bridge. Tier 0 (real features)
-lands in the next PR.
+**Status: v0.1 — Phase 0 complete.** All four workflow surfaces (Adapters,
+Flash, Diagnostics, Live data) plus a dedicated Settings view drive real
+`can-flasher` functionality. Selection + per-view config persists across
+restarts. Native file pickers wired in.
 
 ## Architecture
 
@@ -40,7 +41,7 @@ Same shape as the VS Code extension's evolution.
 
 | Tier | Surface | Status |
 |---|---|---|
-| **0** | Adapter picker, flash button, DTC viewer + clear, health, port the live-data chart | 🔜 next PR |
+| **0** | Adapters / Flash / Diagnostics / Live-data, persistent settings, native file pickers, Settings view | ✅ live (v0.1.0) |
 | **1** | Generic CAN bus monitor — live frame list, filter by ID, per-ID rate, pause / capture-to-file | 🔜 |
 | **2** | DBC file support — decoded signal column, dedicated Signals view, signal-trigger expressions | 🔜 |
 | **3** | Frame transmitter — single-shot + cyclic + signal-triggered sends | 🔜 |
@@ -114,6 +115,45 @@ demand.
 
 CI runs this step automatically before `cargo check` so the workflow is
 self-contained.
+
+## Releasing
+
+Official native bundles are produced by the [`ISC CAN Studio release`](../../.github/workflows/can-studio-release.yml)
+GitHub Actions workflow. To cut a new release:
+
+1. Bump `version` in all three places (kept in lockstep by the
+   `verify-version` gate):
+   - [`apps/can-studio/src-tauri/Cargo.toml`](src-tauri/Cargo.toml)
+   - [`apps/can-studio/package.json`](package.json)
+   - [`apps/can-studio/src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json)
+2. Land the bump through the normal feat-branch + PR flow.
+3. Push a tag of the form `can-studio-vX.Y.Z` matching the bumped version:
+   ```bash
+   git tag can-studio-v0.1.0
+   git push origin can-studio-v0.1.0
+   ```
+4. The workflow's three matrix jobs build natively on Ubuntu, macOS, and
+   Windows, then each one attaches its platform-specific bundles to a single
+   GitHub Release tagged `can-studio-v…`. Bundles produced:
+   - macOS: `.dmg` + `.app` (inside the dmg)
+   - Linux: `.deb` + `.AppImage`
+   - Windows: `.msi` (preferred) + `.exe` installer
+5. Team members install from the Release page.
+
+Manual dispatch (`Run workflow` button on the Actions UI) builds the bundles
+as workflow artifacts without creating a Release — useful for testing a
+build before tagging.
+
+### Tag-space separation
+
+| Tag pattern | Workflow | Produces |
+|---|---|---|
+| `v*` | [release.yml](../../.github/workflows/release.yml) | Rust `can-flasher` binaries |
+| `editor-v*` | [editor-release.yml](../../.github/workflows/editor-release.yml) | VS Code extension `.vsix` |
+| `can-studio-v*` | [can-studio-release.yml](../../.github/workflows/can-studio-release.yml) | ISC CAN Studio native bundles |
+
+None of the three trigger the others. A CLI release, an extension release,
+and a Studio release can all ship on the same day without interfering.
 
 ## Repository layout
 
