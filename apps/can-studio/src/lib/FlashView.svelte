@@ -9,6 +9,7 @@
 <script lang="ts">
     import { onDestroy } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
+    import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
     import {
         onFlashEvent,
@@ -129,6 +130,32 @@
         }
     }
 
+    async function browseForArtifact(): Promise<void> {
+        const picked = await openDialog({
+            title: 'Pick a firmware artifact',
+            multiple: false,
+            directory: false,
+            filters: [
+                { name: 'Firmware', extensions: ['elf', 'hex', 'bin'] },
+                { name: 'All files', extensions: ['*'] },
+            ],
+        });
+        if (typeof picked === 'string' && picked.length > 0) {
+            settings.flash.artifactPath = picked;
+        }
+    }
+
+    async function browseForBuildCwd(): Promise<void> {
+        const picked = await openDialog({
+            title: 'Pick a build working directory',
+            multiple: false,
+            directory: true,
+        });
+        if (typeof picked === 'string' && picked.length > 0) {
+            settings.flash.buildCwd = picked;
+        }
+    }
+
     function formatLogLine(event: FlashEvent): string {
         switch (event.kind) {
             case 'build_line':
@@ -171,12 +198,17 @@
     <div class="form">
         <div class="row">
             <label for="artifact">Firmware artifact</label>
-            <input
-                id="artifact"
-                type="text"
-                placeholder="/abs/path/to/firmware.elf"
-                bind:value={settings.flash.artifactPath}
-            />
+            <div class="input-with-button">
+                <input
+                    id="artifact"
+                    type="text"
+                    placeholder="/abs/path/to/firmware.elf"
+                    bind:value={settings.flash.artifactPath}
+                />
+                <button type="button" class="browse" onclick={browseForArtifact}>
+                    Browse…
+                </button>
+            </div>
         </div>
 
         <div class="row">
@@ -191,12 +223,17 @@
 
         <div class="row">
             <label for="buildcwd">Build working directory</label>
-            <input
-                id="buildcwd"
-                type="text"
-                placeholder="(defaults to artifact's parent)"
-                bind:value={settings.flash.buildCwd}
-            />
+            <div class="input-with-button">
+                <input
+                    id="buildcwd"
+                    type="text"
+                    placeholder="(defaults to artifact's parent)"
+                    bind:value={settings.flash.buildCwd}
+                />
+                <button type="button" class="browse" onclick={browseForBuildCwd}>
+                    Browse…
+                </button>
+            </div>
         </div>
 
         <div class="row-three">
@@ -313,6 +350,22 @@
         background: var(--surface);
     }
     .row { display: flex; flex-direction: column; gap: 4px; }
+    .input-with-button {
+        display: flex;
+        gap: 6px;
+    }
+    .input-with-button input { flex: 1; }
+    .browse {
+        white-space: nowrap;
+        padding: 6px 12px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        border-radius: 4px;
+        font-size: 0.85rem;
+        cursor: pointer;
+    }
+    .browse:hover { border-color: var(--accent); color: var(--accent); }
     .row-three {
         display: grid;
         grid-template-columns: repeat(3, 1fr);

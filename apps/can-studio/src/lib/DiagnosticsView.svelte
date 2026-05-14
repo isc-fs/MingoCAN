@@ -9,6 +9,8 @@
     storage does).
 -->
 <script lang="ts">
+    import { ask } from '@tauri-apps/plugin-dialog';
+
     import {
         clearDtcs,
         formatUptime,
@@ -82,11 +84,14 @@
     async function doClearDtcs(): Promise<void> {
         const request = buildRequest();
         if (request === null) return;
-        // Native confirm() works inside a Tauri webview; for a more
-        // polished modal we'd reach for @tauri-apps/plugin-dialog.
-        // Good enough for v0.
-        const ok = confirm(
+        const ok = await ask(
             'Clear every DTC entry on the device? This cannot be undone.',
+            {
+                title: 'Clear DTCs',
+                kind: 'warning',
+                okLabel: 'Clear',
+                cancelLabel: 'Cancel',
+            },
         );
         if (!ok) return;
 
