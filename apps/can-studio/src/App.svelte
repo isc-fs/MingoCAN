@@ -10,7 +10,12 @@
     import { onMount } from 'svelte';
 
     import { defaultAppState, type ViewId } from './lib/stores';
-    import { loadSettings, registerAutosaveEffect } from './lib/settings.svelte';
+    import {
+        loadSettings,
+        registerAutosaveEffect,
+        registerDbcAutoloadEffect,
+    } from './lib/settings.svelte';
+    import { loadDbc, unloadDbc } from './lib/dbc';
 
     import Sidebar from './lib/Sidebar.svelte';
     import AdaptersView from './lib/AdaptersView.svelte';
@@ -18,6 +23,7 @@
     import DiagnosticsView from './lib/DiagnosticsView.svelte';
     import LiveDataView from './lib/LiveDataView.svelte';
     import BusMonitorView from './lib/BusMonitorView.svelte';
+    import SignalsView from './lib/SignalsView.svelte';
     import SettingsView from './lib/SettingsView.svelte';
 
     let activeView = $state<ViewId>(defaultAppState().activeView);
@@ -36,6 +42,7 @@
     // safe even before loadSettings completes because the effect
     // no-ops while `loaded` is false (see settings.svelte.ts).
     registerAutosaveEffect();
+    registerDbcAutoloadEffect({ load: loadDbc, unload: unloadDbc });
 </script>
 
 <div class="shell">
@@ -54,6 +61,8 @@
             <LiveDataView />
         {:else if activeView === 'busMonitor'}
             <BusMonitorView />
+        {:else if activeView === 'signals'}
+            <SignalsView />
         {:else if activeView === 'settings'}
             <SettingsView navigateTo={selectView} />
         {/if}

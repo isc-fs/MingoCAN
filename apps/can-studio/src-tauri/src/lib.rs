@@ -10,6 +10,7 @@
 // `live_data_stop` (streamed snapshots).
 
 mod bus_monitor;
+mod dbc;
 mod diagnose;
 mod flash;
 mod live_data;
@@ -47,6 +48,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(live_data::LiveDataState::default())
         .manage(bus_monitor::BusMonitorState::default())
+        .manage(dbc::DbcState::default())
         .invoke_handler(tauri::generate_handler![
             can_flasher_version,
             discover_adapters,
@@ -61,7 +63,11 @@ pub fn run() {
             bus_monitor::bus_monitor_start,
             bus_monitor::bus_monitor_stop,
             bus_monitor::bus_monitor_capture_start,
-            bus_monitor::bus_monitor_capture_stop
+            bus_monitor::bus_monitor_capture_stop,
+            dbc::dbc_load,
+            dbc::dbc_unload,
+            dbc::dbc_status,
+            dbc::dbc_signals
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC CAN Studio Tauri app");
