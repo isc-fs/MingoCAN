@@ -22,15 +22,19 @@
 <script lang="ts">
     import { onDestroy } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
+    import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 
     import {
         formatData,
         formatId,
         formatTs,
+        onBusMonitorCapture,
         onBusMonitorFrame,
         onBusMonitorStatus,
         startBusMonitor,
+        startBusMonitorCapture,
         stopBusMonitor,
+        stopBusMonitorCapture,
         type BusMonitorFrame,
         type BusMonitorRequest,
     } from './bus_monitor';
@@ -82,6 +86,15 @@
 
     let unlistenFrame: UnlistenFn | null = null;
     let unlistenStatus: UnlistenFn | null = null;
+    let unlistenCapture: UnlistenFn | null = null;
+
+    // Capture-to-file state. `path` non-null means a capture is
+    // active; the backend drives transitions via `bus_monitor:capture`
+    // events. `frames` updates on a debounced Progress cadence.
+    let captureActive = $state<boolean>(false);
+    let capturePath = $state<string | null>(null);
+    let captureFrames = $state<number>(0);
+    let captureError = $state<string | null>(null);
 
     // ---- ID filter ----
 
@@ -199,6 +212,24 @@
                     status = 'error';
                 }
             });
+            unlistenCapture = await onBusMonitorCapture((evt) => {
+                if (evt.kind === 'started') {
+                    captureActive = true;
+                    capturePath = evt.path;
+                    captureFrames = 0;
+                    captureError = null;
+                } else if (evt.kind === 'stopped') {
+                    captureActive = false;
+                    capturePath = evt.path;
+                    captureFrames = evt.frames;
+                } else if (evt.kind === 'progress') {
+                    capturePath = evt.path;
+                    captureFrames = evt.frames;
+                } else if (evt.kind === 'error') {
+                    captureError = evt.message;
+                    captureActive = false;
+                }
+            });
 
             const payload: BusMonitorRequest = {
                 interface: settings.adapter.interface,
@@ -237,6 +268,51 @@
         if (unlistenStatus !== null) {
             unlistenStatus();
             unlistenStatus = null;
+        }
+        if (unlistenCapture !== null) {
+            unlistenCapture();
+            unlistenCapture = null;
+        }
+    }
+
+    // ---- Capture-to-file ----
+
+    async function toggleCapture(): Promise<void> {
+        if (captureActive) {
+            try {
+                await stopBusMonitorCapture();
+            } catch (err) {
+                captureError = err instanceof Error ? err.message : String(err);
+            }
+            return;
+        }
+        // Open the native save dialog. Default filename includes
+        // the current timestamp so operators don't accidentally
+        // clobber a previous capture.
+        const now = new Date();
+        const pad = (n: number): string => n.toString().padStart(2, '0');
+        const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+        const defaultName = `can-capture-${stamp}.log`;
+        let picked: string | null = null;
+        try {
+            picked = await saveDialog({
+                title: 'Save CAN capture',
+                defaultPath: defaultName,
+                filters: [
+                    { name: 'candump log', extensions: ['log'] },
+                    { name: 'All files', extensions: ['*'] },
+                ],
+            });
+        } catch (err) {
+            captureError = err instanceof Error ? err.message : String(err);
+            return;
+        }
+        if (picked === null) return; // user cancelled
+
+        try {
+            await startBusMonitorCapture(picked);
+        } catch (err) {
+            captureError = err instanceof Error ? err.message : String(err);
         }
     }
 
@@ -312,6 +388,19 @@
             >
                 Clear
             </button>
+            <button
+                type="button"
+                class="capture-btn"
+                class:active={captureActive}
+                disabled={status === 'idle' || status === 'error'
+                    || status === 'starting' || status === 'stopping'}
+                onclick={toggleCapture}
+                title={captureActive
+                    ? `Stop saving (writing to ${capturePath})`
+                    : 'Save every received frame to a candump-format file'}
+            >
+                {captureActive ? '⏺ Stop saving' : 'Save…'}
+            </button>
         </div>
 
         <div class="filter">
@@ -336,8 +425,18 @@
                     dropped&nbsp;<strong>{droppedFrames}</strong>
                 </span>
             {/if}
+            {#if captureActive}
+                <span class="stat capturing" title={capturePath ?? undefined}>
+                    <strong class="status-dot running">⏺</strong>
+                    capturing&nbsp;<strong>{captureFrames}</strong>
+                </span>
+            {/if}
         </div>
     </div>
+
+    {#if captureError !== null}
+        <div class="error">Capture: {captureError}</div>
+    {/if}
 
     {#if error !== null}
         <div class="error">{error}</div>
@@ -506,6 +605,15 @@
     }
     button.primary:hover:not(:disabled) { filter: brightness(1.05); color: #1a1a1a; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.capture-btn.active {
+        border-color: var(--error);
+        color: var(--error);
+    }
+    button.capture-btn.active:hover {
+        color: var(--error);
+        filter: brightness(1.1);
+    }
+    .stat.capturing strong { color: var(--error); }
     .error {
         padding: 10px 14px;
         border: 1px solid var(--error);
