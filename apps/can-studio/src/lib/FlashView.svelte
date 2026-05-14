@@ -7,7 +7,7 @@
     + per-run options live in `settings.flash`.
 -->
 <script lang="ts">
-    import { onDestroy } from 'svelte';
+    import { onDestroy, tick } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
     import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -32,8 +32,40 @@
     let progressMessage = $state<string>('');
     let result = $state<JsonReport | null>(null);
     let error = $state<string | null>(null);
+    // Track which side of "done" the last run landed on so the
+    // status indicator can show a clear green/red badge instead
+    // of relying on the operator reading the log to figure it
+    // out. null means "no run yet" or "currently running".
+    let lastOutcome = $state<'success' | 'failure' | null>(null);
+    let copyState = $state<'idle' | 'copied'>('idle');
 
     let unlisten: UnlistenFn | null = null;
+
+    // Log scroll behaviour — terminal-style follow-tail. When the
+    // user is already at (or within 24px of) the bottom of the
+    // log, we auto-scroll on every new line so they see live
+    // output. The moment they scroll up to read something, we
+    // stop following so they're not yanked away mid-read.
+    let logEl: HTMLDivElement | null = $state(null);
+    let followTail = $state<boolean>(true);
+
+    function onLogScroll(): void {
+        if (logEl === null) return;
+        const distanceFromBottom =
+            logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight;
+        followTail = distanceFromBottom < 24;
+    }
+
+    async function maybeFollowTail(): Promise<void> {
+        if (!followTail || logEl === null) return;
+        await tick();
+        if (logEl !== null) logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function resetLog(): void {
+        log = [];
+        followTail = true;
+    }
 
     // STM32-CMake convention: out-of-tree build under <cwd>/build/,
     // with the .elf named after the CMake `project()` directive,
@@ -85,15 +117,17 @@
         }
 
         running = true;
-        log = [];
+        resetLog();
         progressMessage = 'starting…';
         result = null;
         error = null;
+        lastOutcome = null;
 
         unlisten = await onFlashEvent((event) => {
             log = [...log, formatLogLine(event)];
             const msg = formatProgress(event);
             if (msg !== null) progressMessage = msg;
+            void maybeFollowTail();
         });
 
         try {
@@ -128,9 +162,11 @@
             const report = await runFlash(payload);
             result = report;
             progressMessage = `done in ${report.duration_ms} ms`;
+            lastOutcome = 'success';
         } catch (err) {
             error = err instanceof Error ? err.message : String(err);
             progressMessage = 'failed';
+            lastOutcome = 'failure';
         } finally {
             running = false;
             if (unlisten !== null) {
@@ -153,13 +189,15 @@
         }
 
         running = true;
-        log = [];
+        resetLog();
         progressMessage = 'starting build…';
         result = null;
         error = null;
+        lastOutcome = null;
 
         unlisten = await onFlashEvent((event) => {
             log = [...log, formatLogLine(event)];
+            void maybeFollowTail();
         });
 
         try {
@@ -169,6 +207,7 @@
                     : null;
             await runBuildOnly(cmd, buildCwd);
             progressMessage = 'build done';
+            lastOutcome = 'success';
             // Best-effort: if the operator hasn't pointed Flash at
             // an artifact yet, derive one from the cwd so the next
             // click on Build & Flash / Flash skip-build finds it.
@@ -179,6 +218,7 @@
         } catch (err) {
             error = err instanceof Error ? err.message : String(err);
             progressMessage = 'failed';
+            lastOutcome = 'failure';
         } finally {
             running = false;
             if (unlisten !== null) {
@@ -191,6 +231,24 @@
     onDestroy(() => {
         if (unlisten !== null) unlisten();
     });
+
+    // Copy the entire log buffer to the system clipboard. The
+    // navigator.clipboard.writeText API resolves regardless of
+    // length; failures (denied permission, e.g.) flip back to
+    // 'idle' so the user can retry. The 'copied' state holds for
+    // 1.5s to give visual feedback.
+    async function copyLog(): Promise<void> {
+        if (log.length === 0) return;
+        try {
+            await navigator.clipboard.writeText(log.join('\n'));
+            copyState = 'copied';
+            setTimeout(() => {
+                copyState = 'idle';
+            }, 1500);
+        } catch {
+            copyState = 'idle';
+        }
+    }
 
     function formatProgress(event: FlashEvent): string | null {
         switch (event.kind) {
@@ -432,8 +490,32 @@
     </div>
 
     {#if running || progressMessage.length > 0}
-        <div class="progress" class:running>
-            <strong>{running ? '●' : '○'}</strong>
+        <!--
+            Status badge — three visual states, so an operator at
+            the bench can tell at a glance whether the last action
+            succeeded or failed without parsing the log:
+              running  → amber pulse dot
+              success  → green check
+              failure  → red cross
+              idle     → muted ring (initial state before any run)
+        -->
+        <div
+            class="progress"
+            class:running
+            class:success={!running && lastOutcome === 'success'}
+            class:failure={!running && lastOutcome === 'failure'}
+        >
+            <strong class="status-icon">
+                {#if running}
+                    ●
+                {:else if lastOutcome === 'success'}
+                    ✓
+                {:else if lastOutcome === 'failure'}
+                    ✕
+                {:else}
+                    ○
+                {/if}
+            </strong>
             <span>{progressMessage}</span>
         </div>
     {/if}
@@ -453,7 +535,35 @@
     {/if}
 
     {#if log.length > 0}
-        <pre class="log">{log.join('\n')}</pre>
+        <div class="log-wrap">
+            <div class="log-header">
+                <span class="log-count">{log.length} line{log.length === 1 ? '' : 's'}</span>
+                <button
+                    type="button"
+                    class="copy-btn"
+                    onclick={copyLog}
+                    title="Copy the full log buffer to the clipboard"
+                >
+                    {copyState === 'copied' ? '✓ Copied' : 'Copy log'}
+                </button>
+            </div>
+            <!--
+                Per-line rendering instead of `{log.join('\n')}` in one <pre>:
+                each line is its own DOM node, so the browser's diff algorithm
+                only appends new children rather than rebuilding the whole
+                text. That preserves scroll position during chatty builds
+                (e.g. gcc with -W warnings firing dozens of lines a second).
+            -->
+            <div
+                class="log"
+                bind:this={logEl}
+                onscroll={onLogScroll}
+            >
+                {#each log as line, i (i)}
+                    <div class="log-line">{line}</div>
+                {/each}
+            </div>
+        </div>
     {/if}
 </div>
 
@@ -565,15 +675,43 @@
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     .progress {
         display: flex;
-        gap: 8px;
+        align-items: center;
+        gap: 10px;
         padding: 10px 14px;
         border: 1px solid var(--border);
         background: var(--surface);
         border-radius: 6px;
         font-family: var(--font-mono);
         font-size: 0.85rem;
+        transition: border-color 0.2s ease, background 0.2s ease;
     }
-    .progress.running strong { color: var(--accent); }
+    .status-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 18px;
+        line-height: 1;
+        font-size: 0.95rem;
+    }
+    .progress.running .status-icon {
+        color: var(--accent);
+        animation: pulse 1.2s ease-in-out infinite;
+    }
+    .progress.success {
+        border-color: #06d6a0;
+        background: rgba(6, 214, 160, 0.08);
+    }
+    .progress.success .status-icon { color: #06d6a0; font-weight: 700; }
+    .progress.failure {
+        border-color: var(--error);
+        background: rgba(255, 115, 115, 0.08);
+    }
+    .progress.failure .status-icon { color: var(--error); font-weight: 700; }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+    }
     .error {
         padding: 10px 14px;
         border: 1px solid var(--error);
@@ -589,17 +727,53 @@
         background: rgba(6, 214, 160, 0.08);
         font-size: 0.9rem;
     }
+    .log-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+    }
+    .log-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 6px 10px 6px 12px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        font-size: 0.75rem;
+        color: var(--text-muted);
+    }
+    .log-count {
+        font-family: var(--font-mono);
+    }
+    .copy-btn {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        padding: 3px 10px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        cursor: pointer;
+        font-family: inherit;
+        transition: all 0.15s ease;
+    }
+    .copy-btn:hover:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
     .log {
         margin: 0;
         max-height: 320px;
         overflow: auto;
         padding: 12px;
         background: var(--bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
         font-family: var(--font-mono);
         font-size: 0.8rem;
         line-height: 1.5;
+    }
+    .log-line {
         white-space: pre-wrap;
         word-break: break-all;
     }
