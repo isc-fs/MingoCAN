@@ -20,7 +20,7 @@
         <img src="/icon.png" alt="" />
         <div>
             <h1>ISC CAN Studio</h1>
-            <p class="muted">Tier 1 complete · capture live</p>
+            <p class="muted">Tier 2 · DBC + Signals live</p>
         </div>
     </div>
 
