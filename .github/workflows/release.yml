@@ -89,9 +89,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_deps }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: ${{ matrix.target }}
+          toolchain: stable
+          target: ${{ matrix.target }}
+          cache: false
 
       - name: Build release binary
         run: cargo build --release --bin can-flasher --target ${{ matrix.target }}
