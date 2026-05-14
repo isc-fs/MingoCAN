@@ -1,0 +1,64 @@
+[package]
+name        = "can-studio"
+version     = "0.1.3"
+edition     = "2021"
+rust-version = "1.95"
+description = "ISC CAN Studio — desktop application for flashing, monitoring, and debugging CAN messages."
+license     = "MIT"
+repository  = "https://github.com/isc-fs/can-flasher"
+publish     = false
+
+# We're a binary (Tauri's runtime is the entry point). `tauri-build`
+# wires the bundler's resources at compile time via a build.rs;
+# without it, `cargo build` would still compile but the produced
+# binary wouldn't find its frontend assets.
+[[bin]]
+name = "can-studio"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri 2 — the desktop application framework. The default features
+# pull in the bundler integration; we add the macOS-private-api
+# escape hatch only if we ever need it.
+tauri = { version = "2", features = [] }
+
+# Persistent key-value store, JSON-backed. Used for adapter
+# selection, flash defaults, and live-data view config — anything
+# operators expect to survive an app restart. Filesystem location
+# is platform-managed by the plugin (AppConfig on each OS).
+tauri-plugin-store = { version = "2" }
+
+# Native file / folder pickers + modal dialogs (replaces the
+# browser-native `confirm()` we were using for clear-DTC). Used by
+# the Flash view's Browse… buttons to resolve firmware artifact +
+# build-cwd paths.
+tauri-plugin-dialog = { version = "2" }
+
+# Reuse the can-flasher protocol + transport + flash code by path.
+# The Tauri commands wrap these crates directly (no shell-out tax)
+# — same Rust on both sides of the IPC bridge.
+can-flasher = { path = "../../.." }
+
+# Async runtime. Tauri commands are async-capable; we want a real
+# multi-threaded scheduler so the flash pipeline + a future bus
+# monitor can run concurrently.
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util"] }
+
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow     = "1.0"
+thiserror  = "2.0"
+tracing    = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Release profile mirrors the can-flasher binary's: thin LTO, single
+# codegen unit, stripped symbols, panic=abort. Keeps the .app /
+# .AppImage / .msi small.
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+panic         = "abort"

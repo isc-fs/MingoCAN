@@ -1,0 +1,150 @@
+/* ISC CAN — live-data webview styles.
+   Uses VS Code's CSS variables so light / dark / high-contrast themes
+   carry through without per-theme overrides. */
+
+:root {
+    color-scheme: light dark;
+}
+
+body {
+    margin: 0;
+    padding: 12px 16px;
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    color: var(--vscode-foreground);
+    background: var(--vscode-editor-background);
+}
+
+.toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+button {
+    padding: 4px 12px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: 1px solid transparent;
+    border-radius: 2px;
+    cursor: pointer;
+    font: inherit;
+}
+
+button:hover:not(:disabled) {
+    background: var(--vscode-button-hoverBackground);
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+button.secondary {
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+}
+
+button.secondary:hover:not(:disabled) {
+    background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.status {
+    margin-left: auto;
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+}
+
+.status.running::before {
+    content: "● ";
+    color: var(--vscode-testing-iconPassed, #4caf50);
+}
+
+.status.error::before {
+    content: "● ";
+    color: var(--vscode-errorForeground);
+}
+
+.status.idle::before,
+.status.stopped::before {
+    content: "○ ";
+    color: var(--vscode-descriptionForeground);
+}
+
+.indicators {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 10px 0;
+}
+
+.pill {
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 0.85em;
+    background: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    border: 1px solid var(--vscode-panel-border);
+}
+
+.pill.on {
+    background: var(--vscode-testing-iconPassed, #198a3c);
+    color: #fff;
+    border-color: transparent;
+}
+
+.pill.off {
+    background: transparent;
+    color: var(--vscode-descriptionForeground);
+}
+
+.pill.warn {
+    background: var(--vscode-statusBarItem-warningBackground, #f5a623);
+    color: var(--vscode-statusBarItem-warningForeground, #000);
+}
+
+.counters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 8px;
+    margin: 10px 0 16px;
+}
+
+.counter {
+    padding: 8px 12px;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 4px;
+}
+
+.counter .label {
+    font-size: 0.8em;
+    color: var(--vscode-descriptionForeground);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.counter .value {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 1.3em;
+    margin-top: 2px;
+}
+
+.chart-wrap {
+    position: relative;
+    height: 320px;
+    margin-top: 8px;
+}
+
+canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.empty {
+    text-align: center;
+    color: var(--vscode-descriptionForeground);
+    padding: 60px 0;
+}

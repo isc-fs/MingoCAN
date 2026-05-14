@@ -1,0 +1,102 @@
+name: ISC CAN Studio CI
+
+# Compile + bundle smoke check for the Tauri desktop app.
+# Runs only when the app's own files change — the main Rust CI
+# (ci.yml) and the editor CI (editor-ci.yml) have inverse paths
+# filters, so the three never overlap and a PR that doesn't touch
+# the Studio doesn't pay the cross-platform Tauri build tax.
+#
+# Matrix: ubuntu-latest, macos-latest, windows-latest — all three
+# target platforms get exercised on every PR that changes the app.
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'apps/can-studio/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/can-studio-ci.yml'
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - 'apps/can-studio/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/can-studio-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: can-studio-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            apt_deps: >-
+              libwebkit2gtk-4.1-dev
+              libgtk-3-dev
+              libayatana-appindicator3-dev
+              librsvg2-dev
+              libudev-dev
+              pkg-config
+          - os: macos-latest
+            apt_deps: ''
+          - os: windows-latest
+            apt_deps: ''
+    defaults:
+      run:
+        working-directory: apps/can-studio
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux WebKit / GTK build deps
+        if: matrix.apt_deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_deps }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The workspace root lives at the repo top; cache its
+          # target/ directory rather than the apps/can-studio default.
+          workspaces: '. -> target'
+
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Generate platform icon variants
+        # `tauri-build` requires `icons/icon.ico` on Windows for the
+        # generated resource file (and `icon.icns` for macOS bundles).
+        # We commit only `icon.png` and let CI regenerate the rest
+        # via the bundled `@tauri-apps/cli`. Local devs run the same
+        # command once after first `npm install`.
+        run: npx --yes @tauri-apps/cli@^2 icon src-tauri/icons/icon.png
+
+      - name: Type-check Svelte sources
+        run: npm run check
+
+      - name: Build frontend (production)
+        run: npm run build
+
+      - name: Cargo check Tauri Rust crate
+        # `cargo build` for the full Tauri app produces a native
+        # bundle (.dmg / .deb / .msi) which is large and slow on
+        # every PR. The scaffold's check job verifies the crate
+        # compiles + links + the frontend builds; full bundling
+        # lands in a separate workflow when we cut a release.
+        run: cargo check -p can-studio
+        working-directory: ${{ github.workspace }}

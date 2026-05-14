@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities granted to the main ISC CAN Studio window. Keeps the surface minimal — only the plugins we actually invoke from the frontend (core + store).",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "store:default",
+    "dialog:default"
+  ]
+}

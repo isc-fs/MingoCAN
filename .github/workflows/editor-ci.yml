@@ -1,0 +1,59 @@
+name: Editor CI
+
+# TypeScript compile check for the VS Code extension at
+# `editor/vscode/`. Runs only when the extension's own files change
+# — the main Rust CI (ci.yml) doesn't touch this path tree, and
+# vice-versa. Cheap to add now that Tier A has real handlers; the
+# v0 sketch deliberately deferred it to avoid gating a no-op `tsc`.
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'editor/vscode/**'
+      - '.github/workflows/editor-ci.yml'
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - 'editor/vscode/**'
+      - '.github/workflows/editor-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: editor-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: editor/vscode
+
+jobs:
+  compile:
+    name: tsc compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          # No package-lock.json yet — `npm install` resolves
+          # devDependencies fresh. When the extension grows real
+          # runtime deps we'll commit a lockfile and switch to
+          # `npm ci` here.
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Verify extension manifest packages cleanly
+        # Catches packaging-time issues (.vscodeignore misconfig,
+        # missing engines/version fields, unresolved icon paths,
+        # …) without uploading the artifact anywhere. The `.vsix`
+        # is discarded; failures are what we care about.
+        run: |
+          npx --yes @vscode/vsce@^2.24.0 package --no-dependencies --out /tmp/extension.vsix
+          ls -lh /tmp/extension.vsix

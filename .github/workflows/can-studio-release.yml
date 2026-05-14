@@ -1,0 +1,136 @@
+name: ISC CAN Studio release
+
+# Builds native ISC CAN Studio bundles and attaches them to a
+# GitHub Release. Triggered by `can-studio-v*` tags (e.g.
+# `can-studio-v0.1.0`); a `workflow_dispatch` entry is provided for
+# manual dry-runs from the Actions UI (artifacts only, no Release).
+#
+# Tag-space separation:
+#
+#   v*               → release.yml         (Rust can-flasher binaries)
+#   editor-v*        → editor-release.yml  (VS Code extension .vsix)
+#   can-studio-v*    → this file           (Tauri desktop bundles)
+#
+# None of the three trigger the others.
+
+on:
+  push:
+    tags:
+      - 'can-studio-v*'
+  workflow_dispatch:
+
+concurrency:
+  group: can-studio-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # Gate that catches `can-studio-v0.1.0 tag pushed but Cargo.toml
+  # still reads 0.0.1`. Same belt-and-braces pattern as release.yml
+  # (Rust binary) and editor-release.yml (VS Code extension).
+  verify-version:
+    name: verify tag matches Cargo.toml
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare versions
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME#can-studio-v}"
+          CARGO_VERSION=$(awk -F'"' '/^version/ {print $2; exit}' apps/can-studio/src-tauri/Cargo.toml)
+          if [[ "$TAG_NAME" != "$CARGO_VERSION" ]]; then
+            echo "::error::tag=${GITHUB_REF_NAME} implies version=${TAG_NAME}, but apps/can-studio/src-tauri/Cargo.toml reads ${CARGO_VERSION}. Bump Cargo.toml + package.json + tauri.conf.json to ${TAG_NAME} and retag (or delete the tag and re-cut)."
+            exit 1
+          fi
+          echo "✓ version ${CARGO_VERSION} matches tag ${GITHUB_REF_NAME}"
+
+  build:
+    name: build (${{ matrix.os }})
+    needs: verify-version
+    # Lets the job run when verify-version was skipped (manual dispatch).
+    # A tag-push where verify-version FAILED propagates and skips us.
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            apt_deps: >-
+              libwebkit2gtk-4.1-dev
+              libgtk-3-dev
+              libayatana-appindicator3-dev
+              librsvg2-dev
+              libudev-dev
+              pkg-config
+          - os: macos-latest
+            apt_deps: ''
+          - os: windows-latest
+            apt_deps: ''
+    defaults:
+      run:
+        working-directory: apps/can-studio
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux WebKit / GTK build deps
+        if: matrix.apt_deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_deps }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Workspace root lives at the repo top; cache its target/.
+          workspaces: '. -> target'
+
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Generate platform icon variants
+        # `tauri build` needs platform-specific icons; we ship only
+        # `icon.png` and regenerate the rest on every release run.
+        run: npx --yes @tauri-apps/cli@^2 icon src-tauri/icons/icon.png
+
+      # The official tauri-action handles `tauri build` + Release
+      # creation/upload in one step. Each matrix job appends its
+      # platform-specific bundles to the same GitHub Release tagged
+      # `can-studio-v…`. On manual dispatch (no tag) the action skips
+      # the Release-publish path and the bundles stay as workflow
+      # artifacts only.
+      - name: Build + attach to Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/can-studio
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: ISC CAN Studio ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          releaseBody: |
+            Native bundles for **ISC CAN Studio**. Distributed via GitHub Releases (not the public app stores).
+
+            ### Install
+
+            - **macOS**: download the `.dmg`, drag the `.app` into Applications. The bundle is **ad-hoc signed** but not notarised, so the first launch will hit Gatekeeper: **right-click the app in Applications → Open → confirm**. Subsequent launches work normally. If Gatekeeper still says "damaged" instead of "developer cannot be verified", strip the quarantine xattr: `xattr -dr com.apple.quarantine "/Applications/ISC CAN Studio.app"`.
+            - **Linux**: download the `.deb` (`sudo apt install ./*.deb`) or the `.AppImage` (`chmod +x`, then run).
+            - **Windows**: download the `.msi` (preferred) or the `.exe` installer.
+
+            ### Requirements
+
+            - **macOS 11+ / Ubuntu 22.04+ / Windows 10 1809+**
+            - A CAN adapter (SLCAN / SocketCAN / PCAN / Vector); see [adapter setup](https://github.com/isc-fs/can-flasher/blob/main/docs/INSTALL.md) in the CLI repo.
+
+            ### What's new
+
+            See [`apps/can-studio/README.md`](https://github.com/isc-fs/can-flasher/blob/main/apps/can-studio/README.md) for the feature surface, and the commit history for the per-release detail.

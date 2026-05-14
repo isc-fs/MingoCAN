@@ -1,0 +1,45 @@
+/* ISC CAN Studio — global styles.
+   Dark theme keyed to the same #F2B233 / #1F1F1F palette as the
+   extension icon and the VS Code-extension webview. CSS variables
+   so a future light-theme toggle is a one-place change. */
+
+:root {
+    color-scheme: dark;
+
+    --bg: #1f1f1f;
+    --surface: #262626;
+    --hover: #2f2f2f;
+    --border: #383838;
+    --code-bg: #2d2d2d;
+
+    --text: #ececec;
+    --text-muted: #999;
+    --error: #ff7373;
+
+    --accent: #f2b233;
+
+    --font-sans:
+        -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto,
+        'Helvetica Neue', Arial, sans-serif;
+    --font-mono:
+        ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas,
+        'Liberation Mono', monospace;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+    min-height: 100vh;
+}

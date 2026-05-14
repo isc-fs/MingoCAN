@@ -97,6 +97,14 @@ details, test suite, and branch conventions.
 
 ---
 
+## Editor integrations
+
+| Path | Status | What it does |
+|---|---|---|
+| [editor/vscode/](editor/vscode/) | 🔬 sketch (v0) | VS Code extension that wraps `cmake --build` + `can-flasher flash` into one command, plus device discovery, adapter picker, and (later) live-data + DTC panels. Shells out to `can-flasher --json` — never speaks the protocol directly. Internal ISC distribution only. |
+
+---
+
 ## Licence
 
 MIT, see [`Cargo.toml`](Cargo.toml).
