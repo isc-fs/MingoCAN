@@ -50,6 +50,7 @@ pub fn run() {
             discover_adapters,
             flash::flash,
             flash::build_only,
+            flash::read_cmake_presets,
             diagnose::health,
             diagnose::read_dtcs,
             diagnose::clear_dtcs,
