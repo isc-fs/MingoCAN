@@ -130,11 +130,29 @@
         }
     }
 
+    // Best-effort: when the user has already typed a path into
+    // the field, seed the picker there so they don't have to
+    // re-navigate the tree from $HOME every time.
+    function defaultPathForArtifact(): string | undefined {
+        const a = settings.flash.artifactPath.trim();
+        if (a.length > 0) return a;
+        const cwd = settings.flash.buildCwd.trim();
+        return cwd.length > 0 ? cwd : undefined;
+    }
+
+    function defaultPathForBuildCwd(): string | undefined {
+        const cwd = settings.flash.buildCwd.trim();
+        if (cwd.length > 0) return cwd;
+        const a = settings.flash.artifactPath.trim();
+        return a.length > 0 ? a : undefined;
+    }
+
     async function browseForArtifact(): Promise<void> {
         const picked = await openDialog({
             title: 'Pick a firmware artifact',
             multiple: false,
             directory: false,
+            defaultPath: defaultPathForArtifact(),
             filters: [
                 { name: 'Firmware', extensions: ['elf', 'hex', 'bin'] },
                 { name: 'All files', extensions: ['*'] },
@@ -146,10 +164,17 @@
     }
 
     async function browseForBuildCwd(): Promise<void> {
+        // On macOS the system folder picker shows files greyed
+        // out — that's the platform-native UX, not a bug. We
+        // make sure `directory: true` is set so only folders
+        // are *selectable*, and `canCreateDirectories` lets the
+        // operator make a fresh `build/` from inside the dialog.
         const picked = await openDialog({
             title: 'Pick a build working directory',
             multiple: false,
             directory: true,
+            canCreateDirectories: true,
+            defaultPath: defaultPathForBuildCwd(),
         });
         if (typeof picked === 'string' && picked.length > 0) {
             settings.flash.buildCwd = picked;
