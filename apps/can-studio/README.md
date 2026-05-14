@@ -7,33 +7,29 @@ covers in-editor flashing for developers; this app is the surface for everyone
 else — mechanics at a workbench, hardware engineers at a test bench, race-day
 operators in the pit.
 
-**Status: v0.1 — Phase 0 complete.** All four workflow surfaces (Adapters,
-Flash, Diagnostics, Live data) plus a dedicated Settings view drive real
-`can-flasher` functionality. Selection + per-view config persists across
-restarts. Native file pickers wired in.
+**Status: v0.3.0 — Tier 2 live.** Seven views in the sidebar — Adapters,
+Flash, Diagnostics, Live data, Bus monitor, Signals, Settings — driving
+real `can-flasher` functionality plus a generic CAN bus monitor with
+candump-format capture-to-file and DBC-decoded signal display.
+Per-view config + per-adapter DBC associations persist across restarts.
 
 ## Architecture
 
-```
-┌───────────────────────────────────────────────┐
-│  Tauri 2 native window (Mac / Linux / Win)    │
-│  ┌─────────────────────┐                      │
-│  │ Svelte 5 frontend   │  ← src/, index.html  │
-│  │ (TypeScript + Vite) │                      │
-│  └──────────┬──────────┘                      │
-│             │ tauri.invoke(…)                 │
-│  ┌──────────▼────────────────────────────┐    │
-│  │ Rust backend (src-tauri/)             │    │
-│  │ ├─ #[tauri::command] surface          │    │
-│  │ └─ embeds can-flasher crate by path   │    │
-│  │    → protocol/, transport/, flash/    │    │
-│  └───────────────────────────────────────┘    │
-└───────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph window["Tauri 2 native window — macOS / Linux / Windows"]
+        direction TB
+        fe["Svelte 5 frontend<br/>(TypeScript + Vite)<br/>src/, index.html"]
+        be["Rust backend<br/>src-tauri/<br/>#[tauri::command] surface"]
+        fe -- "tauri.invoke(…)" --> be
+        be -- "emit(event, payload)" --> fe
+    end
+    be --> crate["can-flasher crate<br/>(path dependency)<br/>protocol · transport · flash · firmware · session"]
 ```
 
 Same Rust on both sides of the IPC bridge — no shell-out tax, the bootloader
 protocol code is reused directly. When a new adapter or a new opcode lands in
-`can-flasher`, the Studio picks it up by a Cargo bump.
+`can-flasher`, Studio picks it up by a Cargo bump.
 
 ## Tier roadmap
 
@@ -47,9 +43,12 @@ Same shape as the VS Code extension's evolution.
 | **3** | Frame transmitter — single-shot + cyclic + signal-triggered sends | 🔜 |
 | **4** | Record / replay sessions (candump format), multi-channel scope-style charts | 🔜 |
 
-Tier 0 wraps existing CLI capability. Tier 1 is the inflection point where this
-becomes a real CAN tool — it needs a generic bus-monitor module in the Rust
-core (new crate or new module under `can-flasher`).
+Tier 0 wraps existing CLI capability. Tier 1 was the inflection where Studio
+became a real CAN tool — the bus monitor opens any of the five adapters in
+promiscuous mode and streams every frame to the UI, independent of the
+bootloader protocol. Tier 2 layered DBC decoding on top (per-adapter
+`.dbc` association, decoded signal stream, dedicated Signals view).
+Tier 3+ is on operator-feedback hold.
 
 ## Why Tauri
 
@@ -176,27 +175,51 @@ and a Studio release can all ship on the same day without interfering.
 
 ## Repository layout
 
-```
-apps/can-studio/
-├── README.md                  ← you are here
-├── package.json               ← frontend tooling + tauri CLI
-├── tsconfig.json
-├── vite.config.ts
-├── svelte.config.js
-├── index.html                 ← Vite entry
-├── public/icon.png            ← static asset served by Vite
-├── src/                       ← Svelte 5 frontend
-│   ├── main.ts
-│   ├── App.svelte
-│   └── app.css
-└── src-tauri/                 ← Rust backend (Tauri 2)
-    ├── Cargo.toml             ← member of the root workspace
-    ├── tauri.conf.json
-    ├── build.rs
-    ├── icons/icon.png
-    └── src/
-        ├── main.rs            ← binary entry; calls into lib.rs
-        └── lib.rs             ← #[tauri::command] surface
+```mermaid
+mindmap
+  root((apps/can-studio))
+    Top-level
+      README.md
+      package.json · frontend tooling + tauri CLI
+      tsconfig.json
+      vite.config.ts
+      svelte.config.js
+      index.html · Vite entry
+      public/icon.png · static asset
+    src/ — Svelte 5 frontend
+      main.ts · app bootstrap
+      App.svelte · root layout + routing
+      app.css · global styles
+      lib/
+        Sidebar.svelte
+        AdaptersView.svelte
+        FlashView.svelte
+        DiagnosticsView.svelte
+        LiveDataView.svelte
+        BusMonitorView.svelte
+        SignalsView.svelte
+        SettingsView.svelte
+        settings.svelte.ts · persistent store + autosave
+        flash.ts · flash command wrapper
+        diagnose.ts · health / DTC wrappers
+        live_data.ts · live-data stream wrapper
+        bus_monitor.ts · bus monitor + capture wrappers
+        dbc.ts · DBC load + status + signals
+        stores.ts · ViewId + VIEWS
+        cli.ts / types.ts
+    src-tauri/ — Rust backend (Tauri 2)
+      Cargo.toml · workspace member
+      tauri.conf.json · bundle config
+      build.rs · tauri-build hook
+      icons/ · generated from icon.png
+      src/
+        main.rs · binary entry
+        lib.rs · plugin + state registration
+        flash.rs · flash + build-only commands
+        diagnose.rs · health + DTC commands
+        live_data.rs · live-data stream task
+        bus_monitor.rs · promiscuous capture + candump
+        dbc.rs · can-dbc parse + bit decoder
 ```
 
 ## License
