@@ -19,6 +19,14 @@ module-level architecture notes live in
 sequencing against the bootloader counterpart at
 [isc-fs/stm32-can-bootloader](https://github.com/isc-fs/stm32-can-bootloader).
 
+The two integration surfaces carry their own tier tables on their
+own release cadence (`v*` here ships the CLI; `editor-v*` ships the
+VS Code extension; `can-studio-v*` ships the desktop app):
+[apps/can-studio/README.md](../apps/can-studio/README.md) (Tier 2
+live, DBC + Signals view) and
+[editor/vscode/README.md](../editor/vscode/README.md)
+(v0 feature-complete).
+
 ## Phase summary
 
 | Phase | Title | Branches | Milestone tag |
