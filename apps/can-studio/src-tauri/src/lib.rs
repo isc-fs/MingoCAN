@@ -59,7 +59,9 @@ pub fn run() {
             live_data::live_data_start,
             live_data::live_data_stop,
             bus_monitor::bus_monitor_start,
-            bus_monitor::bus_monitor_stop
+            bus_monitor::bus_monitor_stop,
+            bus_monitor::bus_monitor_capture_start,
+            bus_monitor::bus_monitor_capture_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC CAN Studio Tauri app");

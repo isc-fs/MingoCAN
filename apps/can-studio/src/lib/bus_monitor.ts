@@ -63,6 +63,30 @@ export function onBusMonitorStatus(
     return listen<BusMonitorStatus>('bus_monitor:status', (e) => handler(e.payload));
 }
 
+// ---- Capture ----
+
+export type BusMonitorCaptureEvent =
+    | { kind: 'started'; path: string }
+    | { kind: 'stopped'; path: string; frames: number }
+    | { kind: 'progress'; path: string; frames: number }
+    | { kind: 'error'; message: string };
+
+export function startBusMonitorCapture(path: string): Promise<void> {
+    return invoke<void>('bus_monitor_capture_start', { request: { path } });
+}
+
+export function stopBusMonitorCapture(): Promise<void> {
+    return invoke<void>('bus_monitor_capture_stop');
+}
+
+export function onBusMonitorCapture(
+    handler: (event: BusMonitorCaptureEvent) => void,
+): Promise<UnlistenFn> {
+    return listen<BusMonitorCaptureEvent>('bus_monitor:capture', (e) =>
+        handler(e.payload),
+    );
+}
+
 // ---- Display helpers ----
 
 export function formatId(id: number): string {
