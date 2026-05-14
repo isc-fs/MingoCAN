@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use can_dbc::{ByteOrder, MessageId, ValueType, DBC};
+use can_dbc::{ByteOrder, Dbc, MessageId, NumericValue, ValueType};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
@@ -43,16 +43,16 @@ pub struct DbcState {
 impl DbcState {
     /// Snapshot the parsed DBC for borrow-free read-only use in
     /// the bus-monitor reader task. Returns `None` when no file
-    /// is loaded. The returned `Arc<DBC>` outlives the lock so
+    /// is loaded. The returned `Arc<Dbc>` outlives the lock so
     /// callers don't have to hold the mutex across decode work.
-    pub async fn snapshot(&self) -> Option<Arc<DBC>> {
+    pub async fn snapshot(&self) -> Option<Arc<Dbc>> {
         self.inner.lock().await.as_ref().map(|d| d.dbc.clone())
     }
 }
 
 struct LoadedDbc {
     path: PathBuf,
-    dbc: Arc<DBC>,
+    dbc: Arc<Dbc>,
     /// Eager (message_id, message_index) lookup so the reader
     /// task can hit O(1) on every frame regardless of DBC size.
     by_id: Arc<HashMap<u32, usize>>,
@@ -128,22 +128,19 @@ pub async fn dbc_load(
     // files ship with one and can-dbc is whitespace-tolerant but
     // not BOM-tolerant.
     let cleaned = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
-    let parsed = DBC::try_from(cleaned).map_err(|e| format!("parse DBC: {e:?}"))?;
+    let parsed = Dbc::try_from(cleaned).map_err(|e| format!("parse DBC: {e:?}"))?;
 
-    let mut by_id: HashMap<u32, usize> = HashMap::with_capacity(parsed.messages().len());
+    let mut by_id: HashMap<u32, usize> = HashMap::with_capacity(parsed.messages.len());
     let mut signal_count = 0usize;
-    for (idx, msg) in parsed.messages().iter().enumerate() {
-        let id = match msg.message_id() {
-            MessageId::Standard(s) => u32::from(*s),
-            MessageId::Extended(e) => *e,
-        };
+    for (idx, msg) in parsed.messages.iter().enumerate() {
+        let id = message_id_to_u32(&msg.id);
         by_id.insert(id, idx);
-        signal_count += msg.signals().len();
+        signal_count += msg.signals.len();
     }
 
     let summary = DbcSummary {
         path: path.display().to_string(),
-        message_count: parsed.messages().len(),
+        message_count: parsed.messages.len(),
         signal_count,
     };
 
@@ -172,8 +169,8 @@ pub async fn dbc_status(state: State<'_, DbcState>) -> Result<Option<DbcSummary>
     let slot = state.inner.lock().await;
     Ok(slot.as_ref().map(|d| DbcSummary {
         path: d.path.display().to_string(),
-        message_count: d.dbc.messages().len(),
-        signal_count: d.dbc.messages().iter().map(|m| m.signals().len()).sum(),
+        message_count: d.dbc.messages.len(),
+        signal_count: d.dbc.messages.iter().map(|m| m.signals.len()).sum(),
     }))
 }
 
@@ -187,26 +184,45 @@ pub async fn dbc_signals(state: State<'_, DbcState>) -> Result<Vec<SignalSchema>
         return Ok(vec![]);
     };
     let mut out = Vec::new();
-    for msg in d.dbc.messages() {
-        let mid = match msg.message_id() {
-            MessageId::Standard(s) => u32::from(*s),
-            MessageId::Extended(e) => *e,
-        };
-        for sig in msg.signals() {
+    for msg in &d.dbc.messages {
+        let mid = message_id_to_u32(&msg.id);
+        for sig in &msg.signals {
             out.push(SignalSchema {
-                signal_key: format!("{mid}|{name}", name = sig.name()),
+                signal_key: format!("{mid}|{}", sig.name),
                 message_id: mid,
-                message_name: msg.message_name().to_string(),
-                signal_name: sig.name().to_string(),
-                unit: sig.unit().to_string(),
-                factor: *sig.factor(),
-                offset: *sig.offset(),
-                min: *sig.min(),
-                max: *sig.max(),
+                message_name: msg.name.clone(),
+                signal_name: sig.name.clone(),
+                unit: sig.unit.clone(),
+                factor: sig.factor,
+                offset: sig.offset,
+                min: numeric_value_to_f64(&sig.min),
+                max: numeric_value_to_f64(&sig.max),
             });
         }
     }
     Ok(out)
+}
+
+/// `NumericValue` is `Uint(u64) | Int(i64) | Double(f64)`. The
+/// frontend wants a single f64 for the Range column; we widen
+/// integer variants. Tier 2.1 can shift to a tagged numeric if
+/// the precision loss bites.
+fn numeric_value_to_f64(v: &NumericValue) -> f64 {
+    match v {
+        NumericValue::Double(f) => *f,
+        NumericValue::Int(i) => *i as f64,
+        NumericValue::Uint(u) => *u as f64,
+    }
+}
+
+/// Flatten `MessageId::Standard(u16) | Extended(u32)` to the
+/// single u32 we use in the frontend's `signalKey`. Borrow-based
+/// pattern matching so we don't depend on `MessageId: Copy`.
+fn message_id_to_u32(id: &MessageId) -> u32 {
+    match id {
+        MessageId::Standard(s) => u32::from(*s),
+        MessageId::Extended(e) => *e,
+    }
 }
 
 // ---- Decoder ----
@@ -216,27 +232,27 @@ pub async fn dbc_signals(state: State<'_, DbcState>) -> Result<Vec<SignalSchema>
 /// the schema. The bus-monitor reader task calls this on every
 /// frame; the hot path is the `by_id.get(...)` lookup followed by
 /// a bounded loop over the message's signals.
-pub fn decode(dbc: &DBC, by_id: &HashMap<u32, usize>, frame: &CanFrame) -> Vec<DecodedSignal> {
+pub fn decode(dbc: &Dbc, by_id: &HashMap<u32, usize>, frame: &CanFrame) -> Vec<DecodedSignal> {
     let mid = u32::from(frame.id);
     let Some(&idx) = by_id.get(&mid) else {
         return vec![];
     };
-    let msg = match dbc.messages().get(idx) {
+    let msg = match dbc.messages.get(idx) {
         Some(m) => m,
         None => return vec![],
     };
-    let mut out = Vec::with_capacity(msg.signals().len());
-    for sig in msg.signals() {
+    let mut out = Vec::with_capacity(msg.signals.len());
+    for sig in &msg.signals {
         let raw = extract_bits(
             &frame.data,
-            *sig.start_bit() as u32,
-            *sig.signal_size() as u32,
-            sig.byte_order(),
-            sig.value_type(),
+            sig.start_bit as u32,
+            sig.size as u32,
+            &sig.byte_order,
+            &sig.value_type,
         );
-        let phys = raw * (*sig.factor()) + *sig.offset();
+        let phys = raw * sig.factor + sig.offset;
         out.push(DecodedSignal {
-            signal_key: format!("{mid}|{name}", name = sig.name()),
+            signal_key: format!("{mid}|{}", sig.name),
             value: phys,
         });
     }
@@ -325,7 +341,7 @@ fn extract_bits(
 /// Helper: borrow the indexed lookup map for the bus-monitor's
 /// hot path. The reader task takes one snapshot when DBC is
 /// loaded and uses it until DBC changes.
-pub async fn snapshot_lookup(state: &DbcState) -> Option<(Arc<DBC>, Arc<HashMap<u32, usize>>)> {
+pub async fn snapshot_lookup(state: &DbcState) -> Option<(Arc<Dbc>, Arc<HashMap<u32, usize>>)> {
     let slot = state.inner.lock().await;
     slot.as_ref().map(|d| (d.dbc.clone(), d.by_id.clone()))
 }
