@@ -372,10 +372,14 @@ async fn run_build(app: &AppHandle, command: &str, cwd: PathBuf) -> Result<(), S
     if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "build command exited with code {:?}",
-            status.code()
-        ))
+        // status.code() is None when the child was killed by a
+        // signal (Unix). Render that as "signal" rather than
+        // leaking the Option's Debug-form (`Some(1)`) to the UI.
+        let suffix = match status.code() {
+            Some(code) => format!("code {code}"),
+            None => "an uncaught signal".into(),
+        };
+        Err(format!("build command exited with {suffix}"))
     }
 }
 
