@@ -1,6 +1,6 @@
 [package]
 name        = "can-studio"
-version     = "0.1.2"
+version     = "0.1.3"
 edition     = "2021"
 rust-version = "1.95"
 description = "ISC CAN Studio — desktop application for flashing, monitoring, and debugging CAN messages."

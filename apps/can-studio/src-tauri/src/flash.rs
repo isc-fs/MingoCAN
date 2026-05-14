@@ -282,14 +282,43 @@ async fn run_build(app: &AppHandle, command: &str, cwd: PathBuf) -> Result<(), S
         },
     );
 
-    let (program, args) = if cfg!(target_os = "windows") {
-        ("cmd.exe", vec!["/c", command])
+    // Apps launched from a macOS GUI (Finder / Dock / Spotlight)
+    // inherit a *minimal* environment — PATH typically only contains
+    // /usr/bin:/bin:/usr/sbin:/sbin. Operator-installed tools like
+    // cmake / west / arm-none-eabi-gcc live under Homebrew's
+    // /opt/homebrew/bin or /usr/local/bin, which aren't on that
+    // PATH. Running the build command through `/bin/sh -c` would
+    // then fail with "command not found".
+    //
+    // Spawning the operator's login shell (`$SHELL -lc`) sources
+    // their shell rc / profile (~/.zprofile / ~/.bash_profile),
+    // which is where Homebrew's shellenv normally lives — so PATH
+    // matches what the operator sees in Terminal.
+    //
+    // Linux GUI sessions usually inherit a fuller environment, but
+    // the same approach is robust there too. Windows keeps the
+    // `cmd /c` shape it had before.
+    let (program, args): (String, Vec<String>) = if cfg!(target_os = "windows") {
+        (
+            "cmd.exe".into(),
+            vec!["/c".into(), command.to_string()],
+        )
     } else {
-        ("/bin/sh", vec!["-c", command])
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if cfg!(target_os = "macos") {
+                    "/bin/zsh".into()
+                } else {
+                    "/bin/bash".into()
+                }
+            });
+        (shell, vec!["-lc".into(), command.to_string()])
     };
 
-    let mut child = Command::new(program)
-        .args(args)
+    let mut child = Command::new(&program)
+        .args(&args)
         .current_dir(&cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
