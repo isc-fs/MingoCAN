@@ -13,61 +13,73 @@ For delivery sequencing see [ROADMAP.md](ROADMAP.md).
 
 ## Module tree
 
+```mermaid
+mindmap
+  root((can-flasher))
+    src/
+      lib.rs · pub mod declarations
+      main.rs · clap entry point
+      logging.rs · tracing bootstrap
+      cli/
+        mod.rs · Cli + GlobalFlags (clap)
+        adapters · list detected backends
+        flash · end-to-end programming
+        verify · readback CRC compare
+        discover · bus scan + device table
+        diagnose · DTC / log / live-data / health
+        config · NVM + option bytes + WRP
+        replay · candump record/play
+        send_raw · single raw frame
+      firmware/
+        mod.rs · Image + address validation
+        loader.rs · ELF / Intel HEX / .bin
+      flash/
+        mod.rs · FlashManager state machine
+      protocol/
+        mod.rs · CanFrame + ParseError
+        ids.rs · FrameId + MessageType
+        opcodes.rs · Command/Notify/Nack codes
+        isotp.rs · ISO-TP segment + reassemble
+        records.rs · FirmwareInfo + Health + Live + Dtc + ObStatus
+        commands.rs · typed payload builders
+        responses.rs · Response::parse
+      transport/
+        mod.rs · CanBackend trait + router
+        virtual_bus.rs · in-process loopback
+        stub_device.rs · bootloader simulator
+        slcan.rs · all OSes
+        socketcan.rs · Linux only
+        pcan.rs · Windows + macOS
+        vector.rs · Windows XL Driver Library
+      session/
+        mod.rs · handshake + keepalive + reconnect
+    tests/
+      virtual_pipeline.rs · end-to-end Session↔StubDevice
+      flash_manager.rs · FlashManager unit harness
+      *_subcommand.rs · one per CLI subcommand
+    .github/
+      roadmap.yaml · ROADMAP.md source of truth
+      scripts/render_roadmap.py
+      workflows/
+        ci.yml · fmt + clippy + matrix
+        release.yml · v* CLI binaries
+        editor-release.yml · editor-v* VSIX
+        can-studio-release.yml · can-studio-v* bundles
+        roadmap.yml · regenerates ROADMAP.md
 ```
-can-flasher/
-├── Cargo.toml              manifest + target-gated deps
-├── src/
-│   ├── lib.rs              pub mod declarations (library target)
-│   ├── main.rs             clap entry point (binary target)
-│   ├── logging.rs          tracing-subscriber bootstrap
-│   ├── cli/
-│   │   ├── mod.rs          Cli, Command, GlobalFlags (clap derive)
-│   │   ├── adapters.rs     enumerates backends, emits table or JSON
-│   │   ├── flash.rs        end-to-end firmware programming pipeline
-│   │   ├── verify.rs       readback CRC comparison against a binary
-│   │   ├── discover.rs     bus scan + bootloader-mode device table
-│   │   ├── diagnose.rs     DTC / log / live-data / health / reset
-│   │   ├── config.rs       NVM read/write + option bytes + WRP apply
-│   │   ├── replay.rs       candump record / playback
-│   │   └── send_raw.rs     single raw CAN frame (app-level commands)
-│   ├── firmware/
-│   │   ├── mod.rs          Image type + address-space validation
-│   │   └── loader.rs       ELF / Intel HEX / raw .bin loader
-│   ├── flash/
-│   │   └── mod.rs          FlashManager (sector-aware erase + diff + verify)
-│   ├── protocol/
-│   │   ├── mod.rs          CanFrame + ParseError + re-exports
-│   │   ├── ids.rs          FrameId + MessageType + HOST/BROADCAST
-│   │   ├── opcodes.rs      CommandOpcode, NotifyOpcode, NackCode, ResetMode
-│   │   ├── isotp.rs        IsoTpSegmenter + Reassembler
-│   │   ├── records.rs      FirmwareInfo, HealthRecord, LiveDataSnapshot, DtcEntry, ObStatus
-│   │   ├── commands.rs     typed payload builders (cmd_connect / cmd_flash_erase / …)
-│   │   └── responses.rs    Response::parse(message_type, bytes)
-│   ├── transport/
-│   │   ├── mod.rs          CanBackend trait + TransportError + open_backend router
-│   │   ├── virtual_bus.rs  VirtualBus + VirtualBackend + StubLoopback
-│   │   ├── stub_device.rs  StubDevice (minimum bootloader simulator)
-│   │   ├── slcan.rs        SlcanBackend (all OSes)
-│   │   ├── socketcan.rs    SocketCanBackend (Linux only)
-│   │   ├── pcan.rs         PcanBackend (Windows + macOS only)
-│   │   └── vector.rs       VectorBackend (Windows; XL Driver Library)
-│   └── session/
-│       └── mod.rs          Session (handshake, keepalive, reconnect, notifications)
-├── tests/
-│   ├── virtual_pipeline.rs end-to-end: host Session drives VirtualBus-paired StubDevice
-│   ├── flash_manager.rs    unit harness for the FlashManager state machine
-│   └── *_subcommand.rs     one integration test per CLI subcommand (config, diagnose,
-│                           discover, flash, replay, verify)
-└── .github/
-    ├── roadmap.yaml        source of truth for ROADMAP.md
-    ├── scripts/
-    │   └── render_roadmap.py
-    └── workflows/
-        ├── ci.yml                fmt + clippy + build/test matrix
-        ├── branch-issue.yml      auto-creates tracking issues on branch push
-        ├── close-on-dev-merge.yml auto-closes those issues on dev merge
-        └── roadmap.yml           regenerates ROADMAP.md on dev push
-```
+
+Two sibling integration paths live alongside the core crate, each with
+its own README:
+
+- [`apps/can-studio/`](apps/can-studio/) — Tauri 2 desktop app that
+  depends on the crate by path (no shell-out, no JSON parsing).
+  Reuses `transport/`, `protocol/`, `flash/`, `firmware/`, `session/`
+  directly; adds its own `bus_monitor.rs` + `dbc.rs` modules in its
+  Tauri command surface.
+- [`editor/vscode/`](editor/vscode/) — TypeScript VS Code extension
+  that does shell out (it ships independently and may target any
+  installed `can-flasher` binary), with vendored Chart.js for the
+  live-data + health panels.
 
 ---
 
@@ -199,10 +211,12 @@ Thin wrappers. Each subcommand:
 5. Formats the result as a human-readable table or JSON based on
    `--json`.
 
-Today `adapters` is the only subcommand that does real work. The
-rest return "not implemented" bails with a message naming the feat
-branch that'll implement them — visible to operators running the
-binary, not just to contributors.
+All eight subcommands are implemented as of v1.2.0 — `adapters`,
+`discover`, `diagnose`, `config`, `verify`, `replay`, `flash`, and
+`send-raw`. Each one is a thin wrapper around the protocol/session
+layer; new commands typically take a few hundred lines including
+their `--json` formatter and the integration test in
+`tests/*_subcommand.rs`.
 
 ### 5. `main.rs` + `lib.rs` — binary + library targets
 

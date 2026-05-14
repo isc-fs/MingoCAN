@@ -31,8 +31,10 @@ the bootloader repo is a bug in this file — fix this file first.
 
 ## Supported host adapters
 
-Three adapter families are supported. All three are first-class;
-none is a fallback. The CLI picks between them with `--interface`.
+Four hardware adapter families are supported, all first-class with
+no fallback hierarchy, plus a `virtual` in-process loopback for
+hardware-less CI and integration tests. The CLI picks between them
+with `--interface`.
 
 ### CANable (SLCAN firmware)
 
@@ -471,8 +473,9 @@ pub fn open_backend(
 |---|---|---|---|---|
 | `SlcanBackend` | All | No | No | Zero driver install |
 | `SocketCanBackend` | Linux | PCAN FD models | No | Native kernel socket |
-| `PcanBackend` | Win / macOS | PCAN FD models | Yes | Requires PEAK SDK |
-| `VirtualBackend` | All | No | No | CI and testing |
+| `PcanBackend` | Win / macOS | PCAN FD models | Yes | Requires PEAK SDK loaded at runtime via `libloading` |
+| `VectorBackend` | Win | Yes | Yes | XL Driver Library; VN1610 / VN16xx series. Loaded at runtime via `libloading`; Linux support deferred |
+| `VirtualBackend` | All | No | No | In-process loopback for CI and integration tests |
 
 ---
 
@@ -491,6 +494,7 @@ Commands:
   config      Read/write device configuration (NVM) and option bytes (WRP)
   replay      Record or replay a CAN session (testing)
   adapters    List detected CAN adapters on this machine
+  send-raw    Send one raw CAN frame (app-level reboot-to-BL, bench probes)
 ```
 
 No `debug` subcommand in v1: the bootloader does not expose
@@ -504,7 +508,7 @@ the deferred security scope. See [§ Deferred scope](#deferred-scope-v2-tied-to-
 ### Global flags
 
 ```
-  -i, --interface <TYPE>    CAN backend: slcan | socketcan | pcan | virtual
+  -i, --interface <TYPE>    CAN backend: slcan | socketcan | pcan | vector | virtual
   -c, --channel <CHANNEL>   Adapter channel (see format table below)
   -b, --bitrate <BPS>       Nominal CAN bitrate [default: 500000]
       --node-id <ID>        Target node ID hex or decimal [default: broadcast]
@@ -525,6 +529,7 @@ the deferred security scope. See [§ Deferred scope](#deferred-scope-v2-tied-to-
 | PCAN via SocketCAN | Linux | `can0` |
 | PCAN-Basic | Windows | `PCAN_USBBUS1` |
 | PCAN-Basic | macOS | `PCAN_USBBUS1` |
+| Vector XL | Windows | `0`, `1` (XL channel index, zero-based) |
 | Virtual | All | `vbus0` (ignored internally) |
 
 ### `adapters` subcommand
@@ -1211,77 +1216,85 @@ duration, result.
 
 ## Project layout
 
+```mermaid
+mindmap
+  root((can-flasher repo))
+    Top-level docs
+      Cargo.toml · manifest + target-gated deps
+      README.md
+      ARCHITECTURE.md · module-level notes
+      REQUIREMENTS.md · this file
+      ROADMAP.md · auto-generated from YAML
+    docs/
+      INSTALL.md · toolchain + per-OS adapter setup
+      USAGE.md · subcommand reference + examples
+      CONTRIBUTING.md · contributor guide
+      PERFORMANCE.md · flash-speed baseline + --profile
+    src/
+      lib.rs · pub mod declarations
+      main.rs · clap entry point
+      logging.rs · tracing-subscriber bootstrap
+      cli/
+        mod.rs · Cli + Command + GlobalFlags
+        adapters · enumerate detected adapters
+        flash · end-to-end programming
+        verify · readback CRC comparison
+        discover · bus scan + device table
+        diagnose · DTC / log / live-data / health
+        config · NVM + option bytes + WRP
+        replay · candump record/play
+        send_raw · single raw CAN frame
+      protocol/ · pure wire-format, no I/O
+        mod.rs · CanFrame + ParseError
+        ids.rs · FrameId + MessageType + node consts
+        opcodes.rs · Command/Notify/Nack codes
+        isotp.rs · ISO-TP segment + reassemble
+        records.rs · FirmwareInfo + Health + Live + Dtc + ObStatus
+        commands.rs · typed command builders
+        responses.rs · Response parser
+      transport/ · adapter I/O behind CanBackend trait
+        mod.rs · CanBackend + open_backend router
+        virtual_bus.rs · in-process loopback
+        stub_device.rs · bootloader simulator
+        slcan.rs · all OSes
+        socketcan.rs · Linux only
+        pcan.rs · Windows + macOS
+        vector.rs · Windows XL Driver Library
+      session/
+        mod.rs · handshake + keepalive + reconnect
+      firmware/
+        mod.rs · Image + address validation
+        loader.rs · ELF / Intel HEX / raw .bin
+      flash/
+        mod.rs · FlashManager sector map + diff + verify
+    tests/ · against VirtualBus + StubDevice
+      virtual_pipeline.rs · end-to-end session round-trip
+      flash_manager.rs · FlashManager state-machine harness
+      *_subcommand.rs · one per CLI subcommand
+    demo/
+      MAIN_IFS08_DEMO · reference STM32H733 app
+    apps/
+      can-studio · Tauri 2 desktop app
+    editor/
+      vscode · TypeScript extension
+    .github/
+      roadmap.yaml · source of truth for ROADMAP.md
+      scripts/render_roadmap.py
+      workflows/
+        ci.yml · fmt/clippy/build/test matrix
+        release.yml · v* CLI binaries
+        editor-release.yml · editor-v* VSIX
+        can-studio-release.yml · can-studio-v* native bundles
+        sync-dev-after-release.yml · dispatch recovery handle
+        branch-issue.yml · auto-create tracking issue on branch push
+        close-on-dev-merge.yml · auto-close on dev merge
+        roadmap.yml · regenerate ROADMAP.md from YAML
 ```
-can-flasher/
-├── Cargo.toml                            manifest + target-gated deps
-├── README.md
-├── ARCHITECTURE.md                       module-level architecture notes
-├── REQUIREMENTS.md                       this file (authoritative spec)
-├── ROADMAP.md                            phase delivery (auto-generated from YAML)
-├── docs/
-│   ├── INSTALL.md                        toolchain + per-OS adapter setup
-│   ├── USAGE.md                          subcommand reference + examples
-│   ├── CONTRIBUTING.md                   contributor guide
-│   └── PERFORMANCE.md                    flash-speed baseline + --profile guide
-├── src/
-│   ├── lib.rs                            pub mod declarations (library target)
-│   ├── main.rs                           clap entry point (binary target)
-│   ├── logging.rs                        tracing-subscriber bootstrap
-│   ├── cli/
-│   │   ├── mod.rs                        Cli / Command / GlobalFlags (clap derive)
-│   │   ├── adapters.rs                   enumerate detected adapters
-│   │   ├── flash.rs                      end-to-end programming pipeline
-│   │   ├── verify.rs                     readback CRC comparison
-│   │   ├── discover.rs                   bus scan + device table
-│   │   ├── diagnose.rs                   DTC / log / live-data / health / reset
-│   │   ├── config.rs                     NVM read/write + option bytes + WRP
-│   │   ├── replay.rs                     candump record / playback
-│   │   └── send_raw.rs                   single raw CAN frame
-│   ├── protocol/                         pure wire-format, no I/O
-│   │   ├── mod.rs                        CanFrame + ParseError + re-exports
-│   │   ├── ids.rs                        FrameId / MessageType / node-ID consts
-│   │   ├── opcodes.rs                    CommandOpcode / NotifyOpcode / NackCode / ResetMode
-│   │   ├── isotp.rs                      IsoTpSegmenter + Reassembler
-│   │   ├── records.rs                    FirmwareInfo / Health / LiveData / DtcEntry / ObStatus
-│   │   ├── commands.rs                   typed command builders
-│   │   └── responses.rs                  Response parser
-│   ├── transport/                        adapter I/O behind CanBackend trait
-│   │   ├── mod.rs                        CanBackend + TransportError + open_backend
-│   │   ├── virtual_bus.rs                VirtualBus + VirtualBackend + StubLoopback
-│   │   ├── stub_device.rs                StubDevice (bootloader simulator)
-│   │   ├── slcan.rs                      SlcanBackend (all OSes)
-│   │   ├── socketcan.rs                  SocketCanBackend (Linux only)
-│   │   ├── pcan.rs                       PcanBackend (Windows + macOS)
-│   │   └── vector.rs                     VectorBackend (Windows; Linux planned)
-│   ├── session/
-│   │   └── mod.rs                        Session: handshake, keepalive, reconnect, notifications
-│   ├── firmware/
-│   │   ├── mod.rs                        Image type + address validation
-│   │   └── loader.rs                     ELF / Intel HEX / raw .bin
-│   └── flash/
-│       └── mod.rs                        FlashManager (sector map, diff, erase/write/verify)
-├── tests/                                integration tests against VirtualBus + StubDevice
-│   ├── virtual_pipeline.rs               end-to-end session round-trip
-│   ├── flash_manager.rs                  FlashManager state-machine harness
-│   ├── flash_subcommand.rs               `flash` CLI integration
-│   ├── verify_subcommand.rs              `verify` CLI integration
-│   ├── discover_subcommand.rs            `discover` CLI integration
-│   ├── diagnose_subcommand.rs            `diagnose` CLI integration
-│   ├── config_subcommand.rs              `config` CLI integration
-│   └── replay_subcommand.rs              `replay` CLI integration
-├── demo/                                 reference STM32H733 application
-│   └── MAIN_IFS08_DEMO/                  builds against the bootloader contract
-└── .github/
-    ├── roadmap.yaml                      source of truth for ROADMAP.md
-    ├── scripts/render_roadmap.py
-    └── workflows/
-        ├── ci.yml                        fmt / clippy / build / test matrix
-        ├── release.yml                   tag-pushed cross-platform binaries + inline dev sync
-        ├── sync-dev-after-release.yml    workflow_dispatch recovery handle
-        ├── branch-issue.yml              auto-create tracking issue on branch push
-        ├── close-on-dev-merge.yml        auto-close tracking issue on dev merge
-        └── roadmap.yml                   regenerate ROADMAP.md from YAML
-```
+
+The `apps/can-studio/` and `editor/vscode/` integrations have their
+own READMEs detailing the dependency model — Studio links the
+`can-flasher` crate by path; the VS Code extension shells out to
+an installed `can-flasher` binary on `PATH`.
 
 No `src/security/` directory in v1 (Phase 5 security work — Ed25519
 signing, challenge-response, replay counter — is deferred); no
