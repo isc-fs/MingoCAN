@@ -17,6 +17,7 @@
     import FlashView from './lib/FlashView.svelte';
     import DiagnosticsView from './lib/DiagnosticsView.svelte';
     import LiveDataView from './lib/LiveDataView.svelte';
+    import SettingsView from './lib/SettingsView.svelte';
 
     let activeView = $state<ViewId>(defaultAppState().activeView);
     let settingsReady = $state<boolean>(false);
@@ -50,6 +51,8 @@
             <DiagnosticsView />
         {:else if activeView === 'liveData'}
             <LiveDataView />
+        {:else if activeView === 'settings'}
+            <SettingsView navigateTo={selectView} />
         {/if}
     </main>
 </div>

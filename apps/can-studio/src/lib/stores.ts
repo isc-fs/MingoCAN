@@ -13,13 +13,19 @@
 
 import type { AdapterEntry } from './types';
 
-export type ViewId = 'adapters' | 'flash' | 'diagnostics' | 'liveData';
+export type ViewId =
+    | 'adapters'
+    | 'flash'
+    | 'diagnostics'
+    | 'liveData'
+    | 'settings';
 
 export const VIEWS: { id: ViewId; label: string; status: 'live' | 'soon' }[] = [
     { id: 'adapters', label: 'Adapters', status: 'live' },
     { id: 'flash', label: 'Flash', status: 'live' },
     { id: 'diagnostics', label: 'Diagnostics', status: 'live' },
     { id: 'liveData', label: 'Live data', status: 'live' },
+    { id: 'settings', label: 'Settings', status: 'live' },
 ];
 
 // Svelte 5 runes can't live at module scope in a `.ts` file (runes
