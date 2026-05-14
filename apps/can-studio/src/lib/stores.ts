@@ -18,6 +18,7 @@ export type ViewId =
     | 'flash'
     | 'diagnostics'
     | 'liveData'
+    | 'busMonitor'
     | 'settings';
 
 export const VIEWS: { id: ViewId; label: string; status: 'live' | 'soon' }[] = [
@@ -25,6 +26,7 @@ export const VIEWS: { id: ViewId; label: string; status: 'live' | 'soon' }[] = [
     { id: 'flash', label: 'Flash', status: 'live' },
     { id: 'diagnostics', label: 'Diagnostics', status: 'live' },
     { id: 'liveData', label: 'Live data', status: 'live' },
+    { id: 'busMonitor', label: 'Bus monitor', status: 'live' },
     { id: 'settings', label: 'Settings', status: 'live' },
 ];
 
