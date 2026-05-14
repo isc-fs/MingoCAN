@@ -39,9 +39,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: stable
           components: rustfmt
+          cache: false
+          rustflags: ''
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -49,9 +52,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: stable
           components: clippy
+          cache: false
+          rustflags: ''
       - uses: Swatinem/rust-cache@v2
       # `serialport` pulls in `libudev-sys` on Linux for USB port
       # enumeration (the CANable / CANtact VID-PID filter in
@@ -74,7 +80,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+          rustflags: ''
       - uses: Swatinem/rust-cache@v2
       # See comment in the clippy job — `serialport` needs libudev on
       # Linux for USB enumeration.
