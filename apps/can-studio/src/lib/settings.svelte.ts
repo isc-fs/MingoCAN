@@ -20,6 +20,7 @@ export interface Settings {
     flash: FlashSettings;
     liveData: LiveDataSettings;
     busMonitor: BusMonitorSettings;
+    dbc: DbcSettings;
 }
 
 export interface AdapterSettings {
@@ -63,6 +64,29 @@ export interface BusMonitorSettings {
     activeTab: 'live' | 'byId';
 }
 
+export interface DbcSettings {
+    /** Per-adapter DBC association. Keyed by
+     *  `${interface}|${channel}` so the bench's powertrain bus
+     *  and body bus can each carry their own DBC. The value is
+     *  the absolute path to the .dbc file. */
+    paths: Record<string, string>;
+}
+
+/** Compute the per-adapter DBC key for the currently-selected
+ *  adapter. Returns `null` when no adapter is picked. */
+export function currentDbcKey(): string | null {
+    if (settings.adapter.interface === null) return null;
+    return `${settings.adapter.interface}|${settings.adapter.channel}`;
+}
+
+/** Lookup the persisted DBC path for the current adapter, or null
+ *  when none is associated. */
+export function currentDbcPath(): string | null {
+    const key = currentDbcKey();
+    if (key === null) return null;
+    return settings.dbc.paths[key] ?? null;
+}
+
 // ---- Defaults ----
 
 export function defaultSettings(): Settings {
@@ -93,6 +117,9 @@ export function defaultSettings(): Settings {
             idFilter: '',
             maxRows: 5000,
             activeTab: 'byId',
+        },
+        dbc: {
+            paths: {},
         },
     };
 }
@@ -160,6 +187,50 @@ export function registerAutosaveEffect(): void {
         // as read, so any subsequent mutation re-triggers the effect.
         JSON.stringify(settings);
         scheduleSave();
+    });
+}
+
+/**
+ * Wire up an effect at the app root that loads / unloads the DBC
+ * associated with the currently-selected adapter. Runs on adapter
+ * change *and* on first mount, so a DBC persisted across restarts
+ * comes back automatically.
+ *
+ * Called from App.svelte alongside registerAutosaveEffect — same
+ * effect-context lifetime rules apply.
+ */
+let dbcLoadGen = 0;
+export function registerDbcAutoloadEffect(
+    handlers: {
+        load: (path: string) => Promise<unknown>;
+        unload: () => Promise<unknown>;
+    },
+): void {
+    $effect(() => {
+        const key = currentDbcKey();
+        const path = key === null ? null : (settings.dbc.paths[key] ?? null);
+        const gen = ++dbcLoadGen;
+        (async () => {
+            if (path === null) {
+                try {
+                    await handlers.unload();
+                } catch {
+                    // no-op
+                }
+                return;
+            }
+            try {
+                await handlers.load(path);
+            } catch (err) {
+                // Auto-load failures are surfaced via the
+                // `dbc:status` event the SignalsView listens to; we
+                // intentionally don't bubble them up here because
+                // there's no view to render them in at app root.
+                if (gen === dbcLoadGen) {
+                    console.warn('DBC auto-load failed:', err);
+                }
+            }
+        })();
     });
 }
 

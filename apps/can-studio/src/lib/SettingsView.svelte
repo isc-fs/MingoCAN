@@ -18,9 +18,16 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
+    import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
-    import { settings } from './settings.svelte';
+    import { settings, currentDbcKey } from './settings.svelte';
     import type { ViewId } from './stores';
+    import {
+        getDbcStatus,
+        loadDbc,
+        unloadDbc,
+        type DbcSummary,
+    } from './dbc';
 
     interface Props {
         navigateTo: (id: ViewId) => void;
@@ -36,11 +43,94 @@
 
     let canFlasherVersion = $state<string>('…');
 
+    // DBC state ----------------------------------------------------
+    let dbcSummary = $state<DbcSummary | null>(null);
+    let dbcError = $state<string | null>(null);
+
+    // The settings.dbc.paths map is the source of truth on disk.
+    // The view shows the path for the current adapter and lets the
+    // operator Browse… or Clear. Loading happens via the backend.
+    const currentKey = $derived(currentDbcKey());
+    const currentPath = $derived.by(() => {
+        if (currentKey === null) return null;
+        return settings.dbc.paths[currentKey] ?? null;
+    });
+
+    async function pickDbc(): Promise<void> {
+        if (currentKey === null) {
+            dbcError = 'Pick an adapter first.';
+            return;
+        }
+        const picked = await openDialog({
+            title: 'Pick a DBC file',
+            multiple: false,
+            directory: false,
+            filters: [
+                { name: 'DBC', extensions: ['dbc'] },
+                { name: 'All files', extensions: ['*'] },
+            ],
+        });
+        if (typeof picked !== 'string' || picked.length === 0) return;
+
+        dbcError = null;
+        try {
+            const summary = await loadDbc(picked);
+            settings.dbc.paths[currentKey] = picked;
+            dbcSummary = summary;
+        } catch (err) {
+            dbcError = err instanceof Error ? err.message : String(err);
+        }
+    }
+
+    async function clearDbc(): Promise<void> {
+        if (currentKey === null) return;
+        dbcError = null;
+        try {
+            await unloadDbc();
+        } catch (err) {
+            dbcError = err instanceof Error ? err.message : String(err);
+        }
+        delete settings.dbc.paths[currentKey];
+        dbcSummary = null;
+    }
+
+    // Reflect status events fired by the central auto-load effect
+    // (in App.svelte / settings.svelte.ts) so this view shows the
+    // current loaded summary without each-view re-doing the load.
+    $effect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const status = await getDbcStatus();
+                if (!cancelled) dbcSummary = status;
+            } catch (err) {
+                if (!cancelled) {
+                    dbcError = err instanceof Error ? err.message : String(err);
+                }
+            }
+        })();
+        // Re-poll when the adapter changes (the auto-load effect
+        // in App.svelte triggers a load/unload, then `dbc_status`
+        // returns the new state).
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+        currentKey;
+        return () => {
+            cancelled = true;
+        };
+    });
+
     onMount(async () => {
         try {
             canFlasherVersion = await invoke<string>('can_flasher_version');
         } catch {
             canFlasherVersion = 'unknown';
+        }
+        // Cold-start: if a DBC was already loaded by the auto-load
+        // effect on app startup, reflect it here.
+        try {
+            dbcSummary = await getDbcStatus();
+        } catch {
+            // no-op
         }
     });
 </script>
@@ -158,6 +248,63 @@
                 />
             </div>
         </div>
+    </section>
+
+    <!-- DBC files (per-adapter) -->
+    <section class="card">
+        <header>
+            <h3>DBC files (per-adapter)</h3>
+        </header>
+        <p class="muted small">
+            Pick a <code>.dbc</code> for the current adapter; the bus
+            monitor decodes every matching frame into named physical
+            signals (visible in the <em>Signals</em> view). Each
+            (interface, channel) pair carries its own DBC, so a
+            powertrain bus and a body bus can coexist without you
+            re-picking on every switch.
+        </p>
+
+        {#if !adapterSet}
+            <p class="muted small">
+                No adapter selected. Open the <em>Adapters</em> view to
+                pick one first.
+            </p>
+        {:else}
+            <div class="dbc-row">
+                <div class="dbc-info">
+                    <div class="dbc-key mono">{currentKey}</div>
+                    {#if dbcSummary !== null}
+                        <div class="dbc-loaded">
+                            <code class="mono dbc-path">{dbcSummary.path}</code>
+                            <span class="muted small">
+                                {dbcSummary.messageCount} messages ·
+                                {dbcSummary.signalCount} signals
+                            </span>
+                        </div>
+                    {:else if currentPath !== null}
+                        <div class="dbc-pending">
+                            <code class="mono dbc-path">{currentPath}</code>
+                            <span class="muted small">(reloading…)</span>
+                        </div>
+                    {:else}
+                        <span class="muted small">No DBC associated.</span>
+                    {/if}
+                </div>
+                <div class="dbc-actions">
+                    <button type="button" onclick={pickDbc}>Browse…</button>
+                    <button
+                        type="button"
+                        disabled={currentPath === null}
+                        onclick={clearDbc}
+                    >
+                        Clear
+                    </button>
+                </div>
+            </div>
+            {#if dbcError !== null}
+                <div class="error small">{dbcError}</div>
+            {/if}
+        {/if}
     </section>
 
     <!-- About -->
@@ -308,4 +455,50 @@
     }
     .about a { color: var(--accent); }
     .settings-path { display: flex; align-items: center; }
+
+    .dbc-row {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        margin-top: 6px;
+    }
+    .dbc-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+    .dbc-key {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .dbc-loaded, .dbc-pending {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+    }
+    .dbc-path {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.82rem;
+    }
+    .dbc-actions {
+        display: flex;
+        gap: 6px;
+    }
+    .error.small {
+        margin-top: 8px;
+        padding: 6px 10px;
+        border: 1px solid var(--error);
+        background: rgba(255, 115, 115, 0.08);
+        color: var(--error);
+        border-radius: 4px;
+        font-size: 0.82rem;
+    }
+    .mono { font-family: var(--font-mono); }
 </style>

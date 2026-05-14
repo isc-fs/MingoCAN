@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::{Mutex, Notify};
@@ -34,11 +34,13 @@ use tracing::warn;
 
 use can_flasher::transport::open_backend;
 
+use crate::dbc::{decode, snapshot_lookup, DbcState};
 use crate::flash::parse_interface;
 
 const FRAME_EVENT: &str = "bus_monitor:frame";
 const STATUS_EVENT: &str = "bus_monitor:status";
 const CAPTURE_EVENT: &str = "bus_monitor:capture";
+const SIGNALS_EVENT: &str = "bus_monitor:signals";
 
 // ---- Shared state ----
 
@@ -215,6 +217,20 @@ pub async fn bus_monitor_start(
                                     },
                                 );
                                 return;
+                            }
+
+                            // Decode against the loaded DBC (if any)
+                            // and emit decoded signals as a separate
+                            // event. Empty when no DBC is loaded or
+                            // the frame's ID isn't in the schema.
+                            let dbc_state = app_for_task.state::<DbcState>();
+                            if let Some((dbc, by_id)) =
+                                snapshot_lookup(dbc_state.inner()).await
+                            {
+                                let decoded = decode(&dbc, &by_id, &frame);
+                                if !decoded.is_empty() {
+                                    let _ = app_for_task.emit(SIGNALS_EVENT, &decoded);
+                                }
                             }
 
                             // Mirror to capture file if active.

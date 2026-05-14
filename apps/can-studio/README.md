@@ -43,7 +43,7 @@ Same shape as the VS Code extension's evolution.
 |---|---|---|
 | **0** | Adapters / Flash / Diagnostics / Live-data, persistent settings, native file pickers, Settings view | ✅ live (v0.1.0) |
 | **1** | Generic CAN bus monitor — live frame list, filter by ID, per-ID rate, pause, capture-to-file | ✅ live (v0.2.1) |
-| **2** | DBC file support — decoded signal column, dedicated Signals view, signal-trigger expressions | 🔜 |
+| **2** | DBC file support — per-adapter DBC association, dedicated Signals view with live decoded values | ✅ live (v0.3.0); signal-trigger expressions deferred to v0.3.1 |
 | **3** | Frame transmitter — single-shot + cyclic + signal-triggered sends | 🔜 |
 | **4** | Record / replay sessions (candump format), multi-channel scope-style charts | 🔜 |
 
