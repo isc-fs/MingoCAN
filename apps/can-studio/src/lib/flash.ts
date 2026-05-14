@@ -92,6 +92,22 @@ export function runBuildOnly(
     return invoke<void>('build_only', { command, cwd });
 }
 
+/**
+ * A CMake build preset surfaced from `<cwd>/CMakePresets.json`.
+ * `command` is the synthesised `cmake --preset X && cmake --build --preset X`
+ * one-liner; `artifactHint` is a best-effort guess at the preset's
+ * binaryDir (with `${sourceDir}` / `${presetName}` expanded).
+ */
+export interface CmakePresetInfo {
+    name: string;
+    command: string;
+    artifactHint: string | null;
+}
+
+export function readCmakePresets(cwd: string): Promise<CmakePresetInfo[]> {
+    return invoke<CmakePresetInfo[]>('read_cmake_presets', { cwd });
+}
+
 export function onFlashEvent(handler: (event: FlashEvent) => void): Promise<UnlistenFn> {
     return listen<FlashEvent>('flash:event', (e) => handler(e.payload));
 }
