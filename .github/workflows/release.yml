@@ -94,6 +94,7 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
           cache: false
+          rustflags: ''
 
       - name: Build release binary
         run: cargo build --release --bin can-flasher --target ${{ matrix.target }}
