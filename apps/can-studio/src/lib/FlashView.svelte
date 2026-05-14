@@ -13,13 +13,47 @@
 
     import {
         onFlashEvent,
+        readCmakePresets,
         runBuildOnly,
         runFlash,
+        type CmakePresetInfo,
         type FlashEvent,
         type FlashRequest,
         type JsonReport,
     } from './flash';
     import { settings } from './settings.svelte';
+
+    // Static fallback templates — shown alongside any CMake presets
+    // we discover, so projects without a CMakePresets.json still
+    // get one-click fills for the most common build systems.
+    interface BuildTemplate {
+        label: string;
+        command: string;
+        note: string;
+    }
+    const STATIC_TEMPLATES: BuildTemplate[] = [
+        {
+            label: 'CMake out-of-tree (configure + build)',
+            command: 'cmake -S . -B build && cmake --build build',
+            note: 'Configures into ./build and compiles. Needs a toolchain file passed via -D… for cross-compiling.',
+        },
+        {
+            label: 'CMake out-of-tree with arm-none-eabi toolchain',
+            command:
+                'cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake && cmake --build build',
+            note: 'STM32CubeMX-style: points CMake at the bundled ARM GCC toolchain file before configuring.',
+        },
+        {
+            label: 'Plain Make',
+            command: 'make',
+            note: "For projects with a top-level Makefile (no CMake).",
+        },
+        {
+            label: 'Zephyr west build',
+            command: 'west build -t flash-elf',
+            note: 'Zephyr RTOS projects driven by the west meta-tool.',
+        },
+    ];
 
     const adapterReady = $derived(
         settings.adapter.interface !== null &&
@@ -38,6 +72,77 @@
     // out. null means "no run yet" or "currently running".
     let lastOutcome = $state<'success' | 'failure' | null>(null);
     let copyState = $state<'idle' | 'copied'>('idle');
+
+    // CMake build presets discovered from <cwd>/CMakePresets.json,
+    // refreshed whenever the build cwd changes. Empty when there's
+    // no presets file (or it's invalid) — the templates dropdown
+    // still shows the static fallback list.
+    let cmakePresets = $state<CmakePresetInfo[]>([]);
+    let templatesOpen = $state<boolean>(false);
+
+    // Run the discovery whenever build cwd changes. Debounced via a
+    // microtask so rapid input doesn't spam the backend; cancellable
+    // via a generation counter so a stale response can't clobber a
+    // fresh one.
+    let presetsGen = 0;
+    $effect(() => {
+        const cwd = settings.flash.buildCwd.trim();
+        const gen = ++presetsGen;
+        if (cwd.length === 0) {
+            cmakePresets = [];
+            return;
+        }
+        readCmakePresets(cwd)
+            .then((list) => {
+                if (gen === presetsGen) cmakePresets = list;
+            })
+            .catch(() => {
+                if (gen === presetsGen) cmakePresets = [];
+            });
+    });
+
+    function pickTemplate(template: BuildTemplate): void {
+        settings.flash.buildCommand = template.command;
+        templatesOpen = false;
+    }
+
+    function pickPreset(preset: CmakePresetInfo): void {
+        settings.flash.buildCommand = preset.command;
+        if (
+            preset.artifactHint !== null &&
+            settings.flash.artifactPath.trim().length === 0
+        ) {
+            // The hint is a directory (the configure preset's
+            // binaryDir). Combine it with the cwd basename — the
+            // STM32CubeMX/CMake convention is `<binaryDir>/<project>.elf`,
+            // and we still don't have an authoritative way to know
+            // the .elf name without compiling. Operators can fix it
+            // post-build via the auto-fill in the build-only path.
+            const cwd = settings.flash.buildCwd.trim().replace(/\/+$/, '');
+            const sep = cwd.includes('\\') ? '\\' : '/';
+            const basename = cwd.split(sep).pop() ?? '';
+            if (basename.length > 0) {
+                const dir = preset.artifactHint.replace(/[\\/]+$/, '');
+                settings.flash.artifactPath = `${dir}${sep}${basename}.elf`;
+            }
+        }
+        templatesOpen = false;
+    }
+
+    // Close the dropdown when clicking anywhere outside it. Bound
+    // to window so we don't have to thread refs through children.
+    function onWindowClick(e: MouseEvent): void {
+        if (!templatesOpen) return;
+        const target = e.target as HTMLElement | null;
+        if (target?.closest('.templates-dropdown') !== null) return;
+        if (target?.closest('.templates-trigger') !== null) return;
+        templatesOpen = false;
+    }
+    $effect(() => {
+        if (typeof window === 'undefined') return;
+        window.addEventListener('click', onWindowClick);
+        return () => window.removeEventListener('click', onWindowClick);
+    });
 
     let unlisten: UnlistenFn | null = null;
 
@@ -391,12 +496,76 @@
 
         <div class="row">
             <label for="buildcmd">Build command</label>
-            <input
-                id="buildcmd"
-                type="text"
-                placeholder="cmake --build build"
-                bind:value={settings.flash.buildCommand}
-            />
+            <div class="input-with-button templates-host">
+                <input
+                    id="buildcmd"
+                    type="text"
+                    placeholder="cmake --build build"
+                    bind:value={settings.flash.buildCommand}
+                />
+                <button
+                    type="button"
+                    class="browse templates-trigger"
+                    onclick={() => (templatesOpen = !templatesOpen)}
+                    aria-expanded={templatesOpen}
+                    title="Pick a build command template — auto-detects CMake presets in your build cwd"
+                >
+                    Templates ▾
+                </button>
+                {#if templatesOpen}
+                    <div class="templates-dropdown" role="menu">
+                        {#if cmakePresets.length > 0}
+                            <div class="templates-section">
+                                <div class="templates-section-title">
+                                    Detected CMake presets
+                                </div>
+                                {#each cmakePresets as preset (preset.name)}
+                                    <button
+                                        type="button"
+                                        class="templates-item preset"
+                                        onclick={() => pickPreset(preset)}
+                                        role="menuitem"
+                                    >
+                                        <span class="templates-item-label">
+                                            {preset.name}
+                                        </span>
+                                        <span class="templates-item-cmd">
+                                            {preset.command}
+                                        </span>
+                                    </button>
+                                {/each}
+                            </div>
+                        {/if}
+                        <div class="templates-section">
+                            <div class="templates-section-title">
+                                Common templates
+                            </div>
+                            {#each STATIC_TEMPLATES as template (template.label)}
+                                <button
+                                    type="button"
+                                    class="templates-item"
+                                    onclick={() => pickTemplate(template)}
+                                    role="menuitem"
+                                    title={template.note}
+                                >
+                                    <span class="templates-item-label">
+                                        {template.label}
+                                    </span>
+                                    <span class="templates-item-cmd">
+                                        {template.command}
+                                    </span>
+                                </button>
+                            {/each}
+                        </div>
+                    </div>
+                {/if}
+            </div>
+            <p class="hint">
+                Shell command run from the build working directory.
+                Click <strong>Templates ▾</strong> to pick a preset
+                (auto-detected from your <code>CMakePresets.json</code>) or
+                a common pattern for non-preset projects.
+            </p>
         </div>
 
         <div class="row">
@@ -611,6 +780,70 @@
     .input-with-button {
         display: flex;
         gap: 6px;
+    }
+    .templates-host {
+        position: relative;
+    }
+    .templates-dropdown {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        z-index: 10;
+        min-width: 360px;
+        max-width: min(560px, calc(100vw - 60px));
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+        padding: 6px 0;
+        max-height: 360px;
+        overflow: auto;
+    }
+    .templates-section + .templates-section {
+        border-top: 1px solid var(--border);
+        margin-top: 4px;
+        padding-top: 4px;
+    }
+    .templates-section-title {
+        padding: 6px 12px 4px;
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+    }
+    .templates-item {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        width: 100%;
+        text-align: left;
+        background: transparent;
+        border: none;
+        padding: 8px 12px;
+        cursor: pointer;
+        color: var(--text);
+        border-radius: 0;
+    }
+    .templates-item:hover {
+        background: rgba(255, 255, 255, 0.04);
+        border-color: transparent;
+        color: var(--text);
+    }
+    .templates-item.preset .templates-item-label::before {
+        content: '◆ ';
+        color: var(--accent);
+    }
+    .templates-item-label {
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+    .templates-item-cmd {
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
     .input-with-button input { flex: 1; }
     .browse {
