@@ -13,6 +13,7 @@
 
     import {
         onFlashEvent,
+        runBuildOnly,
         runFlash,
         type FlashEvent,
         type FlashRequest,
@@ -34,14 +35,52 @@
 
     let unlisten: UnlistenFn | null = null;
 
+    // STM32-CMake convention: out-of-tree build under <cwd>/build/,
+    // with the .elf named after the CMake `project()` directive,
+    // which by convention matches the project root's basename. We
+    // can't introspect CMakeLists.txt from here, so we guess from
+    // the cwd basename — operators can override by typing.
+    function guessArtifactFromCwd(cwd: string): string {
+        const trimmed = cwd.trim().replace(/\/+$/, '');
+        if (trimmed.length === 0) return '';
+        const sep = trimmed.includes('\\') ? '\\' : '/';
+        const basename = trimmed.split(sep).pop() ?? '';
+        if (basename.length === 0) return '';
+        return `${trimmed}${sep}build${sep}${basename}.elf`;
+    }
+
+    // For "Build & Flash" the artifact only needs to exist *after*
+    // the build step (it's an output, not an input). If the user
+    // hasn't typed one but has a build cwd, derive a sensible
+    // default and stash it in settings — they can fix it after the
+    // first build if our guess was wrong.
+    function ensureArtifactPath(): string {
+        const current = settings.flash.artifactPath.trim();
+        if (current.length > 0) return current;
+        const derived = guessArtifactFromCwd(settings.flash.buildCwd);
+        if (derived.length > 0) {
+            settings.flash.artifactPath = derived;
+            return derived;
+        }
+        return '';
+    }
+
     async function start(opts: { skipBuild: boolean }): Promise<void> {
         if (running) return;
         if (!adapterReady) {
             error = 'Pick an adapter in the Adapters view first.';
             return;
         }
-        if (settings.flash.artifactPath.trim().length === 0) {
-            error = 'Set a firmware artifact path first.';
+        // For "Flash (skip build)" the artifact must exist already.
+        // For "Build & Flash" we can derive an expected path from
+        // the build cwd, since the build will materialise it.
+        const artifactPath = opts.skipBuild
+            ? settings.flash.artifactPath.trim()
+            : ensureArtifactPath();
+        if (artifactPath.length === 0) {
+            error = opts.skipBuild
+                ? 'Set a firmware artifact path first.'
+                : 'Set a firmware artifact path (or a build working directory so we can derive one).';
             return;
         }
 
@@ -68,7 +107,7 @@
                     ? settings.flash.buildCwd
                     : null;
             const payload: FlashRequest = {
-                artifactPath: settings.flash.artifactPath,
+                artifactPath,
                 buildCommand: buildCmd,
                 buildCwd,
                 interface: settings.adapter.interface!, // adapterReady guard
@@ -89,6 +128,54 @@
             const report = await runFlash(payload);
             result = report;
             progressMessage = `done in ${report.duration_ms} ms`;
+        } catch (err) {
+            error = err instanceof Error ? err.message : String(err);
+            progressMessage = 'failed';
+        } finally {
+            running = false;
+            if (unlisten !== null) {
+                unlisten();
+                unlisten = null;
+            }
+        }
+    }
+
+    // Build-only — no adapter required, no firmware load, no flash.
+    // Designed for the bootstrap case where `build/` doesn't exist
+    // yet and the operator needs to run the configure+compile step
+    // once before there's any .elf to point Flash at.
+    async function buildOnly(): Promise<void> {
+        if (running) return;
+        const cmd = settings.flash.buildCommand.trim();
+        if (cmd.length === 0) {
+            error = 'Set a build command first.';
+            return;
+        }
+
+        running = true;
+        log = [];
+        progressMessage = 'starting build…';
+        result = null;
+        error = null;
+
+        unlisten = await onFlashEvent((event) => {
+            log = [...log, formatLogLine(event)];
+        });
+
+        try {
+            const buildCwd =
+                settings.flash.buildCwd.trim().length > 0
+                    ? settings.flash.buildCwd
+                    : null;
+            await runBuildOnly(cmd, buildCwd);
+            progressMessage = 'build done';
+            // Best-effort: if the operator hasn't pointed Flash at
+            // an artifact yet, derive one from the cwd so the next
+            // click on Build & Flash / Flash skip-build finds it.
+            if (settings.flash.artifactPath.trim().length === 0) {
+                const derived = guessArtifactFromCwd(settings.flash.buildCwd);
+                if (derived.length > 0) settings.flash.artifactPath = derived;
+            }
         } catch (err) {
             error = err instanceof Error ? err.message : String(err);
             progressMessage = 'failed';
@@ -222,7 +309,7 @@
 
     <div class="form">
         <div class="row">
-            <label for="artifact">Firmware artifact</label>
+            <label for="artifact">Firmware artifact (file)</label>
             <div class="input-with-button">
                 <input
                     id="artifact"
@@ -234,6 +321,14 @@
                     Browse…
                 </button>
             </div>
+            <p class="hint">
+                Path to the <code>.elf</code> / <code>.hex</code> / <code>.bin</code>
+                the build produces. You can type the <em>expected</em> output
+                path before the build has ever run — Browse… only works on
+                existing files. For first-time setup, leave this blank, set
+                a build cwd + command, then click <strong>Build only</strong>;
+                we'll auto-fill an STM32-style guess after the build lands.
+            </p>
         </div>
 
         <div class="row">
@@ -247,7 +342,7 @@
         </div>
 
         <div class="row">
-            <label for="buildcwd">Build working directory</label>
+            <label for="buildcwd">Build working directory (folder)</label>
             <div class="input-with-button">
                 <input
                     id="buildcwd"
@@ -259,6 +354,12 @@
                     Browse…
                 </button>
             </div>
+            <p class="hint">
+                Folder the build command runs in — usually your CMake
+                project root. The macOS folder picker greys out files
+                (only folders are selectable) and offers a New Folder
+                button if you need to create one.
+            </p>
         </div>
 
         <div class="row-three">
@@ -320,6 +421,14 @@
         >
             Flash (skip build)
         </button>
+        <button
+            type="button"
+            disabled={running}
+            onclick={buildOnly}
+            title="Run the build step only — useful before the first flash, when `build/` doesn't exist yet so the .elf can't be picked."
+        >
+            Build only
+        </button>
     </div>
 
     {#if running || progressMessage.length > 0}
@@ -375,6 +484,20 @@
         background: var(--surface);
     }
     .row { display: flex; flex-direction: column; gap: 4px; }
+    .hint {
+        margin: 4px 0 0;
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        line-height: 1.5;
+    }
+    .hint code {
+        font-family: var(--font-mono);
+        font-size: 0.95em;
+        padding: 0 3px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.04);
+    }
+    .hint strong { color: var(--text); font-weight: 600; }
     .input-with-button {
         display: flex;
         gap: 6px;
