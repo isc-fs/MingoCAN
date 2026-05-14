@@ -1,8 +1,8 @@
 <!--
     Adapters view — lists every CAN adapter the host can see, plus
-    the always-available virtual loopback. Clicking an entry sets it
-    as the currently-selected adapter (kept in App.svelte state).
-    A refresh button on the title bar reruns `discover_adapters`.
+    the always-available virtual loopback. Clicking an entry writes
+    the selection into `settings.adapter`; the autosave effect in
+    App.svelte flushes to disk.
 
     No background polling: every fetch is operator-initiated, same
     rule as the VS Code extension's device tree.
@@ -16,14 +16,8 @@
         isSameAdapter,
         VIRTUAL_ADAPTER,
     } from './cli';
+    import { settings } from './settings.svelte';
     import type { AdapterEntry } from './types';
-
-    interface Props {
-        selectedAdapter: AdapterEntry | null;
-        onSelect: (entry: AdapterEntry) => void;
-    }
-
-    const { selectedAdapter, onSelect }: Props = $props();
 
     let adapters = $state<AdapterEntry[]>([]);
     let loading = $state<boolean>(false);
@@ -42,6 +36,12 @@
         }
     }
 
+    function select(entry: AdapterEntry): void {
+        settings.adapter.interface = entry.interface;
+        settings.adapter.channel = entry.channel;
+        settings.adapter.label = entry.label;
+    }
+
     onMount(refresh);
 </script>
 
@@ -51,7 +51,7 @@
             <h2>Adapters</h2>
             <p class="muted">
                 CAN backends detected on this machine. Pick one to scope every
-                subsequent action.
+                subsequent action — the choice is saved across restarts.
             </p>
         </div>
         <button
@@ -84,8 +84,12 @@
 
     <ul class="list">
         {#each adapters as entry (`${entry.interface}:${entry.channel}`)}
-            {@const active = isSameAdapter(
-                selectedAdapter,
+            {@const active = settings.adapter.interface !== null && isSameAdapter(
+                {
+                    interface: settings.adapter.interface,
+                    channel: settings.adapter.channel,
+                    label: settings.adapter.label,
+                },
                 entry.interface,
                 entry.channel,
             )}
@@ -94,7 +98,7 @@
                     type="button"
                     class="row"
                     class:active
-                    onclick={() => onSelect(entry)}
+                    onclick={() => select(entry)}
                 >
                     <div class="row-main">
                         <div class="row-title">

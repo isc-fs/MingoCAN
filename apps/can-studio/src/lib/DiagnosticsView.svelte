@@ -19,13 +19,13 @@
         type DtcSnapshot,
         type HealthSnapshot,
     } from './diagnose';
-    import type { AdapterEntry } from './types';
+    import { settings } from './settings.svelte';
 
-    interface Props {
-        selectedAdapter: AdapterEntry | null;
-    }
-
-    const { selectedAdapter }: Props = $props();
+    const adapterReady = $derived(
+        settings.adapter.interface !== null &&
+            (settings.adapter.interface === 'virtual' ||
+                settings.adapter.channel.length > 0),
+    );
 
     let health = $state<HealthSnapshot | null>(null);
     let dtcs = $state<DtcSnapshot[]>([]);
@@ -37,16 +37,16 @@
     let dtcsRead = $state<boolean>(false);
 
     function buildRequest(): DiagnoseRequest | null {
-        if (selectedAdapter === null) return null;
+        if (!adapterReady || settings.adapter.interface === null) return null;
         return {
-            interface: selectedAdapter.interface,
+            interface: settings.adapter.interface,
             channel:
-                selectedAdapter.channel.length > 0
-                    ? selectedAdapter.channel
+                settings.adapter.channel.length > 0
+                    ? settings.adapter.channel
                     : null,
-            bitrate: 500_000,
-            nodeId: 0x3,
-            timeoutMs: 500,
+            bitrate: settings.adapter.bitrate,
+            nodeId: settings.adapter.nodeId,
+            timeoutMs: settings.adapter.timeoutMs,
         };
     }
 
@@ -117,7 +117,7 @@
         </p>
     </header>
 
-    {#if selectedAdapter === null}
+    {#if !adapterReady}
         <div class="warning">
             <strong>No adapter selected.</strong> Pick one in the
             <em>Adapters</em> view first.
@@ -131,7 +131,7 @@
             <button
                 type="button"
                 onclick={refreshHealth}
-                disabled={healthLoading || selectedAdapter === null}
+                disabled={healthLoading || !adapterReady}
             >
                 {healthLoading ? '…' : '⟳'}
                 Refresh
@@ -199,7 +199,7 @@
                 <button
                     type="button"
                     onclick={refreshDtcs}
-                    disabled={dtcsLoading || selectedAdapter === null}
+                    disabled={dtcsLoading || !adapterReady}
                 >
                     {dtcsLoading ? '…' : '⟳'}
                     Read DTCs
@@ -208,7 +208,7 @@
                     type="button"
                     class="danger"
                     onclick={doClearDtcs}
-                    disabled={clearing || selectedAdapter === null}
+                    disabled={clearing || !adapterReady}
                 >
                     {clearing ? '…' : '✕'}
                     Clear DTCs

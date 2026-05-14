@@ -25,6 +25,12 @@ tauri-build = { version = "2", features = [] }
 # escape hatch only if we ever need it.
 tauri = { version = "2", features = [] }
 
+# Persistent key-value store, JSON-backed. Used for adapter
+# selection, flash defaults, and live-data view config — anything
+# operators expect to survive an app restart. Filesystem location
+# is platform-managed by the plugin (AppConfig on each OS).
+tauri-plugin-store = { version = "2" }
+
 # Reuse the can-flasher protocol + transport + flash code by path.
 # The Tauri commands wrap these crates directly (no shell-out tax)
 # — same Rust on both sides of the IPC bridge.

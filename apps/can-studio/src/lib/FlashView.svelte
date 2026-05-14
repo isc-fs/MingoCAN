@@ -1,56 +1,29 @@
 <!--
     Flash view — build + flash pipeline.
 
-    Reads the selected adapter from App.svelte's state, lets the user
-    edit the per-run config (firmware path, build command, options),
-    fires the `flash` Tauri command, and surfaces both the build
-    output and the FlashManager events in a single scrollback log.
-
-    Two buttons: "Build & Flash" runs the configured build command
-    first, "Flash" skips straight to the flash pipeline.
+    All configuration lives in the central `settings` store and
+    persists across restarts. Adapter selection comes from
+    `settings.adapter` (set in the Adapters view); flash defaults
+    + per-run options live in `settings.flash`.
 -->
 <script lang="ts">
     import { onDestroy } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
 
     import {
-        defaultFlashRequest,
         onFlashEvent,
         runFlash,
         type FlashEvent,
         type FlashRequest,
         type JsonReport,
     } from './flash';
-    import type { AdapterEntry } from './types';
+    import { settings } from './settings.svelte';
 
-    interface Props {
-        selectedAdapter: AdapterEntry | null;
-    }
-
-    const { selectedAdapter }: Props = $props();
-
-    // svelte-ignore state_referenced_locally
-    // Initial-value capture only — the $effect below keeps interface
-    // and channel in sync when the operator switches adapters in the
-    // Adapters view, so we don't want a reactive read here.
-    let request = $state<FlashRequest>(
-        defaultFlashRequest(
-            selectedAdapter?.interface ?? 'slcan',
-            selectedAdapter?.channel ?? '',
-        ),
+    const adapterReady = $derived(
+        settings.adapter.interface !== null &&
+            (settings.adapter.interface === 'virtual' ||
+                settings.adapter.channel.length > 0),
     );
-
-    // When the selected adapter changes (user picked a different one
-    // in the Adapters view), pull its interface/channel into the
-    // request — other fields keep whatever the operator set.
-    $effect(() => {
-        if (selectedAdapter !== null) {
-            request.interface = selectedAdapter.interface;
-            request.channel = selectedAdapter.channel.length > 0
-                ? selectedAdapter.channel
-                : null;
-        }
-    });
 
     let running = $state<boolean>(false);
     let log = $state<string[]>([]);
@@ -62,7 +35,11 @@
 
     async function start(opts: { skipBuild: boolean }): Promise<void> {
         if (running) return;
-        if (request.artifactPath.trim().length === 0) {
+        if (!adapterReady) {
+            error = 'Pick an adapter in the Adapters view first.';
+            return;
+        }
+        if (settings.flash.artifactPath.trim().length === 0) {
             error = 'Set a firmware artifact path first.';
             return;
         }
@@ -80,13 +57,33 @@
         });
 
         try {
+            const buildCmd = opts.skipBuild
+                ? null
+                : settings.flash.buildCommand.trim().length > 0
+                    ? settings.flash.buildCommand
+                    : null;
+            const buildCwd =
+                settings.flash.buildCwd.trim().length > 0
+                    ? settings.flash.buildCwd
+                    : null;
             const payload: FlashRequest = {
-                ...request,
-                buildCommand: opts.skipBuild
-                    ? null
-                    : (request.buildCommand?.trim().length ?? 0) > 0
-                        ? request.buildCommand
+                artifactPath: settings.flash.artifactPath,
+                buildCommand: buildCmd,
+                buildCwd,
+                interface: settings.adapter.interface!, // adapterReady guard
+                channel:
+                    settings.adapter.channel.length > 0
+                        ? settings.adapter.channel
                         : null,
+                bitrate: settings.adapter.bitrate,
+                nodeId: settings.adapter.nodeId,
+                timeoutMs: settings.adapter.timeoutMs,
+                keepaliveMs: 5_000,
+                diff: settings.flash.diff,
+                dryRun: settings.flash.dryRun,
+                verifyAfter: settings.flash.verifyAfter,
+                finalCommit: settings.flash.finalCommit,
+                jump: settings.flash.jump,
             };
             const report = await runFlash(payload);
             result = report;
@@ -163,7 +160,7 @@
         </p>
     </header>
 
-    {#if selectedAdapter === null}
+    {#if !adapterReady}
         <div class="warning">
             <strong>No adapter selected.</strong> Pick one in the
             <em>Adapters</em> view first — the flash command needs an
@@ -178,7 +175,7 @@
                 id="artifact"
                 type="text"
                 placeholder="/abs/path/to/firmware.elf"
-                bind:value={request.artifactPath}
+                bind:value={settings.flash.artifactPath}
             />
         </div>
 
@@ -188,7 +185,7 @@
                 id="buildcmd"
                 type="text"
                 placeholder="cmake --build build"
-                bind:value={request.buildCommand}
+                bind:value={settings.flash.buildCommand}
             />
         </div>
 
@@ -198,7 +195,7 @@
                 id="buildcwd"
                 type="text"
                 placeholder="(defaults to artifact's parent)"
-                bind:value={request.buildCwd}
+                bind:value={settings.flash.buildCwd}
             />
         </div>
 
@@ -211,7 +208,7 @@
                     min="10000"
                     max="1000000"
                     step="1000"
-                    bind:value={request.bitrate}
+                    bind:value={settings.adapter.bitrate}
                 />
             </div>
             <div>
@@ -221,7 +218,7 @@
                     type="number"
                     min="0"
                     max="15"
-                    bind:value={request.nodeId}
+                    bind:value={settings.adapter.nodeId}
                 />
             </div>
             <div>
@@ -231,17 +228,17 @@
                     type="number"
                     min="50"
                     max="60000"
-                    bind:value={request.timeoutMs}
+                    bind:value={settings.adapter.timeoutMs}
                 />
             </div>
         </div>
 
         <div class="opts">
-            <label><input type="checkbox" bind:checked={request.diff} /> Diff-skip unchanged sectors</label>
-            <label><input type="checkbox" bind:checked={request.verifyAfter} /> Verify each sector</label>
-            <label><input type="checkbox" bind:checked={request.finalCommit} /> Final CMD_FLASH_VERIFY commit</label>
-            <label><input type="checkbox" bind:checked={request.jump} /> Jump to app after flash</label>
-            <label><input type="checkbox" bind:checked={request.dryRun} /> Dry-run (no erases / writes)</label>
+            <label><input type="checkbox" bind:checked={settings.flash.diff} /> Diff-skip unchanged sectors</label>
+            <label><input type="checkbox" bind:checked={settings.flash.verifyAfter} /> Verify each sector</label>
+            <label><input type="checkbox" bind:checked={settings.flash.finalCommit} /> Final CMD_FLASH_VERIFY commit</label>
+            <label><input type="checkbox" bind:checked={settings.flash.jump} /> Jump to app after flash</label>
+            <label><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
         </div>
     </div>
 
@@ -249,14 +246,14 @@
         <button
             type="button"
             class="primary"
-            disabled={running || selectedAdapter === null}
+            disabled={running || !adapterReady}
             onclick={() => start({ skipBuild: false })}
         >
             Build & Flash
         </button>
         <button
             type="button"
-            disabled={running || selectedAdapter === null}
+            disabled={running || !adapterReady}
             onclick={() => start({ skipBuild: true })}
         >
             Flash (skip build)

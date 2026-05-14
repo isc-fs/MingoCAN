@@ -30,18 +30,15 @@
         type LiveDataEvent,
         type LiveDataRequest,
     } from './live_data';
-    import type { AdapterEntry } from './types';
+    import { settings } from './settings.svelte';
 
     Chart.register(...registerables);
 
-    interface Props {
-        selectedAdapter: AdapterEntry | null;
-    }
-
-    const { selectedAdapter }: Props = $props();
-
-    let rateHz = $state<number>(10);
-    let windowSeconds = $state<number>(60);
+    const adapterReady = $derived(
+        settings.adapter.interface !== null &&
+            (settings.adapter.interface === 'virtual' ||
+                settings.adapter.channel.length > 0),
+    );
 
     let status = $state<'idle' | 'running' | 'stopped' | 'error'>('idle');
     let statusMessage = $state<string>('idle');
@@ -181,7 +178,7 @@
                 txData.push({ x: t, y: Math.max(0, txRate) });
 
                 // Prune anything older than the configured window.
-                const cutoff = t - windowSeconds;
+                const cutoff = t - settings.liveData.windowSeconds;
                 for (const arr of [rxData, txData]) {
                     while (arr.length > 0 && arr[0].x < cutoff) {
                         arr.shift();
@@ -194,7 +191,7 @@
     }
 
     async function start(): Promise<void> {
-        if (selectedAdapter === null) {
+        if (!adapterReady || settings.adapter.interface === null) {
             error = 'Pick an adapter in the Adapters view first.';
             return;
         }
@@ -202,15 +199,15 @@
         clearChart();
 
         const request: LiveDataRequest = {
-            interface: selectedAdapter.interface,
+            interface: settings.adapter.interface,
             channel:
-                selectedAdapter.channel.length > 0
-                    ? selectedAdapter.channel
+                settings.adapter.channel.length > 0
+                    ? settings.adapter.channel
                     : null,
-            bitrate: 500_000,
-            nodeId: 0x3,
-            timeoutMs: 500,
-            rateHz,
+            bitrate: settings.adapter.bitrate,
+            nodeId: settings.adapter.nodeId,
+            timeoutMs: settings.adapter.timeoutMs,
+            rateHz: settings.liveData.rateHz,
         };
 
         try {
@@ -277,7 +274,7 @@
         </p>
     </header>
 
-    {#if selectedAdapter === null}
+    {#if !adapterReady}
         <div class="warning">
             <strong>No adapter selected.</strong> Pick one in the
             <em>Adapters</em> view first.
@@ -288,7 +285,7 @@
         <button
             type="button"
             class="primary"
-            disabled={status === 'running' || selectedAdapter === null}
+            disabled={status === 'running' || !adapterReady}
             onclick={start}
         >
             Start
@@ -312,13 +309,13 @@
                     type="number"
                     min="1"
                     max="50"
-                    bind:value={rateHz}
+                    bind:value={settings.liveData.rateHz}
                     disabled={status === 'running'}
                 />
             </label>
             <label>
                 Window (s)
-                <input type="number" min="5" max="600" bind:value={windowSeconds} />
+                <input type="number" min="5" max="600" bind:value={settings.liveData.windowSeconds} />
             </label>
         </div>
 
