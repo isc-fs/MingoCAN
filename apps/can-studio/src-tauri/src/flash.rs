@@ -529,7 +529,7 @@ async fn run_build(app: &AppHandle, command: &str, cwd: PathBuf) -> Result<(), S
 
 // ---- Interface parsing ----
 
-fn parse_interface(s: &str) -> Result<InterfaceType, String> {
+pub(crate) fn parse_interface(s: &str) -> Result<InterfaceType, String> {
     match s {
         "slcan" => Ok(InterfaceType::Slcan),
         "socketcan" => Ok(InterfaceType::Socketcan),

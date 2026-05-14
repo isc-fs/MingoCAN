@@ -9,6 +9,7 @@
 // `health` / `read_dtcs` / `clear_dtcs` + `live_data_start` /
 // `live_data_stop` (streamed snapshots).
 
+mod bus_monitor;
 mod diagnose;
 mod flash;
 mod live_data;
@@ -45,6 +46,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(live_data::LiveDataState::default())
+        .manage(bus_monitor::BusMonitorState::default())
         .invoke_handler(tauri::generate_handler![
             can_flasher_version,
             discover_adapters,
@@ -55,7 +57,9 @@ pub fn run() {
             diagnose::read_dtcs,
             diagnose::clear_dtcs,
             live_data::live_data_start,
-            live_data::live_data_stop
+            live_data::live_data_stop,
+            bus_monitor::bus_monitor_start,
+            bus_monitor::bus_monitor_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC CAN Studio Tauri app");
