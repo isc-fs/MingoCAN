@@ -7,7 +7,7 @@
     + per-run options live in `settings.flash`.
 -->
 <script lang="ts">
-    import { onDestroy } from 'svelte';
+    import { onDestroy, tick } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
     import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -34,6 +34,32 @@
     let error = $state<string | null>(null);
 
     let unlisten: UnlistenFn | null = null;
+
+    // Log scroll behaviour — terminal-style follow-tail. When the
+    // user is already at (or within 24px of) the bottom of the
+    // log, we auto-scroll on every new line so they see live
+    // output. The moment they scroll up to read something, we
+    // stop following so they're not yanked away mid-read.
+    let logEl: HTMLDivElement | null = $state(null);
+    let followTail = $state<boolean>(true);
+
+    function onLogScroll(): void {
+        if (logEl === null) return;
+        const distanceFromBottom =
+            logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight;
+        followTail = distanceFromBottom < 24;
+    }
+
+    async function maybeFollowTail(): Promise<void> {
+        if (!followTail || logEl === null) return;
+        await tick();
+        if (logEl !== null) logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function resetLog(): void {
+        log = [];
+        followTail = true;
+    }
 
     // STM32-CMake convention: out-of-tree build under <cwd>/build/,
     // with the .elf named after the CMake `project()` directive,
@@ -85,7 +111,7 @@
         }
 
         running = true;
-        log = [];
+        resetLog();
         progressMessage = 'starting…';
         result = null;
         error = null;
@@ -94,6 +120,7 @@
             log = [...log, formatLogLine(event)];
             const msg = formatProgress(event);
             if (msg !== null) progressMessage = msg;
+            void maybeFollowTail();
         });
 
         try {
@@ -153,13 +180,14 @@
         }
 
         running = true;
-        log = [];
+        resetLog();
         progressMessage = 'starting build…';
         result = null;
         error = null;
 
         unlisten = await onFlashEvent((event) => {
             log = [...log, formatLogLine(event)];
+            void maybeFollowTail();
         });
 
         try {
@@ -453,7 +481,22 @@
     {/if}
 
     {#if log.length > 0}
-        <pre class="log">{log.join('\n')}</pre>
+        <!--
+            Per-line rendering instead of `{log.join('\n')}` in one <pre>:
+            each line is its own DOM node, so the browser's diff algorithm
+            only appends new children rather than rebuilding the whole
+            text. That preserves scroll position during chatty builds
+            (e.g. gcc with -W warnings firing dozens of lines a second).
+        -->
+        <div
+            class="log"
+            bind:this={logEl}
+            onscroll={onLogScroll}
+        >
+            {#each log as line, i (i)}
+                <div class="log-line">{line}</div>
+            {/each}
+        </div>
     {/if}
 </div>
 
@@ -600,6 +643,8 @@
         font-family: var(--font-mono);
         font-size: 0.8rem;
         line-height: 1.5;
+    }
+    .log-line {
         white-space: pre-wrap;
         word-break: break-all;
     }
