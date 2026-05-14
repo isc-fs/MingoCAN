@@ -29,6 +29,10 @@
 
     const { selectedAdapter }: Props = $props();
 
+    // svelte-ignore state_referenced_locally
+    // Initial-value capture only — the $effect below keeps interface
+    // and channel in sync when the operator switches adapters in the
+    // Adapters view, so we don't want a reactive read here.
     let request = $state<FlashRequest>(
         defaultFlashRequest(
             selectedAdapter?.interface ?? 'slcan',

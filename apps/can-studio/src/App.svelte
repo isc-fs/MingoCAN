@@ -14,7 +14,7 @@
     import AdaptersView from './lib/AdaptersView.svelte';
     import FlashView from './lib/FlashView.svelte';
     import DiagnosticsView from './lib/DiagnosticsView.svelte';
-    import PlaceholderView from './lib/PlaceholderView.svelte';
+    import LiveDataView from './lib/LiveDataView.svelte';
 
     const initial = defaultAppState();
     let activeView = $state<ViewId>(initial.activeView);
@@ -40,11 +40,7 @@
         {:else if activeView === 'diagnostics'}
             <DiagnosticsView {selectedAdapter} />
         {:else if activeView === 'liveData'}
-            <PlaceholderView
-                title="Live data"
-                tier="Tier 0d"
-                summary="Streaming snapshot view — frames/sec, session age, NACK counters, sliding-window chart. Port of the VS Code extension's live-data webview."
-            />
+            <LiveDataView {selectedAdapter} />
         {/if}
     </main>
 </div>
