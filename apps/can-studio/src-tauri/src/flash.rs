@@ -77,33 +77,14 @@ pub struct FlashRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FlashStreamEvent {
-    BuildLine {
-        stream: &'static str,
-        text: String,
-    },
-    BuildExited {
-        code: Option<i32>,
-    },
-    Planning {
-        sector: u8,
-        role: &'static str,
-    },
-    Erased {
-        sector: u8,
-    },
-    Written {
-        sector: u8,
-        bytes: u32,
-        total: u32,
-    },
-    Verified {
-        sector: u8,
-        crc: String,
-    },
+    BuildLine { stream: &'static str, text: String },
+    BuildExited { code: Option<i32> },
+    Planning { sector: u8, role: &'static str },
+    Erased { sector: u8 },
+    Written { sector: u8, bytes: u32, total: u32 },
+    Verified { sector: u8, crc: String },
     Committing,
-    Done {
-        report: JsonReport,
-    },
+    Done { report: JsonReport },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,8 +175,7 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
 
     // ---- 3. Open backend + session ----
 
-    let interface =
-        parse_interface(&request.interface).map_err(|e| format!("interface: {e}"))?;
+    let interface = parse_interface(&request.interface).map_err(|e| format!("interface: {e}"))?;
     let channel = request.channel.as_deref();
     let backend = open_backend(interface, channel, request.bitrate)
         .map_err(|e| format!("opening backend: {e}"))?;
@@ -246,9 +226,7 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
     // ---- 6. Optional JUMP ----
 
     if request.jump && !request.dry_run {
-        let _ = session
-            .send_command(&cmd_jump(firmware::BL_APP_BASE))
-            .await;
+        let _ = session.send_command(&cmd_jump(firmware::BL_APP_BASE)).await;
         // Fire-and-forget: the device resets and ACK delivery is
         // best-effort post-reset. Surfacing a stray timeout here
         // would be confusing UX after a successful flash.
@@ -299,10 +277,7 @@ async fn run_build(app: &AppHandle, command: &str, cwd: PathBuf) -> Result<(), S
     // the same approach is robust there too. Windows keeps the
     // `cmd /c` shape it had before.
     let (program, args): (String, Vec<String>) = if cfg!(target_os = "windows") {
-        (
-            "cmd.exe".into(),
-            vec!["/c".into(), command.to_string()],
-        )
+        ("cmd.exe".into(), vec!["/c".into(), command.to_string()])
     } else {
         let shell = std::env::var("SHELL")
             .ok()
@@ -356,10 +331,7 @@ async fn run_build(app: &AppHandle, command: &str, cwd: PathBuf) -> Result<(), S
         }
     });
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("wait build: {e}"))?;
+    let status = child.wait().await.map_err(|e| format!("wait build: {e}"))?;
     let _ = tokio::join!(out_task, err_task);
 
     let _ = app.emit(

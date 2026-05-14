@@ -84,8 +84,8 @@ pub async fn health(request: DiagnoseRequest) -> Result<HealthSnapshot, String> 
                     HealthRecord::SIZE,
                 ));
             }
-            let record = HealthRecord::parse(&payload)
-                .map_err(|e| format!("parse HealthRecord: {e}"))?;
+            let record =
+                HealthRecord::parse(&payload).map_err(|e| format!("parse HealthRecord: {e}"))?;
             Ok((&record).into())
         }
         Response::Nack {
