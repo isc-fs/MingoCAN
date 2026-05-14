@@ -79,6 +79,19 @@ export function runFlash(request: FlashRequest): Promise<JsonReport> {
     return invoke<JsonReport>('flash', { request });
 }
 
+/**
+ * Run only the build step (no firmware load, no adapter, no flash).
+ * Streams `flash:event` build_line / build_exited events just like
+ * the full pipeline. Useful for configure-from-scratch CMake projects
+ * where the artifact doesn't yet exist.
+ */
+export function runBuildOnly(
+    command: string,
+    cwd: string | null,
+): Promise<void> {
+    return invoke<void>('build_only', { command, cwd });
+}
+
 export function onFlashEvent(handler: (event: FlashEvent) => void): Promise<UnlistenFn> {
     return listen<FlashEvent>('flash:event', (e) => handler(e.payload));
 }

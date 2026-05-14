@@ -237,6 +237,34 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
     Ok((&report).into())
 }
 
+/// Run *only* the build step. Same shell semantics as the build
+/// phase of `flash` (login-shell on Unix so Homebrew PATH is
+/// visible, `cmd /c` on Windows), same `flash:event` build-line
+/// stream — but the IPC call returns the moment the build process
+/// exits, with no firmware load / no adapter open / no flashing.
+///
+/// Why it exists: configure-from-scratch CMake projects need to
+/// produce the `build/` directory + the artifact before flashing
+/// is even possible. Without a "build only" path, operators were
+/// forced to drop to a terminal for the very first run, which
+/// defeats the purpose of a desktop app.
+#[tauri::command]
+pub async fn build_only(
+    app: AppHandle,
+    command: String,
+    cwd: Option<String>,
+) -> Result<(), String> {
+    let cmd = command.trim();
+    if cmd.is_empty() {
+        return Err("build command is empty".into());
+    }
+    let cwd = match cwd.as_deref().map(str::trim) {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => PathBuf::from("."),
+    };
+    run_build(&app, cmd, cwd).await
+}
+
 // ---- Build step ----
 
 fn resolve_build_cwd(request: &FlashRequest) -> PathBuf {

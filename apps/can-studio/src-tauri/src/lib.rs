@@ -49,6 +49,7 @@ pub fn run() {
             can_flasher_version,
             discover_adapters,
             flash::flash,
+            flash::build_only,
             diagnose::health,
             diagnose::read_dtcs,
             diagnose::clear_dtcs,
