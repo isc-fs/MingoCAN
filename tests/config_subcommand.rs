@@ -273,11 +273,13 @@ async fn nvm_format_with_bad_token_nacks_wrong_token() {
         other => panic!("expected NACK(NvmWrongToken) for bad token, got {other:?}"),
     }
 
-    // Confirm the value survived the failed format.
+    // Confirm the value survived the failed format. NVM_READ ACK
+    // payload is `[len, value…]` (no leading opcode byte).
     let resp = session.send_command(&cmd_nvm_read(key)).await.unwrap();
     match resp {
         Response::Ack { payload, .. } => {
-            assert_eq!(&payload[2..], b"keep me", "value should be intact");
+            assert_eq!(payload[0] as usize, "keep me".len());
+            assert_eq!(&payload[1..], b"keep me", "value should be intact");
         }
         other => panic!("expected ACK with original value, got {other:?}"),
     }
