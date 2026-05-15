@@ -5,6 +5,20 @@ All notable changes to the ISC STM32 CAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-05-15 — Unified release model
+
+### Changed
+- **Versioning unified across all three product surfaces.** The
+  CLI, this extension, and ISC CAN Studio now ship at the same
+  version from a single `v*` tag (e.g. `v2.0.0`). The previous
+  `editor-v*` and `can-studio-v*` tag namespaces are retired —
+  see [`docs/CONTRIBUTING.md § Cutting a release`](https://github.com/isc-fs/can-flasher/blob/v2.0.0/docs/CONTRIBUTING.md#cutting-a-release).
+  Jumps the extension's SemVer from 0.1.x straight to 2.0.0 to
+  match the CLI; functionally equivalent to 0.1.4. Zero code
+  changes in the extension itself for this release.
+- Distribution channel unchanged: GitHub Releases (not the VS
+  Code Marketplace).
+
 ## [0.1.4] — 2026-05-15
 
 ### Changed
