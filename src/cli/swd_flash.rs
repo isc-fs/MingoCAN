@@ -91,7 +91,8 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
         )
     })?;
 
-    let artifact_path = resolve_artifact(args.artifact, args.release.as_deref(), args.release_format).await?;
+    let artifact_path =
+        resolve_artifact(args.artifact, args.release.as_deref(), args.release_format).await?;
 
     let mut request = SwdFlashRequest::new(artifact_path);
     request.chip = args.chip;
