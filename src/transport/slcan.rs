@@ -1041,6 +1041,9 @@ mod tests {
             serial_number: None,
             manufacturer: manufacturer.map(str::to_string),
             product: product.map(str::to_string),
+            // serialport 4.9 added `interface` (USB CDC interface
+            // number); tests don't care so always None.
+            interface: None,
         }
     }
 

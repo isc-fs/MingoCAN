@@ -162,8 +162,13 @@ pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
         })?
         .to_ascii_lowercase();
 
+    // probe-rs's `Format` variants take per-format options. We pass
+    // `Default::default()` everywhere — the defaults match what
+    // operators expect (no skipped ELF sections, raw `.bin` carries
+    // no embedded base address, etc.). Power-users who need to
+    // tweak those can drop down to the underlying probe-rs API.
     let format = match ext.as_str() {
-        "elf" => Format::Elf,
+        "elf" => Format::Elf(Default::default()),
         "hex" => Format::Hex,
         "bin" => Format::Bin(Default::default()),
         _ => return Err(SwdError::ArtifactBadExtension { ext }),
@@ -177,7 +182,11 @@ pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
         (_, Some(target_serial)) => {
             let available: Vec<_> = probes
                 .iter()
-                .map(|p| p.serial_number.clone().unwrap_or_else(|| "(no serial)".into()))
+                .map(|p| {
+                    p.serial_number
+                        .clone()
+                        .unwrap_or_else(|| "(no serial)".into())
+                })
                 .collect();
             probes
                 .into_iter()
@@ -194,11 +203,16 @@ pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
                     format!(
                         "{} ({})",
                         p.identifier,
-                        p.serial_number.clone().unwrap_or_else(|| "(no serial)".into()),
+                        p.serial_number
+                            .clone()
+                            .unwrap_or_else(|| "(no serial)".into()),
                     )
                 })
                 .collect();
-            warn!(probe_count = n, "multiple probes attached; need --probe-serial");
+            warn!(
+                probe_count = n,
+                "multiple probes attached; need --probe-serial"
+            );
             return Err(SwdError::AmbiguousProbe(summary.join("; ")));
         }
     };
@@ -273,7 +287,7 @@ mod tests {
             ("elf", true),
             ("hex", true),
             ("bin", true),
-            ("ELF", true),  // case-insensitive
+            ("ELF", true), // case-insensitive
             ("ihex", false),
             ("img", false),
             ("", false),

@@ -62,7 +62,10 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
     let base_addr = parse_hex_u64(&args.base).ok_or_else(|| {
         exit_err(
             ExitCodeHint::InputFileError,
-            format!("--base must be a 0x-prefixed hex address; got {:?}", args.base),
+            format!(
+                "--base must be a 0x-prefixed hex address; got {:?}",
+                args.base
+            ),
         )
     })?;
 
