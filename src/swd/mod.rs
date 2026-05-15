@@ -48,8 +48,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use probe_rs::flashing::{
-    download_file_with_options, erase_all, DownloadOptions, FlashProgress, Format,
-    ProgressEvent, ProgressOperation,
+    download_file_with_options, erase_all, DownloadOptions, FlashProgress, Format, ProgressEvent,
+    ProgressOperation,
 };
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::DebugProbeInfo;
@@ -150,7 +150,10 @@ pub fn list_probes() -> Vec<DebugProbeInfo> {
 pub enum SwdProgress {
     /// A new operation (erase / program / verify / fill) began.
     /// `total` is the byte count to process, when known.
-    Started { op: SwdOperation, total: Option<u64> },
+    Started {
+        op: SwdOperation,
+        total: Option<u64>,
+    },
     /// Incremental progress on the current operation. `delta` is
     /// the byte count completed since the previous event (i.e.
     /// the caller maintains the running total themselves).
@@ -171,18 +174,19 @@ pub enum SwdOperation {
     Program,
     Verify,
     Fill,
-    Other,
 }
 
 impl From<ProgressOperation> for SwdOperation {
     fn from(op: ProgressOperation) -> Self {
+        // probe-rs 0.31's `ProgressOperation` is exhaustive over
+        // exactly these four phases; clippy rejects a catch-all.
+        // If a future probe-rs adds a variant the match goes red
+        // and we update it deliberately.
         match op {
             ProgressOperation::Erase => Self::Erase,
             ProgressOperation::Program => Self::Program,
             ProgressOperation::Verify => Self::Verify,
             ProgressOperation::Fill => Self::Fill,
-            // probe-rs may add new variants; keep us forward-compatible.
-            _ => Self::Other,
         }
     }
 }
@@ -206,10 +210,7 @@ pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
 /// transition and progress tick that probe-rs surfaces. The
 /// closure runs inside probe-rs's flashing loop; keep it cheap
 /// (push onto an `mpsc`, increment a counter — don't do I/O).
-pub fn flash_with_progress<F>(
-    request: &SwdFlashRequest,
-    mut on_progress: F,
-) -> Result<(), SwdError>
+pub fn flash_with_progress<F>(request: &SwdFlashRequest, mut on_progress: F) -> Result<(), SwdError>
 where
     F: FnMut(SwdProgress),
 {
@@ -320,7 +321,9 @@ where
                 total: None,
             });
         }
-        ProgressEvent::Progress { operation, size, .. } => {
+        ProgressEvent::Progress {
+            operation, size, ..
+        } => {
             on_progress(SwdProgress::Progress {
                 op: operation.into(),
                 delta: size,
@@ -430,7 +433,10 @@ pub fn erase_chip(request: &SwdEraseRequest) -> Result<(), SwdError> {
                     )
                 })
                 .collect();
-            warn!(probe_count = n, "multiple probes attached; need --probe-serial");
+            warn!(
+                probe_count = n,
+                "multiple probes attached; need --probe-serial"
+            );
             return Err(SwdError::AmbiguousProbe(summary.join("; ")));
         }
     };

@@ -195,9 +195,11 @@ async fn resolve_artifact(
 fn drive_progress_bar(rx: mpsc::Receiver<SwdProgress>) {
     let bar = ProgressBar::new(0);
     bar.set_style(
-        ProgressStyle::with_template("{spinner} {msg:<14} [{bar:40.cyan/blue}] {bytes}/{total_bytes}")
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .progress_chars("=> "),
+        ProgressStyle::with_template(
+            "{spinner} {msg:<14} [{bar:40.cyan/blue}] {bytes}/{total_bytes}",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("=> "),
     );
     bar.enable_steady_tick(std::time::Duration::from_millis(80));
 

@@ -62,7 +62,7 @@ export function swdFetchBootloader(tag: string | null): Promise<FetchedBootloade
 }
 
 /** Probe-rs phase identifier. Matches `SwdOperation` in swd.rs. */
-export type SwdOp = 'erase' | 'program' | 'verify' | 'fill' | 'other';
+export type SwdOp = 'erase' | 'program' | 'verify' | 'fill';
 
 /**
  * One progress event emitted while `swd_flash` is in flight.

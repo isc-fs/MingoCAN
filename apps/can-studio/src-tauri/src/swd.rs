@@ -22,9 +22,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use can_flasher::bootloader_fetch::{self, BootloaderFormat};
-use can_flasher::swd::{
-    self, SwdEraseRequest, SwdFlashRequest, SwdOperation, SwdProgress,
-};
+use can_flasher::swd::{self, SwdEraseRequest, SwdFlashRequest, SwdOperation, SwdProgress};
 
 // ---- DTOs ----
 
@@ -73,10 +71,20 @@ pub struct SwdEraseArgs {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum SwdStreamEvent {
-    Started { op: &'static str, total: Option<u64> },
-    Progress { op: &'static str, delta: u64 },
-    Finished { op: &'static str },
-    Failed { op: &'static str },
+    Started {
+        op: &'static str,
+        total: Option<u64>,
+    },
+    Progress {
+        op: &'static str,
+        delta: u64,
+    },
+    Finished {
+        op: &'static str,
+    },
+    Failed {
+        op: &'static str,
+    },
 }
 
 fn op_name(op: SwdOperation) -> &'static str {
@@ -85,7 +93,6 @@ fn op_name(op: SwdOperation) -> &'static str {
         SwdOperation::Program => "program",
         SwdOperation::Verify => "verify",
         SwdOperation::Fill => "fill",
-        SwdOperation::Other => "other",
     }
 }
 
@@ -257,6 +264,5 @@ mod tests {
         assert_eq!(op_name(SwdOperation::Program), "program");
         assert_eq!(op_name(SwdOperation::Verify), "verify");
         assert_eq!(op_name(SwdOperation::Fill), "fill");
-        assert_eq!(op_name(SwdOperation::Other), "other");
     }
 }

@@ -227,7 +227,7 @@
                 ? 'Verifying flash'
                 : currentOp === 'fill'
                   ? 'Filling flash'
-                  : 'Working',
+                  : 'Working…',
     );
 
     onMount(async () => {
