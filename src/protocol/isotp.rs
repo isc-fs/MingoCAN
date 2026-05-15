@@ -757,8 +757,7 @@ mod tests {
                     if frame.len() < 8 {
                         return Err(IsoTpError::BadPci);
                     }
-                    total_len =
-                        (usize::from(pci_lo) << 8) | usize::from(frame[1]);
+                    total_len = (usize::from(pci_lo) << 8) | usize::from(frame[1]);
                     if total_len == 0 {
                         return Err(IsoTpError::BadPci);
                     }
@@ -807,13 +806,8 @@ mod tests {
         // Real flasher payload for one FLASH_WRITE_CHUNK with the new
         // wire format: msg_type (1) + opcode (1) + addr (4) + data (256).
         let payload: Vec<u8> = (0..262).map(|i| (i & 0xFF) as u8).collect();
-        let frames: Vec<[u8; FRAME_LEN]> =
-            IsoTpSegmenter::new(&payload).unwrap().collect();
-        assert_eq!(
-            frames.len(),
-            1 + 37,
-            "262-byte payload = 1 FF + 37 CFs"
-        );
+        let frames: Vec<[u8; FRAME_LEN]> = IsoTpSegmenter::new(&payload).unwrap().collect();
+        assert_eq!(frames.len(), 1 + 37, "262-byte payload = 1 FF + 37 CFs");
         let frame_slices = as_full_frames(&frames);
         bl_v1_2_strict_check(&frame_slices)
             .expect("segmenter output must pass BL v1.2.0 strict rules");
@@ -828,8 +822,7 @@ mod tests {
             8_usize, 13, 14, 20, 27, 64, 100, 128, 256, 261, 262, 519, 1024,
         ] {
             let payload: Vec<u8> = (0..total_len).map(|i| (i & 0xFF) as u8).collect();
-            let frames: Vec<[u8; FRAME_LEN]> =
-                IsoTpSegmenter::new(&payload).unwrap().collect();
+            let frames: Vec<[u8; FRAME_LEN]> = IsoTpSegmenter::new(&payload).unwrap().collect();
             let frame_slices = as_full_frames(&frames);
             bl_v1_2_strict_check(&frame_slices).unwrap_or_else(|e| {
                 panic!(
