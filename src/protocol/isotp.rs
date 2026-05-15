@@ -712,4 +712,149 @@ mod tests {
         assert_eq!(fc[2], 0x00);
         assert_eq!(&fc[3..], &[0u8; 5]);
     }
+
+    // ---- Bootloader v1.2.0 strict-reassembler simulation ----
+    //
+    // The bootloader (per `bl_isotp.c` in stm32-can-bootloader@main)
+    // added two reject conditions in v1.2.0 (PR #63 + #78) that the
+    // pre-v1.2 BL silently dropped:
+    //
+    //   1. PCI nibble 4..F (in either Idle or WaitCf state)
+    //      → `BL_ISOTP_ERR_BAD_PCI`
+    //   2. FF with CAN DLC < 8       → `BL_ISOTP_ERR_BAD_PCI`
+    //   3. CF with CAN DLC < 2       → `BL_ISOTP_ERR_BAD_PCI`
+    //   4. FF with `total_len == 0`  → `BL_ISOTP_ERR_BAD_PCI`
+    //
+    // These tests verify the host-side segmenter never emits a frame
+    // stream that would trip any of these. Operator-facing context:
+    // issue #178 reports a `NACK(TRANSPORT_ERROR)` on the first
+    // FLASH_WRITE_CHUNK against a v1.2.0-rc1 bootloader — these
+    // tests should fail if the segmenter has a bug that the new BL
+    // strictness now catches.
+
+    /// Mirrors the BL's `bl_isotp_rx_feed` dispatch + `handle_ff` +
+    /// `handle_cf` reject rules. DLC of every frame is treated as
+    /// the slice length passed in (caller is responsible for passing
+    /// the actual on-wire byte count).
+    fn bl_v1_2_strict_check(frames: &[&[u8]]) -> Result<(), IsoTpError> {
+        let mut next_seq: u8 = 0;
+        let mut total_len: usize = 0;
+        let mut received: usize = 0;
+        for frame in frames {
+            if frame.is_empty() {
+                return Err(IsoTpError::BadPci);
+            }
+            let pci_hi = frame[0] & PCI_MASK_HI;
+            let pci_lo = frame[0] & PCI_MASK_LO;
+            match pci_hi {
+                PCI_SF => {
+                    let len = pci_lo as usize;
+                    if frame.len() < 1 + len {
+                        return Err(IsoTpError::BadPci);
+                    }
+                }
+                PCI_FF => {
+                    if frame.len() < 8 {
+                        return Err(IsoTpError::BadPci);
+                    }
+                    total_len = (usize::from(pci_lo) << 8) | usize::from(frame[1]);
+                    if total_len == 0 {
+                        return Err(IsoTpError::BadPci);
+                    }
+                    if total_len > MAX_MSG_LEN {
+                        return Err(IsoTpError::Overflow {
+                            declared: total_len,
+                            max: MAX_MSG_LEN,
+                        });
+                    }
+                    received = FF_INITIAL_PAYLOAD.min(total_len);
+                    next_seq = 1;
+                }
+                PCI_CF => {
+                    if frame.len() < 2 {
+                        return Err(IsoTpError::BadPci);
+                    }
+                    if pci_lo != next_seq {
+                        return Err(IsoTpError::BadSeq {
+                            expected: next_seq,
+                            got: pci_lo,
+                        });
+                    }
+                    let remaining = total_len - received;
+                    let frame_avail = frame.len() - 1;
+                    let take = remaining.min(frame_avail);
+                    received += take;
+                    next_seq = (next_seq + 1) & 0x0F;
+                }
+                PCI_FC => {} // BL doesn't validate FC in rx-feed
+                _ => return Err(IsoTpError::BadPci),
+            }
+        }
+        Ok(())
+    }
+
+    /// Helper: the on-wire DLC of every CAN frame the flasher emits
+    /// is always 8 (classic CAN). The segmenter yields `[u8; 8]` and
+    /// the session/SocketCAN paths preserve that length through to
+    /// the kernel. Treat each segmenter output as an 8-byte frame.
+    fn as_full_frames(frames: &[[u8; FRAME_LEN]]) -> Vec<&[u8]> {
+        frames.iter().map(|f| &f[..]).collect()
+    }
+
+    #[test]
+    fn strict_bl_accepts_segmented_flash_write_chunk_262_bytes() {
+        // Real flasher payload for one FLASH_WRITE_CHUNK with the new
+        // wire format: msg_type (1) + opcode (1) + addr (4) + data (256).
+        let payload: Vec<u8> = (0..262).map(|i| (i & 0xFF) as u8).collect();
+        let frames: Vec<[u8; FRAME_LEN]> = IsoTpSegmenter::new(&payload).unwrap().collect();
+        assert_eq!(frames.len(), 1 + 37, "262-byte payload = 1 FF + 37 CFs");
+        let frame_slices = as_full_frames(&frames);
+        bl_v1_2_strict_check(&frame_slices)
+            .expect("segmenter output must pass BL v1.2.0 strict rules");
+    }
+
+    #[test]
+    fn strict_bl_accepts_message_lengths_around_cf_boundaries() {
+        // Edge: total_len - 6 exactly divisible by 7 (last CF is full).
+        // Edge: total_len - 6 has remainder 1 (last CF carries 1 byte).
+        // Edge: total_len exactly 8 (single CF of 2 bytes).
+        for total_len in [
+            8_usize, 13, 14, 20, 27, 64, 100, 128, 256, 261, 262, 519, 1024,
+        ] {
+            let payload: Vec<u8> = (0..total_len).map(|i| (i & 0xFF) as u8).collect();
+            let frames: Vec<[u8; FRAME_LEN]> = IsoTpSegmenter::new(&payload).unwrap().collect();
+            let frame_slices = as_full_frames(&frames);
+            bl_v1_2_strict_check(&frame_slices).unwrap_or_else(|e| {
+                panic!(
+                    "BL v1.2 strict rules rejected segmenter output for \
+                     total_len={total_len} (frames={}): {e:?}",
+                    frames.len()
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn strict_bl_rejects_ff_with_dlc_under_8() {
+        // Defence-in-depth: confirm our strict checker catches the
+        // BL's known reject conditions. If the flasher ever emits an
+        // FF with DLC < 8 it would trip this rule and the test on
+        // top would fail.
+        let ff_short = [0x10_u8, 0x08, 1, 2, 3, 4]; // DLC=6
+        assert!(matches!(
+            bl_v1_2_strict_check(&[&ff_short[..]]),
+            Err(IsoTpError::BadPci)
+        ));
+    }
+
+    #[test]
+    fn strict_bl_rejects_cf_with_dlc_under_2() {
+        // FF declaring 10 bytes then a CF with only the PCI byte (DLC=1).
+        let ff = [0x10_u8, 0x0A, 1, 2, 3, 4, 5, 6];
+        let cf_short = [0x21_u8]; // DLC=1
+        assert!(matches!(
+            bl_v1_2_strict_check(&[&ff[..], &cf_short[..]]),
+            Err(IsoTpError::BadPci)
+        ));
+    }
 }
