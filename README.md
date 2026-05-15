@@ -27,6 +27,7 @@ improvements, and tooling.
 | `replay` | Record / replay CAN sessions for testing |
 | `flash` | Program firmware end-to-end |
 | `send-raw` | Send one raw CAN frame (app-level reboot-to-BL, bench probes) |
+| `swd-flash` *(opt-in: `--features swd`)* | First-boot a bare STM32 via ST-LINK — covers the chicken-and-egg case where the CAN bootloader isn't on the chip yet |
 
 ## Supported adapters
 

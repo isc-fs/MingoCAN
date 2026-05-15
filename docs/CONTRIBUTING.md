@@ -126,9 +126,25 @@ bot's token; no PR feasible from a workflow run). Force-pushes
 and deletion may still be locked down later via a Rulesets bot
 bypass if direct pushes start to bite.
 
-The repo also has **`delete_branch_on_merge: true`**, so
-feat/fix branches auto-delete from origin the moment their PR
-lands. No more lingering `feat/19-foo` on the branch list.
+**Manual branch cleanup.** `delete_branch_on_merge` is
+intentionally **off** at the repo level — see the post-mortem
+note below. Use `gh pr merge --delete-branch` (or click "Delete
+branch" in the GitHub UI after merge) to clean feat/fix branches
+yourself. Long-lived branches (`dev`, `main`) must never be
+auto-deleted.
+
+> **Why off**: GitHub's `delete_branch_on_merge` flag is
+> repo-wide and applies to *every* PR's head branch on merge,
+> including the long-lived `dev` branch on a `dev → main`
+> release PR. v2.0.0's release uncovered this — when PR #187
+> (dev → main) merged with the flag on, GitHub silently deleted
+> `dev`, and the inline `sync-dev` job in `release.yml` then
+> failed at checkout because the branch it was trying to push to
+> no longer existed. dev was restored from main (same SHA, no
+> data loss), the flag was disabled, and the lesson stays in the
+> repo's setting. There's no per-branch exclusion in classic
+> branch protection; if we ever want a "delete except `dev` and
+> `main`" rule, that's a Rulesets-tier project.
 
 If you ever hit a "Required pull request is missing" or
 "Protected branch update failed" error against `main`, you're

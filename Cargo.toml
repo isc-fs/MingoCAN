@@ -9,7 +9,7 @@ members = [
 
 [package]
 name        = "can-flasher"
-version     = "2.0.0"
+version     = "2.1.0"
 edition     = "2021"
 rust-version = "1.95"
 description = "Host-side CAN flasher for the isc-fs STM32 CAN bootloader"
@@ -49,6 +49,42 @@ thiserror          = "2.0"
 tokio              = { version = "1.40", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# probe-rs is the pure-Rust SWD/JTAG stack used by the new
+# `swd-flash` subcommand to lay the bootloader onto a bare STM32
+# via ST-LINK V2 / V3. Gated behind the `swd` Cargo feature so
+# the existing CAN flasher binary stays small for operators who
+# only ever do over-CAN app updates. Disabled by default until
+# the spike confirms the libusb story across all three OSes.
+probe-rs           = { version = "0.31", optional = true }
+
+# Blocking HTTP client with bundled rustls TLS. Used by the
+# bootloader auto-download path (`--release` flag on `swd-flash`
+# + Studio's "Fetch from releases" toggle) to pull the right
+# `CAN_BL.elf` asset from the BL repo. Same `swd`-feature gating
+# as probe-rs — only operators on the SWD path pay the size cost.
+ureq               = { version = "2.10", default-features = false, features = ["tls", "json"], optional = true }
+
+# Platform-correct cache directory resolution
+# (~/Library/Caches on macOS, $XDG_CACHE_HOME / ~/.cache on Linux,
+# %LOCALAPPDATA% on Windows). Used by `bootloader_fetch` to pick
+# a sensible spot for the downloaded `.elf`. Tiny dependency
+# (~200 LoC of platform conditionals); still gated to keep the
+# default-feature binary unchanged.
+dirs               = { version = "5.0", optional = true }
+
+[features]
+# Default feature set — everything that ships in the existing
+# operator-facing binary continues to ship.
+default = []
+
+# Opt-in SWD/JTAG flashing via probe-rs. Pulls in libusb + a
+# handful of additional crates (~2 MB binary growth, target
+# database). Build with `cargo install … --features swd` or
+# `cargo build --features swd`. Release binaries from
+# `release.yml` will turn this on once the spike validates on
+# all three platforms.
+swd = ["dep:probe-rs", "dep:ureq", "dep:dirs"]
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sync"] }

@@ -14,6 +14,7 @@ mod dbc;
 mod diagnose;
 mod flash;
 mod live_data;
+mod swd;
 
 use can_flasher::cli::adapters::{collect_report, AdapterReport};
 
@@ -24,10 +25,14 @@ use can_flasher::cli::adapters::{collect_report, AdapterReport};
 /// dependency resolved correctly.
 #[tauri::command]
 fn can_flasher_version() -> &'static str {
-    // Inlined to match the workspace's Cargo.toml; the library
-    // crate doesn't currently re-export this. Move into
-    // `can_flasher` proper once we add an About panel.
-    "1.2.0"
+    // Studio + can-flasher ship in lockstep — `release.yml`'s
+    // verify-version gate proves the workspace's Cargo.toml and
+    // the studio's Cargo.toml carry the same version on any
+    // tagged build. Returning our own `CARGO_PKG_VERSION`
+    // therefore matches the bundled library version without a
+    // hardcoded string that goes stale (the previous "1.2.0"
+    // outlived three releases).
+    env!("CARGO_PKG_VERSION")
 }
 
 /// Enumerate every CAN adapter the host can see — same data the
@@ -67,7 +72,10 @@ pub fn run() {
             dbc::dbc_load,
             dbc::dbc_unload,
             dbc::dbc_status,
-            dbc::dbc_signals
+            dbc::dbc_signals,
+            swd::swd_list_probes,
+            swd::swd_flash,
+            swd::swd_fetch_bootloader,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC CAN Studio Tauri app");

@@ -8,10 +8,14 @@
 
 #![doc(html_root_url = "https://docs.rs/can-flasher")]
 
+#[cfg(feature = "swd")]
+pub mod bootloader_fetch;
 pub mod cli;
 pub mod firmware;
 pub mod flash;
 pub mod logging;
 pub mod protocol;
 pub mod session;
+#[cfg(feature = "swd")]
+pub mod swd;
 pub mod transport;
