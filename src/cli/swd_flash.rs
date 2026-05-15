@@ -245,7 +245,6 @@ fn op_label(op: SwdOperation) -> &'static str {
         SwdOperation::Program => "writing",
         SwdOperation::Verify => "verifying",
         SwdOperation::Fill => "filling",
-        SwdOperation::Other => "working",
     }
 }
 
