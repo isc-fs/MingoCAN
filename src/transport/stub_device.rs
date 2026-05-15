@@ -37,7 +37,7 @@ use crate::protocol::commands::{PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR};
 use crate::protocol::ids::{FrameId, MessageType};
 use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
 use crate::protocol::opcodes::{CommandOpcode, NackCode};
-use crate::protocol::records::OB_APPLY_TOKEN;
+use crate::protocol::records::{NVM_FORMAT_TOKEN, OB_APPLY_TOKEN};
 use crate::protocol::CanFrame;
 
 use super::{CanBackend, Result, TransportError};
@@ -340,6 +340,7 @@ impl StubDevice {
             Ok(CommandOpcode::ObApplyWrp) => self.handle_ob_apply_wrp(peer, payload).await,
             Ok(CommandOpcode::NvmRead) => self.handle_nvm_read(peer, payload).await,
             Ok(CommandOpcode::NvmWrite) => self.handle_nvm_write(peer, payload).await,
+            Ok(CommandOpcode::NvmFormat) => self.handle_nvm_format(peer, payload).await,
             Ok(CommandOpcode::FlashErase) => self.handle_flash_erase(peer, payload).await,
             Ok(CommandOpcode::FlashWrite) => self.handle_flash_write(peer, payload).await,
             Ok(CommandOpcode::FlashReadCrc) => self.handle_flash_read_crc(peer, payload).await,
@@ -656,6 +657,47 @@ impl StubDevice {
         }
 
         let resp = [CommandOpcode::NvmWrite.as_byte()];
+        self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+    /// Session-gated `CMD_NVM_FORMAT`. Payload is the 4-byte LE
+    /// `BL_NVM_FORMAT_TOKEN`; nothing else. Wipes the entire NVM
+    /// map (real bootloader erases sector 7 and resets internal
+    /// pointers). Wrong / missing token NACKs with
+    /// `NACK(NVM_WRONG_TOKEN)`.
+    async fn handle_nvm_format(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        if !self.session_active {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmFormat.as_byte(),
+                    NackCode::BadSession,
+                )
+                .await;
+        }
+        // payload = [opcode, token_le32]
+        if payload.len() < 1 + 4 {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmFormat.as_byte(),
+                    NackCode::NvmWrongToken,
+                )
+                .await;
+        }
+        let token = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        if token != NVM_FORMAT_TOKEN {
+            return self
+                .send_nack(
+                    peer,
+                    CommandOpcode::NvmFormat.as_byte(),
+                    NackCode::NvmWrongToken,
+                )
+                .await;
+        }
+        self.nvm.clear();
+
+        let resp = [CommandOpcode::NvmFormat.as_byte()];
         self.send_message(peer, MessageType::Ack, &resp).await
     }
 

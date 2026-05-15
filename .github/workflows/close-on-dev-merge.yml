@@ -2,56 +2,140 @@ name: Close linked issues on merge to dev
 
 # GitHub only auto-closes issues referenced by `Closes #N` when the PR is merged
 # into the repository's default branch. Our workflow merges feat/fix PRs into
-# `dev` instead, so this workflow reproduces the behaviour by parsing the PR
-# body for the standard closing keywords and closing each referenced issue.
+# `dev` instead, so this workflow reproduces the behaviour — and goes one
+# better by *also* matching the PR's head branch against the tracking issue
+# created by `branch-issue.yml`, so authors who forget to type `Closes #N`
+# still get their tracking issue closed automatically.
+#
+# Two triggers:
+#   - `pull_request: closed` against `dev` (the live path)
+#   - `workflow_dispatch` with a comma-separated list of PR numbers — used
+#     for one-off historical backfills. Fetches each PR's title / body /
+#     head ref and runs the same close logic against it.
 
 on:
   pull_request:
     types: [closed]
     branches:
       - dev
+  workflow_dispatch:
+    inputs:
+      pr_numbers:
+        description: 'Comma-separated PR numbers to replay (e.g. "163,160,157"). All must already be merged into dev.'
+        required: true
+        type: string
 
 jobs:
   close-linked:
-    if: github.event.pull_request.merged == true
+    # Live path: only run when a PR is actually merged.
+    # Dispatch path: always run.
+    if: (github.event_name == 'workflow_dispatch') || (github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     permissions:
       issues: write
       pull-requests: read
 
     steps:
-      - name: Close issues referenced by the PR body
+      - name: Close linked issues
         uses: actions/github-script@v7
         env:
+          # Live trigger context (empty on workflow_dispatch).
           PR_BODY:   ${{ github.event.pull_request.body }}
           PR_TITLE:  ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE:   ${{ github.event.pull_request.base.ref }}
+          PR_HEAD:   ${{ github.event.pull_request.head.ref }}
+          # Dispatch trigger context (empty on pull_request).
+          DISPATCH_PRS: ${{ github.event.inputs.pr_numbers }}
+          EVENT_NAME:   ${{ github.event_name }}
         with:
           script: |
-            const body    = process.env.PR_BODY  || '';
-            const title   = process.env.PR_TITLE || '';
-            const prNum   = parseInt(process.env.PR_NUMBER, 10);
-            const baseRef = process.env.PR_BASE;
-
-            /* GitHub's own closing keywords:
-                 close, closes, closed, fix, fixes, fixed,
-                 resolve, resolves, resolved
-               Followed by an optional colon and `#N`. */
-            const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
-
-            const text = `${title}\n${body}`;
-            const numbers = new Set();
-            for (const m of text.matchAll(pattern)) {
-              numbers.add(parseInt(m[1], 10));
+            /* Each tick produces a (title, body, number, base, head) tuple.
+               On the live path, that's the event payload directly. On the
+               dispatch path, we fetch each PR via the API and synthesise
+               the tuple — so the close logic below is identical for both
+               sources. */
+            async function listTargets() {
+              if (process.env.EVENT_NAME === 'workflow_dispatch') {
+                const raw = (process.env.DISPATCH_PRS || '').trim();
+                if (!raw) {
+                  console.log('No PR numbers provided to workflow_dispatch.');
+                  return [];
+                }
+                const ids = raw.split(/[\s,]+/).map(s => parseInt(s, 10)).filter(Boolean);
+                const targets = [];
+                for (const n of ids) {
+                  try {
+                    const { data: pr } = await github.rest.pulls.get({
+                      owner: context.repo.owner,
+                      repo:  context.repo.repo,
+                      pull_number: n,
+                    });
+                    if (!pr.merged) {
+                      console.log(`#${n}: not merged, skipping`);
+                      continue;
+                    }
+                    targets.push({
+                      title:   pr.title || '',
+                      body:    pr.body  || '',
+                      number:  pr.number,
+                      base:    pr.base.ref,
+                      head:    pr.head.ref || '',
+                    });
+                  } catch (err) {
+                    console.log(`#${n}: fetch failed — ${err.message}`);
+                  }
+                }
+                return targets;
+              }
+              return [{
+                title:   process.env.PR_TITLE  || '',
+                body:    process.env.PR_BODY   || '',
+                number:  parseInt(process.env.PR_NUMBER, 10),
+                base:    process.env.PR_BASE,
+                head:    process.env.PR_HEAD   || '',
+              }];
             }
 
-            if (numbers.size === 0) {
-              console.log('No closing-keyword references found in PR body or title.');
-              return;
+            async function findLinkedIssues(target) {
+              const numbers = new Set();
+
+              /* Source 1 — explicit closing keywords in title + body. */
+              const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
+              for (const m of `${target.title}\n${target.body}`.matchAll(pattern)) {
+                numbers.add(parseInt(m[1], 10));
+              }
+
+              /* Source 2 — auto-discover the tracking issue created by the
+                 sibling `branch-issue.yml` workflow. Those issues are titled
+                 `[<branch>] …`, so we can link a feat/fix PR by its head
+                 branch even without a `Closes #N` line in the body.
+                 The common path for our workflow. */
+              if (target.head && /^(feat|fix)\//.test(target.head)) {
+                const type = target.head.split('/')[0];
+                try {
+                  const issues = await github.paginate(github.rest.issues.listForRepo, {
+                    owner:    context.repo.owner,
+                    repo:     context.repo.repo,
+                    labels:   type,
+                    state:    'open',
+                    per_page: 100,
+                  });
+                  const titlePrefix = `[${target.head}]`;
+                  for (const issue of issues) {
+                    if (issue.pull_request) continue;
+                    if (issue.title.startsWith(titlePrefix)) {
+                      numbers.add(issue.number);
+                    }
+                  }
+                } catch (err) {
+                  console.log(`Issue lookup by head ref failed: ${err.message}`);
+                }
+              }
+              return numbers;
             }
 
-            for (const n of numbers) {
+            async function closeIssue(n, target) {
               try {
                 const { data: issue } = await github.rest.issues.get({
                   owner: context.repo.owner,
@@ -60,11 +144,11 @@ jobs:
                 });
                 if (issue.pull_request) {
                   console.log(`#${n} is a PR, skipping.`);
-                  continue;
+                  return;
                 }
                 if (issue.state === 'closed') {
                   console.log(`#${n} already closed, skipping.`);
-                  continue;
+                  return;
                 }
                 await github.rest.issues.update({
                   owner: context.repo.owner,
@@ -77,10 +161,27 @@ jobs:
                   owner: context.repo.owner,
                   repo:  context.repo.repo,
                   issue_number: n,
-                  body:  `Closed by #${prNum} (merged into \`${baseRef}\`).`,
+                  body:  `Closed by #${target.number} (merged into \`${target.base}\`).`,
                 });
                 console.log(`Closed #${n}.`);
               } catch (err) {
                 console.log(`Could not close #${n}: ${err.message}`);
+              }
+            }
+
+            const targets = await listTargets();
+            if (targets.length === 0) {
+              console.log('Nothing to process.');
+              return;
+            }
+            for (const target of targets) {
+              console.log(`\n=== PR #${target.number} (head: ${target.head}) ===`);
+              const numbers = await findLinkedIssues(target);
+              if (numbers.size === 0) {
+                console.log(`No tracking issue found for #${target.number}.`);
+                continue;
+              }
+              for (const n of numbers) {
+                await closeIssue(n, target);
               }
             }

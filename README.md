@@ -4,11 +4,13 @@
 
 Host-side CAN flasher for the [isc-fs/stm32-can-bootloader](https://github.com/isc-fs/stm32-can-bootloader).
 Single static Rust binary that runs on Linux, macOS and Windows;
-speaks the bootloader's classic-CAN protocol through four adapter
-families: SLCAN (CANable, all OSes), SocketCAN (Linux), PCAN-Basic
-(Windows / macOS), and Vector XL Driver Library (VN1610 and the
-rest of the [VN16xx](https://www.vector.com/int/en/products/products-a-z/hardware/network-interfaces/vn16xx/)
-series on Windows).
+speaks the bootloader's classic-CAN protocol through four hardware
+adapter families plus an in-process virtual loopback: SLCAN
+(CANable, all OSes), SocketCAN (Linux), PCAN-Basic (Windows /
+macOS), Vector XL Driver Library (VN1610 and the rest of the
+[VN16xx](https://www.vector.com/int/en/products/products-a-z/hardware/network-interfaces/vn16xx/)
+series on Windows), plus a `virtual` backend for hardware-less
+CI + integration tests.
 
 **Current release: [v1.2.0](https://github.com/isc-fs/can-flasher/releases/tag/v1.2.0)** —
 flash pipeline feature-complete against the v1.0.0 bootloader
@@ -97,11 +99,12 @@ details, test suite, and branch conventions.
 
 ---
 
-## Editor integrations
+## Editor + desktop integrations
 
 | Path | Status | What it does |
 |---|---|---|
-| [editor/vscode/](editor/vscode/) | 🔬 sketch (v0) | VS Code extension that wraps `cmake --build` + `can-flasher flash` into one command, plus device discovery, adapter picker, and (later) live-data + DTC panels. Shells out to `can-flasher --json` — never speaks the protocol directly. Internal ISC distribution only. |
+| [editor/vscode/](editor/vscode/) | ✅ live ([editor-v0.1.2](https://github.com/isc-fs/can-flasher/releases/tag/editor-v0.1.2)) | VS Code extension that wraps `cmake --build` + `can-flasher flash` into one command, plus device discovery, adapter picker, live-data + DTC panels. Shells out to `can-flasher --json` — never speaks the protocol directly. Distributed as a `.vsix` attached to each `editor-v*` release; internal ISC consumption. |
+| [apps/can-studio/](apps/can-studio/) | ✅ live ([can-studio-v0.3.0](https://github.com/isc-fs/can-flasher/releases/tag/can-studio-v0.3.0)) — Tier 2 | Tauri 2 desktop app for flashing + diagnostics + generic CAN bus monitor + DBC-decoded Signals view. Reuses the `can-flasher` crate by path — same Rust on both sides of the IPC bridge. macOS / Linux / Windows native bundles per release. |
 
 ---
 

@@ -5,6 +5,24 @@ All notable changes to the ISC STM32 CAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-05-15
+
+### Changed
+- Co-release with `can-flasher` v1.3.0, which adds the
+  `BL_CMD_NVM_FORMAT` opcode to track bootloader protocol v0.2.
+  The extension still shells out to the CLI binary, so the new
+  `config nvm format --yes` subcommand is available end-to-end
+  the moment operators upgrade their installed CLI to v1.3.0+.
+  No extension-side code changes were needed.
+
+## [0.1.2] — 2026-05-14
+
+### Changed
+- Refreshed brand logo (extension icon + media assets) to match the
+  ISC team's updated mark. Same shield silhouette, cleaner type and
+  contrast. Synchronised with `apps/can-studio` so all surfaces
+  share the icon.
+
 ## [0.1.1] — 2026-05-12
 
 ### Added

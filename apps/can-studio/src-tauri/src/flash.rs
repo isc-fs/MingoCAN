@@ -304,8 +304,8 @@ pub fn read_cmake_presets(cwd: String) -> Result<Vec<CmakePresetInfo>, String> {
     }
 
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("read presets: {e}"))?;
-    let json: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse CMakePresets.json: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse CMakePresets.json: {e}"))?;
 
     let configure_presets: std::collections::HashMap<String, &serde_json::Value> = json
         .get("configurePresets")
@@ -348,8 +348,10 @@ pub fn read_cmake_presets(cwd: String) -> Result<Vec<CmakePresetInfo>, String> {
             shell_quote_if_needed(&configure_preset)
         );
 
-        let artifact_hint = resolve_binary_dir(&configure_presets, &configure_preset)
-            .map(|bd| bd.replace("${sourceDir}", cwd).replace("${presetName}", &configure_preset));
+        let artifact_hint = resolve_binary_dir(&configure_presets, &configure_preset).map(|bd| {
+            bd.replace("${sourceDir}", cwd)
+                .replace("${presetName}", &configure_preset)
+        });
 
         out.push(CmakePresetInfo {
             name,
@@ -380,13 +382,11 @@ fn resolve_binary_dir(
         }
         // Climb to the first inherited preset (CMake walks left-to-right,
         // first match wins for fields not on the child).
-        let parent = current
-            .get("inherits")
-            .and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s.as_str()),
-                serde_json::Value::Array(arr) => arr.first().and_then(|x| x.as_str()),
-                _ => None,
-            })?;
+        let parent = current.get("inherits").and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s.as_str()),
+            serde_json::Value::Array(arr) => arr.first().and_then(|x| x.as_str()),
+            _ => None,
+        })?;
         if !seen.insert(parent.to_string()) {
             // Cycle defence — malformed presets file.
             return None;
@@ -399,9 +399,13 @@ fn resolve_binary_dir(
 /// other characters that would otherwise need escaping. Preset
 /// names with shell metachars are pathological, but possible.
 fn shell_quote_if_needed(s: &str) -> String {
-    let needs_quote = s
-        .chars()
-        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '$' | '`' | '\\' | '|' | '&' | ';' | '<' | '>' | '(' | ')'));
+    let needs_quote = s.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '$' | '`' | '\\' | '|' | '&' | ';' | '<' | '>' | '(' | ')'
+            )
+    });
     if !needs_quote {
         s.to_string()
     } else {

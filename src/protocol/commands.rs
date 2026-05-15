@@ -16,12 +16,18 @@
 //! Callers that want typed wrappers can layer their own enum on top.
 
 use super::opcodes::{CommandOpcode, ResetMode};
-use super::records::OB_APPLY_TOKEN;
+use super::records::{NVM_FORMAT_TOKEN, OB_APPLY_TOKEN};
 
 /// Protocol version advertised by this build in `CMD_CONNECT`.
+/// Bootloader only strict-equals against the major byte; minor is
+/// advisory. We track the bootloader's `BL_PROTO_VERSION_MAJOR /
+/// MINOR` even so, so a `discover --json` dump documents which
+/// contract the flasher targets.
 pub const PROTOCOL_VERSION_MAJOR: u8 = 0;
 /// Protocol version advertised by this build in `CMD_CONNECT`.
-pub const PROTOCOL_VERSION_MINOR: u8 = 1;
+/// Bumped 0.1 → 0.2 to track the bootloader's 0.2 release (which
+/// added `CMD_NVM_FORMAT` and `BL_NACK_NVM_WRONG_TOKEN`).
+pub const PROTOCOL_VERSION_MINOR: u8 = 2;
 
 fn payload_with_opcode(opcode: CommandOpcode, args: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(1 + args.len());
@@ -177,6 +183,23 @@ pub fn cmd_nvm_write(key: u16, value: &[u8]) -> Vec<u8> {
     v
 }
 
+/// `CMD_NVM_FORMAT [token_le32]`. Bootloader 0.2+ only.
+///
+/// Erases the NVM sector unconditionally — every key + the
+/// metadata FLASHWORD — and resets the bootloader's internal NVM
+/// pointers. The 4-byte confirmation token is filled in
+/// automatically from [`NVM_FORMAT_TOKEN`]; callers don't need to
+/// — and shouldn't — know the magic value. Wrong / missing token
+/// NACKs with [`NackCode::NvmWrongToken`].
+///
+/// [`NackCode::NvmWrongToken`]: super::opcodes::NackCode::NvmWrongToken
+pub fn cmd_nvm_format() -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 + 4);
+    v.push(CommandOpcode::NvmFormat.as_byte());
+    v.extend_from_slice(&NVM_FORMAT_TOKEN.to_le_bytes());
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +295,14 @@ mod tests {
     fn log_and_livedata_start_single_arg() {
         assert_eq!(cmd_log_stream_start(2), vec![0x30, 2]);
         assert_eq!(cmd_live_data_start(10), vec![0x32, 10]);
+    }
+
+    #[test]
+    fn nvm_format_carries_token_only() {
+        let p = cmd_nvm_format();
+        assert_eq!(p[0], 0x82);
+        // 'F','M','T',0x00 little-endian.
+        assert_eq!(&p[1..5], &[0x46, 0x4D, 0x54, 0x00]);
+        assert_eq!(p.len(), 5);
     }
 }

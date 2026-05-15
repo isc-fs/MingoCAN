@@ -19,6 +19,14 @@ module-level architecture notes live in
 sequencing against the bootloader counterpart at
 [isc-fs/stm32-can-bootloader](https://github.com/isc-fs/stm32-can-bootloader).
 
+The two integration surfaces carry their own tier tables on their
+own release cadence (`v*` here ships the CLI; `editor-v*` ships the
+VS Code extension; `can-studio-v*` ships the desktop app):
+[apps/can-studio/README.md](../apps/can-studio/README.md) (Tier 2
+live, DBC + Signals view) and
+[editor/vscode/README.md](../editor/vscode/README.md)
+(v0 feature-complete).
+
 ## Phase summary
 
 | Phase | Title | Branches | Milestone tag |
@@ -28,9 +36,9 @@ sequencing against the bootloader counterpart at
 | 3 | Session + adapters subcommand | ✅ done `feat/8-adapter-detect` · ✅ done `feat/9-session-lifecycle` | `v0.3.0-session` |
 | 4 | Remaining subcommands | ✅ done `feat/10-discover-subcommand` · ✅ done `feat/11-diagnose-subcommand` · ✅ done `feat/12-verify-subcommand` · ✅ done `feat/13-config-subcommand` · ✅ done `feat/14-replay-subcommand` | `v0.4.0-subcommands` |
 | 5 | Flash pipeline | ✅ done `feat/15-firmware-loader` · ✅ done `feat/16-flash-manager` · ✅ done `feat/17-flash-subcommand` | `v1.0.0` |
-| 6 | Post-v1 adapter coverage | 🔄 active `feat/18-vector-backend` | `v1.2.0` |
+| 6 | Post-v1 adapter coverage | ✅ done `feat/18-vector-backend` | `v1.2.0` |
 | — | Plantilla sync _(sidequest)_ | ✅ done `feat/1-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` | — |
-| — | Release tooling _(sidequest)_ | 🔄 active `fix/2-release-sync-dev` · 🔄 active `fix/3-docs-revamp-vector` | — |
+| — | Release tooling _(sidequest)_ | ✅ done `fix/2-release-sync-dev` · ✅ done `fix/3-docs-revamp-vector` | — |
 
 ## Branch diagram
 
@@ -137,7 +145,7 @@ gitGraph
 
     %% Phase 6 — Post-v1 adapter coverage
     branch feat/18-vector-backend
-    commit id: "… Vector XL Driver Library (VN1610 / VN16xx, Windows)"
+    commit id: "✔ Vector XL Driver Library (VN1610 / VN16xx, Windows)"
     checkout dev
     merge feat/18-vector-backend
     checkout main
