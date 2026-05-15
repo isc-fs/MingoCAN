@@ -76,6 +76,7 @@ pub fn run() {
             swd::swd_list_probes,
             swd::swd_flash,
             swd::swd_fetch_bootloader,
+            swd::swd_erase,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC CAN Studio Tauri app");
