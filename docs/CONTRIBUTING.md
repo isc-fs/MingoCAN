@@ -105,6 +105,35 @@ gitGraph
 at `v1.0.0` and whatever comes next). `dev` is where feat / fix
 branches integrate. Nobody commits directly to either.
 
+#### Branch protection
+
+`main` is protected at the GitHub level — not just by convention:
+
+- **PR-required.** Direct `git push origin main` is rejected by
+  the server; every commit on `main` must arrive through a
+  merged PR.
+- **No force-pushes.** Tagged release commits (`v1.3.1`,
+  `v1.3.0`, …) can't be rewritten — by anyone, including repo
+  admins (`enforce_admins: true`).
+- **No deletion.** The branch can't be deleted from the API or
+  the UI.
+
+`dev` is intentionally **not** behind the PR-required gate
+because [`release.yml`](../.github/workflows/release.yml)'s
+inline `sync-dev` job needs to push to `dev` after a tag-cut
+release (fast-forward dev onto main with the github-actions
+bot's token; no PR feasible from a workflow run). Force-pushes
+and deletion may still be locked down later via a Rulesets bot
+bypass if direct pushes start to bite.
+
+The repo also has **`delete_branch_on_merge: true`**, so
+feat/fix branches auto-delete from origin the moment their PR
+lands. No more lingering `feat/19-foo` on the branch list.
+
+If you ever hit a "Required pull request is missing" or
+"Protected branch update failed" error against `main`, you're
+in the right state — open a PR instead.
+
 ### Branch naming
 
 ```
