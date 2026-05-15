@@ -890,7 +890,7 @@ offset  size  field                 notes
   0      4    uptime_seconds        since boot
   4      4    reset_cause           BL_RESET_* (POWER_ON / PIN / SOFTWARE / IWDG / WWDG / LOW_POWER / BROWNOUT)
   8      4    flags                 bitmask; see below
- 12      4    flash_write_count     reserved until Phase 4 NVM-backed counter
+ 12      4    flash_write_count     NVM-backed lifetime counter (bootloader 0.2+); survives reboot
  16      4    dtc_count
  20      4    last_dtc_code
  24      8    reserved              zero
