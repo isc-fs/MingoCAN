@@ -14,4 +14,6 @@ pub mod flash;
 pub mod logging;
 pub mod protocol;
 pub mod session;
+#[cfg(feature = "swd")]
+pub mod swd;
 pub mod transport;

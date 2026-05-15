@@ -82,6 +82,30 @@ The flasher loads the shared library at runtime; on Linux PCAN
 adapters appear under SocketCAN via the `peak_usb` kernel module so
 the SDK isn't needed there.
 
+### ST-LINK + SWD (optional, `--features swd`)
+
+The `swd-flash` subcommand drives an ST-LINK V2 / V3 over USB
+through [probe-rs](https://probe.rs). Only present in builds with
+the `swd` Cargo feature on — see [USAGE.md](USAGE.md#swd-flash--first-boot-via-st-link-opt-in-build)
+for what it does and how to enable.
+
+| OS | Setup |
+|---|---|
+| Linux | `sudo apt-get install libusb-1.0-0` (+ `libudev-dev` for the build). Drop the [ST-LINK udev rule](https://github.com/stlink-org/stlink/blob/master/config/udev/rules.d/49-stlinkv2.rules) into `/etc/udev/rules.d/` and `sudo udevadm control --reload-rules && sudo udevadm trigger` so you don't need `sudo` to talk to the probe. |
+| macOS | No driver needed. probe-rs claims the ST-LINK via IOKit/libusb directly. |
+| Windows | Use [Zadig](https://zadig.akeo.ie/) once to replace the ST-LINK's stock kernel driver with WinUSB so libusb can claim it. Pick the "ST-Link Debug" interface, switch the target driver to **WinUSB**, click "Replace Driver". After that probe-rs sees the probe through nusb. |
+
+Confirm the probe is visible (any build of the binary works for
+this — `list-probes` is not gated behind the feature):
+
+```bash
+can-flasher swd-flash --help        # confirms the subcommand exists
+```
+
+If `swd-flash` is missing, you have a non-`swd` build; rebuild with
+`--features swd` or install a prebuilt binary from a release asset
+tagged `…-swd-…` (once those start shipping).
+
 ### Vector XL Driver Library (Windows)
 
 For VN1610 and other [VN16xx](https://www.vector.com/int/en/products/products-a-z/hardware/network-interfaces/vn16xx/)

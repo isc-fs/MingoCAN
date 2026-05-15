@@ -50,6 +50,27 @@ tokio              = { version = "1.40", features = ["rt-multi-thread", "macros"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+# probe-rs is the pure-Rust SWD/JTAG stack used by the new
+# `swd-flash` subcommand to lay the bootloader onto a bare STM32
+# via ST-LINK V2 / V3. Gated behind the `swd` Cargo feature so
+# the existing CAN flasher binary stays small for operators who
+# only ever do over-CAN app updates. Disabled by default until
+# the spike confirms the libusb story across all three OSes.
+probe-rs           = { version = "0.31", optional = true }
+
+[features]
+# Default feature set — everything that ships in the existing
+# operator-facing binary continues to ship.
+default = []
+
+# Opt-in SWD/JTAG flashing via probe-rs. Pulls in libusb + a
+# handful of additional crates (~2 MB binary growth, target
+# database). Build with `cargo install … --features swd` or
+# `cargo build --features swd`. Release binaries from
+# `release.yml` will turn this on once the spike validates on
+# all three platforms.
+swd = ["dep:probe-rs"]
+
 [dev-dependencies]
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
