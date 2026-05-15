@@ -26,7 +26,9 @@ use serde::Serialize;
 use tracing::debug;
 
 use super::GlobalFlags;
-use crate::protocol::commands::{cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read};
+use crate::protocol::commands::{
+    cmd_nvm_format, cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read,
+};
 use crate::protocol::records::ObStatus;
 use crate::protocol::Response;
 use crate::session::{Session, SessionConfig};
@@ -101,6 +103,15 @@ pub enum NvmAction {
         #[arg(value_parser = parse_hex_u16)]
         key: u16,
     },
+
+    /// Erase the entire NVM sector — every key + the metadata
+    /// FLASHWORD. Destructive; bootloader 0.2+ only. Requires
+    /// `--yes` or an interactive confirmation.
+    Format {
+        /// Skip the interactive confirmation prompt
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
 }
 
 pub async fn run(args: ConfigArgs, global: &GlobalFlags) -> Result<()> {
@@ -117,6 +128,7 @@ pub async fn run(args: ConfigArgs, global: &GlobalFlags) -> Result<()> {
             NvmAction::Read { key } => run_nvm_read(key, global).await,
             NvmAction::Write { key, value } => run_nvm_write(key, value, global).await,
             NvmAction::Erase { key } => run_nvm_erase(key, global).await,
+            NvmAction::Format { yes } => run_nvm_format(yes, global).await,
         },
     }
 }
@@ -468,6 +480,54 @@ async fn run_nvm_erase(key: u16, global: &GlobalFlags) -> Result<()> {
             code,
         } => bail!("device NACK'd NVM_WRITE (opcode 0x{rejected_opcode:02X}): {code}"),
         other => bail!("unexpected reply to NVM_WRITE: {}", other.kind_str()),
+    }
+}
+
+// ---- nvm format ----
+
+async fn run_nvm_format(yes: bool, global: &GlobalFlags) -> Result<()> {
+    if !yes {
+        eprintln!(
+            "WARNING: NVM_FORMAT erases the entire NVM sector — every key + the\n\
+             metadata FLASHWORD. There is no undo. The bootloader's internal\n\
+             pointers reset after the format completes."
+        );
+        let prompt = format!(
+            "About to format the NVM sector on node 0x{:X}. Continue?",
+            global.node_id.unwrap_or(0x3)
+        );
+        if !confirm_prompt(&prompt) {
+            bail!("cancelled");
+        }
+    }
+
+    let session = open_session(global)?;
+    session
+        .connect()
+        .await
+        .context("CONNECT before NVM_FORMAT")?;
+
+    let resp = session
+        .send_command(&cmd_nvm_format())
+        .await
+        .context("sending NVM_FORMAT");
+    let _ = session.disconnect().await;
+    let resp = resp?;
+
+    match resp {
+        Response::Ack { .. } => {
+            if global.json {
+                println!(r#"{{"status":"ok","action":"formatted"}}"#);
+            } else {
+                println!("NVM sector formatted.");
+            }
+            Ok(())
+        }
+        Response::Nack {
+            rejected_opcode,
+            code,
+        } => bail!("device NACK'd NVM_FORMAT (opcode 0x{rejected_opcode:02X}): {code}"),
+        other => bail!("unexpected reply to NVM_FORMAT: {}", other.kind_str()),
     }
 }
 
