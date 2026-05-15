@@ -39,8 +39,11 @@ tauri-plugin-dialog = { version = "2" }
 
 # Reuse the can-flasher protocol + transport + flash code by path.
 # The Tauri commands wrap these crates directly (no shell-out tax)
-# — same Rust on both sides of the IPC bridge.
-can-flasher = { path = "../../.." }
+# — same Rust on both sides of the IPC bridge. We turn on the
+# `swd` feature so the Studio's "SWD flash" view can drive an
+# ST-LINK through probe-rs; this pulls libusb transitively
+# (Linux: libusb-1.0, macOS: built-in, Windows: WinUSB via Zadig).
+can-flasher = { path = "../../..", features = ["swd"] }
 
 # Async runtime. Tauri commands are async-capable; we want a real
 # multi-threaded scheduler so the flash pipeline + a future bus

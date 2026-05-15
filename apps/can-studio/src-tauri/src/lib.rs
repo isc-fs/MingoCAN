@@ -14,6 +14,7 @@ mod dbc;
 mod diagnose;
 mod flash;
 mod live_data;
+mod swd;
 
 use can_flasher::cli::adapters::{collect_report, AdapterReport};
 
@@ -67,7 +68,9 @@ pub fn run() {
             dbc::dbc_load,
             dbc::dbc_unload,
             dbc::dbc_status,
-            dbc::dbc_signals
+            dbc::dbc_signals,
+            swd::swd_list_probes,
+            swd::swd_flash,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC CAN Studio Tauri app");
