@@ -117,10 +117,11 @@
 <div class="view">
     <header>
         <div>
-            <h2>SWD flash</h2>
+            <h2>Burn bootloader</h2>
             <p class="muted">
-                First-boot a bare STM32 via ST-LINK. Drives probe-rs under the
-                hood — same code the CLI's <code>swd-flash</code> uses.
+                First-boot a bare STM32 via ST-LINK — lay the bootloader (or
+                any firmware) on the chip over SWD. Drives probe-rs under the
+                hood, same code the CLI's <code>swd-flash</code> uses.
             </p>
         </div>
         <button
