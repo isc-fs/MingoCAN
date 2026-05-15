@@ -838,6 +838,7 @@ Max declared length: 1024 bytes per message. Anything larger earns
 | `0x61` | `CMD_JUMP` | – | H→D | `[addr_le32]` | ACK `[opcode]` emitted **before** jump |
 | `0x80` | `CMD_NVM_READ` | ✔ | H→D | `[key_le16]` | ACK `[opcode, len, value…]` or `NACK(NVM_NOT_FOUND)` |
 | `0x81` | `CMD_NVM_WRITE` | ✔ | H→D | `[key_le16, value…]` (≤ 20 B value) | ACK `[opcode]`; `value_len == 0` is a tombstone |
+| `0x82` | `CMD_NVM_FORMAT` | ✔ | H→D | `[token_le32]` (`BL_NVM_FORMAT_TOKEN = 0x00544D46`) | ACK `[opcode]`; wipes every NVM key + the metadata FLASHWORD. Wrong / missing token NACKs with `NVM_WRONG_TOKEN`. Bootloader 0.2+ only. |
 
 Session-gated opcodes require a preceding successful `CMD_CONNECT`.
 The session is cleared by `CMD_DISCONNECT`, a watchdog timeout, or
@@ -969,6 +970,7 @@ normal `CMD_NVM_READ` / `CMD_NVM_WRITE` traffic deals in
 | `0x0D` | `BL_NACK_NVM_NOT_FOUND` | `NVM_READ` for a key with no live value |
 | `0x0E` | `BL_NACK_NVM_FULL` | `NVM_WRITE` can't fit even after compaction |
 | `0x0F` | `BL_NACK_OB_WRONG_TOKEN` | `OB_APPLY_WRP` missing / wrong confirmation token |
+| `0x10` | `BL_NACK_NVM_WRONG_TOKEN` | `NVM_FORMAT` missing / wrong confirmation token (bootloader 0.2+) |
 | `0xFE` | `BL_NACK_UNSUPPORTED` | Unknown opcode, bad arg length, or unaligned address — the generic "bad request" |
 
 Codes `0x04` (signature invalid) and `0x05` (replay counter low) are

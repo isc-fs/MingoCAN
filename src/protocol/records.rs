@@ -424,6 +424,13 @@ impl ObStatus {
 /// automatically.
 pub const OB_APPLY_TOKEN: u32 = 0x00505257;
 
+/// `BL_NVM_FORMAT_TOKEN` — the ASCII "FMT\0" LE confirmation token
+/// that prefixes every `CMD_NVM_FORMAT` request. Bootloader 0.2+.
+/// Same pattern as [`OB_APPLY_TOKEN`] — guards a destructive
+/// operation from accidental dispatch by demanding a magic value
+/// inline.
+pub const NVM_FORMAT_TOKEN: u32 = 0x0054_4D46;
+
 #[cfg(test)]
 mod tests {
     use super::*;

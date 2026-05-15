@@ -188,9 +188,12 @@ can-flasher --interface slcan --channel /dev/ttyACM0 config ob read
 can-flasher --interface slcan --channel /dev/ttyACM0 config ob apply-wrp \
   --sector-mask 0x01
 
-can-flasher --interface slcan --channel /dev/ttyACM0 config nvm read  --key 0x0001
-can-flasher --interface slcan --channel /dev/ttyACM0 config nvm write --key 0x0002 --value 0xDEADBEEF
-can-flasher --interface slcan --channel /dev/ttyACM0 config nvm erase --key 0x0002
+can-flasher --interface slcan --channel /dev/ttyACM0 config nvm read   --key 0x0001
+can-flasher --interface slcan --channel /dev/ttyACM0 config nvm write  --key 0x0002 --value 0xDEADBEEF
+can-flasher --interface slcan --channel /dev/ttyACM0 config nvm erase  --key 0x0002
+
+# bootloader 0.2+ — wipe the entire NVM sector (every key + metadata)
+can-flasher --interface slcan --channel /dev/ttyACM0 config nvm format --yes
 ```
 
 ---

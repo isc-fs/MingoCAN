@@ -16,7 +16,14 @@ use super::ParseError;
 
 // ---- Command opcodes (host → device) ----
 
-/// Every CMD opcode the v1.0.0 bootloader accepts, per `bl_proto.h`.
+/// Every CMD opcode the bootloader accepts, per `bl_proto.h`. The
+/// flasher tracks the contract at `BL_PROTO_VERSION_MAJOR.MINOR =
+/// 0.2` (see [`commands::PROTOCOL_VERSION_MAJOR`] /
+/// [`commands::PROTOCOL_VERSION_MINOR`]). Newer opcodes added in
+/// 0.2 (e.g. `CMD_NVM_FORMAT = 0x82`) are annotated inline.
+///
+/// [`commands::PROTOCOL_VERSION_MAJOR`]: super::commands::PROTOCOL_VERSION_MAJOR
+/// [`commands::PROTOCOL_VERSION_MINOR`]: super::commands::PROTOCOL_VERSION_MINOR
 ///
 /// Strict parsing: the flasher never emits anything outside this
 /// list. If a new opcode appears on the bus we don't recognise, it's
@@ -45,6 +52,12 @@ pub enum CommandOpcode {
     Jump = 0x61,
     NvmRead = 0x80,
     NvmWrite = 0x81,
+    /// Bootloader 0.2 added a wholesale NVM wipe. Erases the NVM
+    /// sector unconditionally; requires a 4-byte confirmation token
+    /// ([`commands::NVM_FORMAT_TOKEN`]) as the payload to guard the
+    /// destructive call. Wrong / missing token NACKs with
+    /// [`NackCode::NvmWrongToken`].
+    NvmFormat = 0x82,
 }
 
 impl CommandOpcode {
@@ -80,6 +93,7 @@ impl TryFrom<u8> for CommandOpcode {
             0x61 => Self::Jump,
             0x80 => Self::NvmRead,
             0x81 => Self::NvmWrite,
+            0x82 => Self::NvmFormat,
             _ => return Err(ParseError::Invalid("unknown command opcode")),
         })
     }
@@ -121,14 +135,14 @@ impl TryFrom<u8> for NotifyOpcode {
 
 // ---- NACK codes (device → host, typed error) ----
 
-/// Every NACK code the v1.0.0 bootloader emits, plus an [`Unknown`]
-/// fallback so forward-compat with a newer bootloader doesn't crash
-/// the flasher — the host still gets a readable "NACK 0x?? (unknown)"
-/// line in its logs.
+/// Every NACK code the bootloader emits (0.2 contract), plus an
+/// [`Unknown`] fallback so forward-compat with a newer bootloader
+/// doesn't crash the flasher — the host still gets a readable
+/// "NACK 0x?? (unknown)" line in its logs.
 ///
 /// Byte values match `bl_proto.h`. Codes `0x04` (signature invalid)
 /// and `0x05` (replay counter low) are allocated but unreachable on
-/// v1.0.0 — they belong to the deferred Phase-5 surface.
+/// the current contract — they belong to the deferred Phase-5 surface.
 ///
 /// [`Unknown`]: NackCode::Unknown
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +160,12 @@ pub enum NackCode {
     NvmNotFound,
     NvmFull,
     ObWrongToken,
+    /// Returned by `CMD_NVM_FORMAT` when the 4-byte confirmation
+    /// token at the start of the command payload doesn't match
+    /// `BL_NVM_FORMAT_TOKEN`. Same shape as `ObWrongToken` (the
+    /// option-byte equivalent) — guards a destructive operation
+    /// from accidental dispatch.
+    NvmWrongToken,
     Unsupported,
     Unknown(u8),
 }
@@ -167,6 +187,7 @@ impl NackCode {
             Self::NvmNotFound => 0x0D,
             Self::NvmFull => 0x0E,
             Self::ObWrongToken => 0x0F,
+            Self::NvmWrongToken => 0x10,
             Self::Unsupported => 0xFE,
             Self::Unknown(byte) => byte,
         }
@@ -189,6 +210,7 @@ impl NackCode {
             0x0D => Self::NvmNotFound,
             0x0E => Self::NvmFull,
             0x0F => Self::ObWrongToken,
+            0x10 => Self::NvmWrongToken,
             0xFE => Self::Unsupported,
             other => Self::Unknown(other),
         }
@@ -211,6 +233,7 @@ impl NackCode {
             Self::NvmNotFound => "NVM_NOT_FOUND",
             Self::NvmFull => "NVM_FULL",
             Self::ObWrongToken => "OB_WRONG_TOKEN",
+            Self::NvmWrongToken => "NVM_WRONG_TOKEN",
             Self::Unsupported => "UNSUPPORTED",
             Self::Unknown(_) => "UNKNOWN",
         }

@@ -8,8 +8,9 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use can_flasher::protocol::commands::{
-    cmd_connect_self, cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read,
+    cmd_connect_self, cmd_nvm_format, cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read,
 };
+use can_flasher::protocol::opcodes::CommandOpcode;
 use can_flasher::protocol::opcodes::NackCode;
 use can_flasher::protocol::records::ObStatus;
 use can_flasher::protocol::Response;
@@ -212,6 +213,85 @@ async fn nvm_write_rejects_oversize_value() {
     match resp {
         Response::Nack { code, .. } => assert_eq!(code, NackCode::Unsupported),
         other => panic!("expected Nack(Unsupported) for oversize, got {other:?}"),
+    }
+    tear_down(session, cancel, handle).await;
+}
+
+#[tokio::test]
+async fn nvm_format_wipes_every_key() {
+    // CMD_NVM_FORMAT round-trip: write a couple of keys, format,
+    // confirm both reads now miss with NVM_NOT_FOUND.
+    let (session, cancel, handle) = spawn_session_and_stub().await;
+    session.send_command(&cmd_connect_self()).await.unwrap();
+
+    session
+        .send_command(&cmd_nvm_write(0x4001, b"one"))
+        .await
+        .unwrap();
+    session
+        .send_command(&cmd_nvm_write(0x4002, b"two"))
+        .await
+        .unwrap();
+
+    let resp = session.send_command(&cmd_nvm_format()).await.unwrap();
+    match resp {
+        Response::Ack { .. } => {}
+        other => panic!("expected ACK after NVM_FORMAT, got {other:?}"),
+    }
+
+    for key in [0x4001_u16, 0x4002] {
+        let resp = session.send_command(&cmd_nvm_read(key)).await.unwrap();
+        match resp {
+            Response::Nack { code, .. } => assert_eq!(code, NackCode::NvmNotFound),
+            other => panic!("expected NVM_NOT_FOUND for 0x{key:04X} after format, got {other:?}"),
+        }
+    }
+    tear_down(session, cancel, handle).await;
+}
+
+#[tokio::test]
+async fn nvm_format_with_bad_token_nacks_wrong_token() {
+    // Wrong token = NACK(NVM_WRONG_TOKEN); the in-memory store
+    // must stay intact (we read back after the failed format).
+    let (session, cancel, handle) = spawn_session_and_stub().await;
+    session.send_command(&cmd_connect_self()).await.unwrap();
+
+    let key = 0x4100;
+    session
+        .send_command(&cmd_nvm_write(key, b"keep me"))
+        .await
+        .unwrap();
+
+    // Hand-craft a CMD_NVM_FORMAT payload with the wrong 4-byte
+    // token (deliberately not BL_NVM_FORMAT_TOKEN).
+    let mut bad = vec![CommandOpcode::NvmFormat.as_byte()];
+    bad.extend_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+
+    let resp = session.send_command(&bad).await.unwrap();
+    match resp {
+        Response::Nack { code, .. } => assert_eq!(code, NackCode::NvmWrongToken),
+        other => panic!("expected NACK(NvmWrongToken) for bad token, got {other:?}"),
+    }
+
+    // Confirm the value survived the failed format.
+    let resp = session.send_command(&cmd_nvm_read(key)).await.unwrap();
+    match resp {
+        Response::Ack { payload, .. } => {
+            assert_eq!(&payload[2..], b"keep me", "value should be intact");
+        }
+        other => panic!("expected ACK with original value, got {other:?}"),
+    }
+    tear_down(session, cancel, handle).await;
+}
+
+#[tokio::test]
+async fn nvm_format_needs_session() {
+    let (session, cancel, handle) = spawn_session_and_stub().await;
+    // No CONNECT
+    let resp = session.send_command(&cmd_nvm_format()).await.unwrap();
+    match resp {
+        Response::Nack { code, .. } => assert_eq!(code, NackCode::BadSession),
+        other => panic!("expected Nack(BadSession), got {other:?}"),
     }
     tear_down(session, cancel, handle).await;
 }
