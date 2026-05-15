@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use socketcan::tokio::CanSocket;
 use socketcan::{EmbeddedFrame, Id, StandardId};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::protocol::CanFrame;
 
@@ -94,6 +94,16 @@ impl SocketCanBackend {
 #[async_trait]
 impl CanBackend for SocketCanBackend {
     async fn send(&self, frame: CanFrame) -> Result<()> {
+        // Per-frame trace symmetric with the SLCAN / PCAN / Vector
+        // backends. Useful for diagnosing ISO-TP framing bugs against
+        // a stricter bootloader (e.g. issue #178 — bootloader v1.2.0
+        // strictness around PCI nibbles + zero-payload CFs).
+        trace!(
+            id = format!("0x{:03X}", frame.id),
+            len = frame.len,
+            data = format!("{:02X?}", frame.payload()),
+            "socketcan tx",
+        );
         let sc_frame = our_frame_to_socketcan(&frame)?;
         self.socket
             .write_frame(sc_frame)
