@@ -5,9 +5,10 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::Args;
 
+use crate::bootloader_fetch::{self, BootloaderFormat};
 use crate::cli::{exit_err, ExitCodeHint, GlobalFlags};
 use crate::swd::{self, SwdFlashRequest};
 
@@ -24,7 +25,28 @@ pub struct SwdFlashArgs {
     /// Path to the firmware to flash. `.elf`, `.hex`, or `.bin`.
     /// For `.bin` the load address is read from `--base`; for
     /// `.elf` and `.hex` the file's own addresses are used.
-    pub artifact: PathBuf,
+    /// Mutually exclusive with `--release`.
+    pub artifact: Option<PathBuf>,
+
+    /// Fetch the bootloader from the BL repo's release page instead
+    /// of pointing at a local file. Pass alone for the latest
+    /// release, or follow with a tag like `v1.2.0` to pin a
+    /// specific version. The fetched artefact is cached under the
+    /// platform's cache dir so repeat runs skip the network.
+    #[arg(
+        long,
+        value_name = "TAG",
+        num_args = 0..=1,
+        default_missing_value = "latest",
+        conflicts_with = "artifact",
+    )]
+    pub release: Option<String>,
+
+    /// Format to fetch when `--release` is set. Ignored otherwise.
+    /// Default `elf`; pick `hex` or `bin` if you have a tool that
+    /// expects those instead.
+    #[arg(long, default_value = "elf", value_parser = parse_format)]
+    pub release_format: BootloaderFormat,
 
     /// probe-rs target identifier. Defaults to the team's ECU
     /// part number; override for other STM32 variants.
@@ -69,7 +91,10 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
         )
     })?;
 
-    let mut request = SwdFlashRequest::new(args.artifact);
+    let artifact_path =
+        resolve_artifact(args.artifact, args.release.as_deref(), args.release_format).await?;
+
+    let mut request = SwdFlashRequest::new(artifact_path);
     request.chip = args.chip;
     request.probe_serial = args.probe_serial;
     request.base_addr = base_addr;
@@ -91,6 +116,67 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
         request_for_msg.chip
     );
     Ok(())
+}
+
+/// Pick the actual on-disk artefact for the flash request. Either
+/// the operator handed us a local file (positional `artifact`) or
+/// asked us to pull from the BL release page (`--release`). Clap's
+/// `conflicts_with` already rejects "both"; we still have to
+/// handle "neither" here.
+async fn resolve_artifact(
+    artifact: Option<PathBuf>,
+    release: Option<&str>,
+    format: BootloaderFormat,
+) -> Result<PathBuf> {
+    match (artifact, release) {
+        (Some(path), _) => Ok(path),
+        (None, Some(tag)) => {
+            // The fetcher is blocking (ureq); move it off the
+            // tokio runtime so an HTTP-bound stall doesn't park
+            // every executor thread.
+            let tag_owned = if tag == "latest" {
+                None
+            } else {
+                Some(tag.to_string())
+            };
+            let cached = tokio::task::spawn_blocking(move || {
+                bootloader_fetch::fetch(tag_owned.as_deref(), format)
+            })
+            .await
+            .map_err(|e| anyhow!("bootloader-fetch task join: {e}"))?
+            .map_err(|e| exit_err(ExitCodeHint::InputFileError, anyhow!("{e}")))?;
+            if cached.downloaded {
+                println!(
+                    "✓ downloaded {} from release {} to {}",
+                    format.asset_name(),
+                    cached.tag,
+                    cached.path.display(),
+                );
+            } else {
+                println!(
+                    "✓ using cached {} from release {} at {}",
+                    format.asset_name(),
+                    cached.tag,
+                    cached.path.display(),
+                );
+            }
+            Ok(cached.path)
+        }
+        (None, None) => bail!(
+            "either pass a firmware artifact (positional) or `--release` to fetch the bootloader from the BL release page"
+        ),
+    }
+}
+
+fn parse_format(s: &str) -> Result<BootloaderFormat, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "elf" => Ok(BootloaderFormat::Elf),
+        "hex" => Ok(BootloaderFormat::Hex),
+        "bin" => Ok(BootloaderFormat::Bin),
+        other => Err(format!(
+            "unknown --release-format {other:?}; expected one of elf, hex, bin"
+        )),
+    }
 }
 
 /// Parse `0x`-prefixed or plain-decimal address. Returns `None`
@@ -115,5 +201,13 @@ mod tests {
         assert_eq!(parse_hex_u64("134217728"), Some(0x0800_0000));
         assert_eq!(parse_hex_u64("not-hex"), None);
         assert_eq!(parse_hex_u64("0xzz"), None);
+    }
+
+    #[test]
+    fn parses_release_format() {
+        assert_eq!(parse_format("elf").unwrap(), BootloaderFormat::Elf);
+        assert_eq!(parse_format("HEX").unwrap(), BootloaderFormat::Hex);
+        assert_eq!(parse_format("bin").unwrap(), BootloaderFormat::Bin);
+        assert!(parse_format("img").is_err());
     }
 }

@@ -21,6 +21,7 @@
     import {
         defaultSwdFlashArgs,
         listSwdProbes,
+        swdFetchBootloader,
         swdFlash,
         type ProbeInfo,
         type SwdFlashArgs,
@@ -37,6 +38,18 @@
     let probesLoading = $state<boolean>(false);
     let probesError = $state<string | null>(null);
     let flashState = $state<FlashState>({ kind: 'idle' });
+
+    // ---- BL release fetch state ----
+    // `releaseTag` is what the operator typed (blank ⇒ latest). The
+    // last-fetched tag + cache-status are surfaced as muted text
+    // under the button so a re-run looks idempotent.
+    let releaseTag = $state<string>('');
+    let fetchState = $state<
+        | { kind: 'idle' }
+        | { kind: 'fetching' }
+        | { kind: 'done'; tag: string; downloaded: boolean }
+        | { kind: 'error'; message: string }
+    >({ kind: 'idle' });
 
     async function refreshProbes(): Promise<void> {
         probesLoading = true;
@@ -70,6 +83,25 @@
         });
         if (typeof picked === 'string' && picked.length > 0) {
             args.artifactPath = picked;
+        }
+    }
+
+    async function fetchFromReleases(): Promise<void> {
+        const tag = releaseTag.trim();
+        fetchState = { kind: 'fetching' };
+        try {
+            const result = await swdFetchBootloader(tag.length > 0 ? tag : null);
+            args.artifactPath = result.path;
+            fetchState = {
+                kind: 'done',
+                tag: result.tag,
+                downloaded: result.downloaded,
+            };
+        } catch (err) {
+            fetchState = {
+                kind: 'error',
+                message: err instanceof Error ? err.message : String(err),
+            };
         }
     }
 
@@ -180,9 +212,13 @@
                     type="text"
                     bind:value={args.artifactPath}
                     placeholder="/path/to/bootloader.elf"
-                    disabled={running}
+                    disabled={running || fetchState.kind === 'fetching'}
                 />
-                <button type="button" onclick={browseForArtifact} disabled={running}>
+                <button
+                    type="button"
+                    onclick={browseForArtifact}
+                    disabled={running || fetchState.kind === 'fetching'}
+                >
                     Browse…
                 </button>
             </div>
@@ -192,6 +228,45 @@
             <code>.bin</code> the load address comes from <em>Base address</em>;
             <code>.elf</code> and <code>.hex</code> carry their own addresses.
         </p>
+
+        <div class="divider"></div>
+
+        <label class="field">
+            <span>or — fetch from <code>isc-fs/stm32-can-bootloader</code></span>
+            <div class="row">
+                <input
+                    type="text"
+                    bind:value={releaseTag}
+                    placeholder="(latest)"
+                    disabled={running || fetchState.kind === 'fetching'}
+                />
+                <button
+                    type="button"
+                    onclick={fetchFromReleases}
+                    disabled={running || fetchState.kind === 'fetching'}
+                >
+                    {fetchState.kind === 'fetching' ? 'Fetching…' : 'Fetch'}
+                </button>
+            </div>
+        </label>
+        {#if fetchState.kind === 'done'}
+            <p class="muted small">
+                {fetchState.downloaded ? '↓ Downloaded' : '✓ Cached'}
+                <code>CAN_BL.elf</code>
+                from <strong>{fetchState.tag}</strong>; artifact path filled in
+                above.
+            </p>
+        {:else if fetchState.kind === 'error'}
+            <p class="fetch-error small">
+                <strong>Fetch failed:</strong>
+                {fetchState.message}
+            </p>
+        {:else}
+            <p class="muted small">
+                Blank tag pulls the latest release. Files are cached locally —
+                a second flash with the same tag won't hit the network.
+            </p>
+        {/if}
     </section>
 
     <section class="card">
@@ -451,6 +526,17 @@
 
     .empty {
         margin: 0;
+    }
+
+    .divider {
+        height: 1px;
+        background: var(--border);
+        margin: 14px 0 12px;
+    }
+
+    .fetch-error {
+        margin: 6px 0 0;
+        color: var(--error);
     }
 
     .refresh {

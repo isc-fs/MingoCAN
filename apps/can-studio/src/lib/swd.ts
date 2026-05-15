@@ -38,3 +38,24 @@ export function listSwdProbes(): Promise<ProbeInfo[]> {
 export function swdFlash(args: SwdFlashArgs): Promise<void> {
     return invoke<void>('swd_flash', { args });
 }
+
+/** A bootloader artefact resolved on the local disk. */
+export interface FetchedBootloader {
+    /** Resolved release tag, e.g. `v1.2.0`. */
+    tag: string;
+    /** Absolute path to the on-disk `.elf` ready to flash. */
+    path: string;
+    /** `true` for a fresh download, `false` for cache hit. */
+    downloaded: boolean;
+}
+
+/**
+ * Download (or read from cache) the prebuilt bootloader from the
+ * isc-fs/stm32-can-bootloader release page.
+ *
+ * @param tag GitHub release tag, e.g. `"v1.2.0"`. Pass `null` for
+ *            the latest release.
+ */
+export function swdFetchBootloader(tag: string | null): Promise<FetchedBootloader> {
+    return invoke<FetchedBootloader>('swd_fetch_bootloader', { tag });
+}
