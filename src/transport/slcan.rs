@@ -1041,8 +1041,12 @@ mod tests {
             serial_number: None,
             manufacturer: manufacturer.map(str::to_string),
             product: product.map(str::to_string),
-            // serialport 4.9 added `interface` (USB CDC interface
-            // number); tests don't care so always None.
+            // `interface` (USB CDC interface number) only appears
+            // when serialport is pulled with the right feature
+            // set, which today happens transitively via probe-rs
+            // under `--features swd`. Gate the field so the
+            // default-feature build still compiles.
+            #[cfg(feature = "swd")]
             interface: None,
         }
     }
