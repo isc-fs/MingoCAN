@@ -1,16 +1,32 @@
 name: Release
 
-# Cross-platform binary builds for `can-flasher`. Triggers on any
-# `v*` tag push, plus manual runs via the UI when we need to
-# rebuild without cutting a new tag (e.g. re-uploading after an
-# artifact got clobbered). Each job compiles natively on its host
-# runner — no cross-compile toolchains to babysit — and the
-# artifacts land on the GitHub Release the tag created (or, for
-# manual runs, just stay as workflow artifacts so we can inspect
-# before promoting).
+# Unified release pipeline for **all three** product surfaces:
 #
-# CI correctness lives in ci.yml (fmt / clippy / test). This
-# workflow is strictly about producing and publishing binaries.
+#   - `can-flasher` CLI (Rust binaries — Linux / macOS / Windows)
+#   - VS Code extension (.vsix)
+#   - ISC CAN Studio (Tauri desktop bundles — .dmg / .deb / .AppImage / .rpm / .msi / .exe)
+#
+# A single `v*` tag (e.g. `v2.0.0`) triggers all three surfaces to
+# build in parallel and attach their artefacts to one GitHub
+# Release. Per-surface tag namespaces (`editor-v*`, `can-studio-v*`)
+# are retired — see `docs/CONTRIBUTING.md § Cutting a release`.
+#
+# Trigger semantics:
+#
+#   push tags: 'v*'    → tag push, attaches to GitHub Release
+#   workflow_dispatch  → manual dry-run; artefacts only, no Release
+#
+# Why one workflow instead of three workflows attaching to one
+# release: race conditions on concurrent release-create from
+# multiple workflows are nasty (only one wins, the others
+# silently skip files), and a single workflow makes "did the
+# release succeed?" a single gate with three parallel legs.
+#
+# Versioning policy: every surface ships at the SAME version in
+# lockstep. The `verify-version` gate enforces that all five
+# source files (root Cargo.toml + editor/vscode/package.json +
+# the three apps/can-studio version-of-truth files) agree with
+# the pushed tag before any build runs.
 
 on:
   push:
@@ -22,40 +38,109 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
-  # Gate that prevents the classic "tag v1.1.1 got pushed but Cargo.toml
-  # still reads 1.1.0" mistake. v1.1.0 itself shipped with this bug —
-  # binaries reported `can-flasher 0.1.0` on --version because no one
-  # bumped Cargo.toml before tagging. We caught it by eye; next time
-  # we want CI to catch it for us, before any build runs.
+  # ---- Gate ---------------------------------------------------
   #
-  # Only runs on actual tag pushes — manual `workflow_dispatch` runs
-  # have nothing to compare against and skip this gate entirely (the
-  # `build` job below uses `if: always()` to treat a skip as a pass).
+  # Every source-of-truth version file MUST agree with the pushed
+  # tag. Catches the classic "tag v2.0.0 pushed but Cargo.toml
+  # still reads 1.3.1" mistake before any artefact is produced.
+  #
+  # Skipped on manual dispatch (nothing to compare against).
+
   verify-version:
-    name: verify tag matches Cargo.toml
+    name: verify tag matches all source versions
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compare versions
+      - name: Compare versions across all surfaces
         run: |
+          set -eu
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION=$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)
-          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
-            echo "::error::tag=${GITHUB_REF_NAME} implies version=${TAG_VERSION}, but Cargo.toml reads ${CARGO_VERSION}. Bump Cargo.toml to ${TAG_VERSION} and retag (or delete the tag and re-cut after bumping)."
+
+          CLI_CARGO=$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)
+          EDITOR_PKG=$(node -p "require('./editor/vscode/package.json').version")
+          STUDIO_CARGO=$(awk -F'"' '/^version/ {print $2; exit}' apps/can-studio/src-tauri/Cargo.toml)
+          STUDIO_PKG=$(node -p "require('./apps/can-studio/package.json').version")
+          STUDIO_TAURI=$(node -p "require('./apps/can-studio/src-tauri/tauri.conf.json').version")
+
+          mismatches=""
+          [[ "$TAG_VERSION" == "$CLI_CARGO"   ]] || mismatches+=" Cargo.toml=$CLI_CARGO"
+          [[ "$TAG_VERSION" == "$EDITOR_PKG"  ]] || mismatches+=" editor/vscode/package.json=$EDITOR_PKG"
+          [[ "$TAG_VERSION" == "$STUDIO_CARGO" ]] || mismatches+=" apps/can-studio/src-tauri/Cargo.toml=$STUDIO_CARGO"
+          [[ "$TAG_VERSION" == "$STUDIO_PKG"  ]] || mismatches+=" apps/can-studio/package.json=$STUDIO_PKG"
+          [[ "$TAG_VERSION" == "$STUDIO_TAURI" ]] || mismatches+=" apps/can-studio/src-tauri/tauri.conf.json=$STUDIO_TAURI"
+
+          if [[ -n "$mismatches" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $TAG_VERSION, but source files disagree:$mismatches"
+            echo "::error::Bump all five files to $TAG_VERSION in lockstep and retag (or delete the tag and re-cut)."
             exit 1
           fi
-          echo "✓ version ${CARGO_VERSION} matches tag ${GITHUB_REF_NAME}"
+          echo "✓ all five source files agree on version $TAG_VERSION"
 
-  build:
-    name: build (${{ matrix.target }})
+  # ---- Release page -------------------------------------------
+  #
+  # Creates the GitHub Release with the unified notes BEFORE any
+  # build job attaches artefacts. Avoids the race condition that
+  # would otherwise happen if three build jobs all tried to create
+  # the same release from parallel runners.
+  #
+  # The body intentionally points at the in-repo release notes
+  # (docs/RELEASE_NOTES_<version>.md if present, else the
+  # auto-generated compare link). Operators reading the Releases
+  # page get a quick install snippet for each surface inline.
+
+  create-release:
+    name: create unified GitHub Release
     needs: verify-version
-    # `if: always()` lets this job run even when `verify-version` was
-    # skipped (manual runs). A tag-push where verify-version FAILED
-    # propagates through `needs` and skips this job — which is what
-    # we want.
-    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped')
+    if: github.ref_type == 'tag' && (needs.verify-version.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: |
+            **Unified release** — `can-flasher` CLI + ISC STM32 CAN Flasher (VS Code extension) + ISC CAN Studio (desktop app) all ship together at the same version from a single tag.
+
+            ### Install / upgrade per surface
+
+            **CLI (`can-flasher`)** — pre-built binaries below for Linux x86_64 / aarch64, macOS aarch64, Windows x86_64.
+            ```bash
+            cargo install --git https://github.com/isc-fs/can-flasher.git --tag ${{ github.ref_name }}
+            ```
+
+            **VS Code extension** — download `vscode-stm32-can-*.vsix` from the assets below, then in VS Code: **Extensions panel → ⋯ menu → Install from VSIX…**
+            ```bash
+            code --install-extension vscode-stm32-can-*.vsix
+            ```
+
+            **ISC CAN Studio** — pick the bundle for your OS:
+            - macOS: `.dmg` (ad-hoc signed; first launch needs **right-click → Open → confirm**)
+            - Linux: `.deb`, `.AppImage`, or `.rpm`
+            - Windows: `.msi` (preferred) or `.exe` installer
+
+            See [docs/INSTALL.md](https://github.com/isc-fs/can-flasher/blob/${{ github.ref_name }}/docs/INSTALL.md) for per-OS adapter setup (SLCAN / SocketCAN / PCAN / Vector).
+
+            ---
+
+            **Full commit log**: https://github.com/isc-fs/can-flasher/commits/${{ github.ref_name }}
+
+  # ---- CLI binaries -------------------------------------------
+  #
+  # Same matrix shape as the pre-consolidation release.yml's
+  # `build` job; one runner per target, native compile.
+
+  cli-build:
+    name: cli (${{ matrix.target }})
+    needs: [verify-version, create-release]
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped') && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -99,10 +184,6 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin can-flasher --target ${{ matrix.target }}
 
-      # Derive the version string from the tag (`refs/tags/v1.1.0` →
-      # `v1.1.0`) or use a `dev-<sha>` placeholder for manual runs.
-      # The placeholder keeps artifact names stable-ish while clearly
-      # signalling "not an official release."
       - name: Compute version
         id: version
         shell: bash
@@ -113,11 +194,6 @@ jobs:
             echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
 
-      # Pack the binary plus README + LICENCE hints into a single
-      # archive per target. Flat layout — the archive extracts to a
-      # single directory named after the archive. Operators get one
-      # curl/wget + extract to a clean copy of `can-flasher` on their
-      # PATH.
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         shell: bash
@@ -145,39 +221,151 @@ jobs:
       - name: Upload as workflow artifact (always)
         uses: actions/upload-artifact@v4
         with:
-          name: can-flasher-${{ matrix.target }}
+          name: cli-${{ matrix.target }}
           path: ${{ env.archive }}
-          # Keep manual-run artifacts for a week — enough for a
-          # hotfix loop, short enough that we don't hoard storage.
           retention-days: 7
 
       - name: Attach to GitHub Release
-        # Only attach when triggered by a tag push — manual runs
-        # stay as workflow artifacts so a half-built release
-        # doesn't accidentally publish.
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.archive }}
           fail_on_unmatched_files: true
 
-  # Inline `dev → main` sync that runs after every successful tag-push
-  # release. Historically this lived in a separate `sync-dev-after-release.yml`
-  # listening for `release.published` events — but GitHub does not fire
-  # downstream workflow events when the release is created by another
-  # workflow's GITHUB_TOKEN (which is exactly what `softprops/action-gh-release`
-  # uses in the `build` job above). That meant the standalone workflow
-  # silently never ran on real releases. v1.2.0 shipped before this was
-  # caught and needed a manual fast-forward. Doing the sync inline here
-  # avoids the cross-workflow event chain entirely.
+  # ---- VS Code extension --------------------------------------
+
+  editor-build:
+    name: editor vsix
+    needs: [verify-version, create-release]
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped') && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editor/vscode
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Package .vsix
+        id: package
+        run: |
+          npx --yes @vscode/vsce@^2.24.0 package --no-dependencies
+          VSIX_NAME=$(ls vscode-stm32-can-*.vsix | head -n1)
+          VERSION=$(node -p "require('./package.json').version")
+          echo "vsix_path=editor/vscode/${VSIX_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          ls -lh "${VSIX_NAME}"
+
+      - name: Upload as workflow artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-vsix
+          path: editor/vscode/vscode-stm32-can-*.vsix
+          retention-days: 14
+
+      - name: Attach to GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: editor/vscode/vscode-stm32-can-*.vsix
+          fail_on_unmatched_files: true
+
+  # ---- ISC CAN Studio bundles ---------------------------------
+
+  studio-build:
+    name: studio (${{ matrix.os }})
+    needs: [verify-version, create-release]
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped') && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            apt_deps: >-
+              libwebkit2gtk-4.1-dev
+              libgtk-3-dev
+              libayatana-appindicator3-dev
+              librsvg2-dev
+              libudev-dev
+              pkg-config
+          - os: macos-latest
+            apt_deps: ''
+          - os: windows-latest
+            apt_deps: ''
+    defaults:
+      run:
+        working-directory: apps/can-studio
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux WebKit / GTK build deps
+        if: matrix.apt_deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_deps }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+          rustflags: ''
+
+      - name: Cache cargo registry + target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Generate icons (required for Windows .ico bundle)
+        run: npx --yes @tauri-apps/cli@^2 icon src-tauri/icons/icon.png
+
+      # tauri-action does the heavy lifting: builds the Tauri app,
+      # produces the per-platform bundles, and attaches them to the
+      # existing Release (created by `create-release`). Setting
+      # `tagName` makes it append to that release instead of
+      # creating a sibling — single release page, all bundles.
+      - name: Build + attach to Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/can-studio
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseDraft: false
+          prerelease: false
+
+  # ---- Inline dev → main sync ---------------------------------
   #
-  # The standalone `sync-dev-after-release.yml` still exists as a
-  # `workflow_dispatch` recovery handle for cases where this inline job
-  # didn't run (manual release publishes, partial-failure recoveries).
+  # Same logic as the pre-consolidation release.yml. Fast-forwards
+  # `dev` onto `main` after the release lands, so the next branch
+  # cut from dev starts on the tagged commit. Runs only when ALL
+  # three build legs succeeded.
+  #
+  # Standalone `sync-dev-after-release.yml` is still kept as a
+  # `workflow_dispatch` recovery handle for the rare case where
+  # this inline job didn't run (e.g. manual publish from the UI).
+
   sync-dev:
     name: sync dev to main
-    needs: build
-    if: github.ref_type == 'tag'
+    needs: [cli-build, editor-build, studio-build]
+    if: github.ref_type == 'tag' && needs.cli-build.result == 'success' && needs.editor-build.result == 'success' && needs.studio-build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -185,9 +373,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: dev
-          # Full history so `merge-base --is-ancestor` can compare
-          # against main without falling back to shallow-fetch
-          # failure modes.
           fetch-depth: 0
 
       - name: Configure git as github-actions[bot]
@@ -201,13 +386,6 @@ jobs:
       - name: Sync dev with main
         run: |
           set -e
-          # Three cases — same logic as sync-dev-after-release.yml:
-          #
-          #  1. dev is strictly behind main (the expected case post-release):
-          #     fast-forward.
-          #  2. dev is already ahead of main: someone pushed to dev between
-          #     release cut and this job. Nothing to do.
-          #  3. dev and main diverged: rare. Create a merge commit on dev.
           if git merge-base --is-ancestor HEAD origin/main; then
             git merge --ff-only origin/main
             echo "✓ fast-forwarded dev to origin/main"

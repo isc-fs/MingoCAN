@@ -103,8 +103,10 @@ details, test suite, and branch conventions.
 
 | Path | Status | What it does |
 |---|---|---|
-| [editor/vscode/](editor/vscode/) | ✅ live ([editor-v0.1.2](https://github.com/isc-fs/can-flasher/releases/tag/editor-v0.1.2)) | VS Code extension that wraps `cmake --build` + `can-flasher flash` into one command, plus device discovery, adapter picker, live-data + DTC panels. Shells out to `can-flasher --json` — never speaks the protocol directly. Distributed as a `.vsix` attached to each `editor-v*` release; internal ISC consumption. |
-| [apps/can-studio/](apps/can-studio/) | ✅ live ([can-studio-v0.3.0](https://github.com/isc-fs/can-flasher/releases/tag/can-studio-v0.3.0)) — Tier 2 | Tauri 2 desktop app for flashing + diagnostics + generic CAN bus monitor + DBC-decoded Signals view. Reuses the `can-flasher` crate by path — same Rust on both sides of the IPC bridge. macOS / Linux / Windows native bundles per release. |
+| [editor/vscode/](editor/vscode/) | ✅ live | VS Code extension that wraps `cmake --build` + `can-flasher flash` into one command, plus device discovery, adapter picker, live-data + DTC panels. Shells out to `can-flasher --json` — never speaks the protocol directly. Distributed as a `.vsix` attached to each `v*` release; internal ISC consumption. |
+| [apps/can-studio/](apps/can-studio/) | ✅ live — Tier 2 | Tauri 2 desktop app for flashing + diagnostics + generic CAN bus monitor + DBC-decoded Signals view. Reuses the `can-flasher` crate by path — same Rust on both sides of the IPC bridge. macOS / Linux / Windows native bundles attached to each `v*` release. |
+
+Both surfaces ship in lockstep with the CLI from a single `v*` tag — see [docs/CONTRIBUTING.md § Cutting a release](docs/CONTRIBUTING.md#cutting-a-release).
 
 ---
 
