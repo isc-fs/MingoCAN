@@ -105,6 +105,35 @@ gitGraph
 at `v1.0.0` and whatever comes next). `dev` is where feat / fix
 branches integrate. Nobody commits directly to either.
 
+#### Branch protection
+
+`main` is protected at the GitHub level — not just by convention:
+
+- **PR-required.** Direct `git push origin main` is rejected by
+  the server; every commit on `main` must arrive through a
+  merged PR.
+- **No force-pushes.** Tagged release commits (`v1.3.1`,
+  `v1.3.0`, …) can't be rewritten — by anyone, including repo
+  admins (`enforce_admins: true`).
+- **No deletion.** The branch can't be deleted from the API or
+  the UI.
+
+`dev` is intentionally **not** behind the PR-required gate
+because [`release.yml`](../.github/workflows/release.yml)'s
+inline `sync-dev` job needs to push to `dev` after a tag-cut
+release (fast-forward dev onto main with the github-actions
+bot's token; no PR feasible from a workflow run). Force-pushes
+and deletion may still be locked down later via a Rulesets bot
+bypass if direct pushes start to bite.
+
+The repo also has **`delete_branch_on_merge: true`**, so
+feat/fix branches auto-delete from origin the moment their PR
+lands. No more lingering `feat/19-foo` on the branch list.
+
+If you ever hit a "Required pull request is missing" or
+"Protected branch update failed" error against `main`, you're
+in the right state — open a PR instead.
+
 ### Branch naming
 
 ```
@@ -167,28 +196,68 @@ The roadmap table tracks which tag closes each phase.
 
 ### Cutting a release
 
-When bumping `main` to a new version:
+**One tag, three surfaces, one Release page.** From v2.0.0 onward
+the `can-flasher` CLI, the VS Code extension, and ISC CAN Studio
+all ship together at the **same version** from a single `v*` tag
+(e.g. `v2.0.0`). The retired `editor-v*` and `can-studio-v*` tag
+namespaces are not used for new cuts; one tag triggers one
+GitHub Release page carrying the CLI binaries, the VSIX, and the
+Studio bundles side-by-side.
 
-1. **Bump `Cargo.toml`** on `dev` first (`version = "1.1.2"` →
-   `version = "1.2.0"`, or whatever the next tag will be). PR the
-   bump + any last changes, merge to `dev`, then `dev → main`.
-2. **Tag `main`** with `git tag -a v1.2.0 -m "…"` and push.
-3. The `release.yml` workflow triggers on the tag push. Its first
-   job (`verify-version`) compares the tag name minus the leading
-   `v` against the `version` field in `Cargo.toml`. If they
-   disagree, all build legs are skipped and you get a clear error
-   pointing at the mismatch — retag after fixing the bump.
+**No release branches.** Releases are tagged directly on `main`;
+we don't cut `release/v*` branches at any point. Flow: land
+everything on `dev`, fast-forward `dev → main`, tag on `main`.
 
-v1.1.0 shipped with a version skew bug (binaries reported
-`can-flasher 0.1.0`); v1.1.1 added the CI guard so it can't
-happen again. If you see the workflow fail on `verify-version`,
-that's the guard earning its keep.
+When cutting `vX.Y.Z`, bump **all five** source-of-truth files
+in the same commit on `dev`:
 
-4. **Dev re-syncs automatically** once the release is published.
-   `sync-dev-after-release.yml` listens for `release: published`
-   and fast-forwards `dev` to `main` (or creates a merge commit
-   if dev has diverged). No manual `git checkout dev && git merge
-   main` needed after a release cut.
+| File | Field |
+|---|---|
+| `Cargo.toml` (root) | `version = "X.Y.Z"` |
+| `Cargo.lock` | `can-flasher` package entry's `version = "X.Y.Z"` |
+| `editor/vscode/package.json` | `"version": "X.Y.Z"` |
+| `apps/can-studio/src-tauri/Cargo.toml` | `version = "X.Y.Z"` |
+| `apps/can-studio/package.json` | `"version": "X.Y.Z"` |
+| `apps/can-studio/src-tauri/tauri.conf.json` | `"version": "X.Y.Z"` |
+
+Then:
+
+1. PR the bump + any last changes to `dev`; merge.
+2. Open a `dev → main` release PR and merge it.
+3. Tag `main` with `git tag -a vX.Y.Z -m "…"` and push.
+4. The consolidated [`release.yml`](../.github/workflows/release.yml)
+   triggers. Its `verify-version` gate compares the tag's
+   `X.Y.Z` against all five source files. Any mismatch fails the
+   gate by file name, and all build legs skip — retag after
+   bumping.
+
+The five-way gate is the descendant of v1.1.0's version-skew
+lesson (v1.1.0 binaries reported `can-flasher 0.1.0`; v1.1.1
+added the original single-file guard). The current gate catches
+the same class of mistake across all three surfaces in lockstep.
+
+5. **Three build legs run in parallel** under the single
+   workflow:
+   - `cli-build` matrix → 4 binary archives (Linux x86_64 /
+     aarch64, macOS aarch64, Windows x86_64)
+   - `editor-build` → one `.vsix`
+   - `studio-build` matrix → 7 native bundles (`.dmg`,
+     `.app.tar.gz`, `.deb`, `.AppImage`, `.rpm`, `.msi`, `.exe`)
+
+   All twelve assets land on **one** GitHub Release page, named
+   after the tag.
+
+6. **Dev re-syncs automatically.** The inline `sync-dev` job in
+   `release.yml` fast-forwards `dev` to `main` (or creates a
+   merge commit if dev has diverged) once all three build legs
+   succeed. The standalone `sync-dev-after-release.yml` workflow
+   stays as a manual-dispatch recovery handle for the rare case
+   where the inline job didn't run.
+
+7. **Edit the Release notes on GitHub** with the per-surface
+   "what's new" highlights. The auto-generated body sets up the
+   install snippets for each surface; the operator-facing summary
+   of *changes* lives in your handwriting on top.
 
 ---
 

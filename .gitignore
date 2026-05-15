@@ -9,6 +9,11 @@
 *.swp
 *.swo
 
+# ---- AI assistant local state ----
+# Claude Code / similar assistants drop per-user settings + worktree
+# scratch here. Local-only; never tracked.
+.claude/
+
 # ---- OS cruft ----
 .DS_Store
 Thumbs.db

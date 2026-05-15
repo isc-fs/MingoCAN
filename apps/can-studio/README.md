@@ -136,42 +136,27 @@ that's deferred until the friction warrants the $99/year + setup time.
 
 ## Releasing
 
-Official native bundles are produced by the [`ISC CAN Studio release`](../../.github/workflows/can-studio-release.yml)
-GitHub Actions workflow. To cut a new release:
+From v2.0.0 onward Studio ships in lockstep with the CLI and the VS Code
+extension under a single unified release. One `v*` tag triggers the
+consolidated [`release.yml`](../../.github/workflows/release.yml)
+workflow which builds all three surfaces in parallel and attaches every
+artefact to one GitHub Release page.
 
-1. Bump `version` in all three places (kept in lockstep by the
-   `verify-version` gate):
-   - [`apps/can-studio/src-tauri/Cargo.toml`](src-tauri/Cargo.toml)
-   - [`apps/can-studio/package.json`](package.json)
-   - [`apps/can-studio/src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json)
-2. Land the bump through the normal feat-branch + PR flow.
-3. Push a tag of the form `can-studio-vX.Y.Z` matching the bumped version:
-   ```bash
-   git tag can-studio-v0.1.0
-   git push origin can-studio-v0.1.0
-   ```
-4. The workflow's three matrix jobs build natively on Ubuntu, macOS, and
-   Windows, then each one attaches its platform-specific bundles to a single
-   GitHub Release tagged `can-studio-v…`. Bundles produced:
-   - macOS: `.dmg` + `.app` (inside the dmg)
-   - Linux: `.deb` + `.AppImage`
-   - Windows: `.msi` (preferred) + `.exe` installer
-5. Team members install from the Release page.
+Studio's contribution to the release: a 3-platform matrix that produces
+the native bundles per OS — `.dmg` + `.app.tar.gz` (macOS), `.deb` +
+`.AppImage` + `.rpm` (Linux), `.msi` + `.exe` (Windows). The verify-version
+gate at the start of the workflow checks Studio's three version-of-truth
+files (`src-tauri/Cargo.toml`, `package.json`, `src-tauri/tauri.conf.json`)
+against the pushed tag alongside the CLI's `Cargo.toml` and the VS Code
+extension's `package.json` — any mismatch fails the gate before any build
+runs.
 
 Manual dispatch (`Run workflow` button on the Actions UI) builds the bundles
 as workflow artifacts without creating a Release — useful for testing a
 build before tagging.
 
-### Tag-space separation
-
-| Tag pattern | Workflow | Produces |
-|---|---|---|
-| `v*` | [release.yml](../../.github/workflows/release.yml) | Rust `can-flasher` binaries |
-| `editor-v*` | [editor-release.yml](../../.github/workflows/editor-release.yml) | VS Code extension `.vsix` |
-| `can-studio-v*` | [can-studio-release.yml](../../.github/workflows/can-studio-release.yml) | ISC CAN Studio native bundles |
-
-None of the three trigger the others. A CLI release, an extension release,
-and a Studio release can all ship on the same day without interfering.
+See [docs/CONTRIBUTING.md § Cutting a release](../../docs/CONTRIBUTING.md#cutting-a-release)
+for the full step-by-step.
 
 ## Repository layout
 

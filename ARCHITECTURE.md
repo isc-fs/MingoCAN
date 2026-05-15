@@ -62,9 +62,7 @@ mindmap
       scripts/render_roadmap.py
       workflows/
         ci.yml · fmt + clippy + matrix
-        release.yml · v* CLI binaries
-        editor-release.yml · editor-v* VSIX
-        can-studio-release.yml · can-studio-v* bundles
+        release.yml · v* unified release (CLI + VSIX + Studio)
         roadmap.yml · regenerates ROADMAP.md
 ```
 

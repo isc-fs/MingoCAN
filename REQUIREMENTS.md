@@ -1284,9 +1284,7 @@ mindmap
       scripts/render_roadmap.py
       workflows/
         ci.yml · fmt/clippy/build/test matrix
-        release.yml · v* CLI binaries
-        editor-release.yml · editor-v* VSIX
-        can-studio-release.yml · can-studio-v* native bundles
+        release.yml · v* unified release (CLI + VSIX + Studio bundles)
         sync-dev-after-release.yml · dispatch recovery handle
         branch-issue.yml · auto-create tracking issue on branch push
         close-on-dev-merge.yml · auto-close on dev merge
