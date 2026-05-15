@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use can_flasher::bootloader_fetch::{self, BootloaderFormat};
 use can_flasher::swd::{self, SwdFlashRequest};
 
 // ---- DTOs ----
@@ -64,6 +65,40 @@ pub fn swd_list_probes() -> Vec<ProbeInfo> {
             product_id: p.product_id,
         })
         .collect()
+}
+
+/// Result of a `swd_fetch_bootloader` call. The path is the
+/// already-on-disk file the frontend should hand back to
+/// `swd_flash`; `downloaded` lets the UI distinguish "fresh
+/// pull" from "served cached" in the status text.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchedBootloader {
+    pub tag: String,
+    pub path: String,
+    pub downloaded: bool,
+}
+
+#[tauri::command]
+pub async fn swd_fetch_bootloader(tag: Option<String>) -> Result<FetchedBootloader, String> {
+    // Treat `None` and `Some("")`/`Some("latest")` as "give me the
+    // latest release" — keeps the JS side from having to special-case.
+    let tag_for_api = match tag.as_deref() {
+        None | Some("") | Some("latest") => None,
+        Some(t) => Some(t.to_string()),
+    };
+    let cached = tokio::task::spawn_blocking(move || {
+        bootloader_fetch::fetch(tag_for_api.as_deref(), BootloaderFormat::Elf)
+    })
+    .await
+    .map_err(|e| format!("fetch task join: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    Ok(FetchedBootloader {
+        tag: cached.tag,
+        path: cached.path.to_string_lossy().into_owned(),
+        downloaded: cached.downloaded,
+    })
 }
 
 #[tauri::command]

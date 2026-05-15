@@ -58,6 +58,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # the spike confirms the libusb story across all three OSes.
 probe-rs           = { version = "0.31", optional = true }
 
+# Blocking HTTP client with bundled rustls TLS. Used by the
+# bootloader auto-download path (`--release` flag on `swd-flash`
+# + Studio's "Fetch from releases" toggle) to pull the right
+# `CAN_BL.elf` asset from the BL repo. Same `swd`-feature gating
+# as probe-rs — only operators on the SWD path pay the size cost.
+ureq               = { version = "2.10", default-features = false, features = ["tls", "json"], optional = true }
+
+# Platform-correct cache directory resolution
+# (~/Library/Caches on macOS, $XDG_CACHE_HOME / ~/.cache on Linux,
+# %LOCALAPPDATA% on Windows). Used by `bootloader_fetch` to pick
+# a sensible spot for the downloaded `.elf`. Tiny dependency
+# (~200 LoC of platform conditionals); still gated to keep the
+# default-feature binary unchanged.
+dirs               = { version = "5.0", optional = true }
+
 [features]
 # Default feature set — everything that ships in the existing
 # operator-facing binary continues to ship.
@@ -69,7 +84,7 @@ default = []
 # `cargo build --features swd`. Release binaries from
 # `release.yml` will turn this on once the spike validates on
 # all three platforms.
-swd = ["dep:probe-rs"]
+swd = ["dep:probe-rs", "dep:ureq", "dep:dirs"]
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sync"] }

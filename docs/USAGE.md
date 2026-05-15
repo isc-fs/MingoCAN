@@ -272,6 +272,18 @@ Examples:
 # Flash the bootloader .elf to a single attached ST-LINK + STM32H733
 can-flasher swd-flash bootloader.elf
 
+# Same, but download the latest bootloader from the BL release page
+# instead of pointing at a local file. Cached under your platform
+# cache dir (~/Library/Caches on macOS, $XDG_CACHE_HOME on Linux,
+# %LOCALAPPDATA% on Windows) so repeat runs skip the network.
+can-flasher swd-flash --release
+
+# Pin to a specific BL release tag
+can-flasher swd-flash --release v1.2.0
+
+# Fetch the .hex or .bin instead of .elf
+can-flasher swd-flash --release --release-format hex
+
 # Pin to a specific probe when several ST-LINKs are wired in
 can-flasher swd-flash bootloader.elf --probe-serial 0670FF555654846687204023
 
