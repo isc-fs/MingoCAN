@@ -248,6 +248,55 @@ generic primitive, the convention is app-defined.
 
 ---
 
+## `swd-flash` — first-boot via ST-LINK (opt-in build)
+
+A bare STM32 can't speak the CAN bootloader's wire protocol until
+the bootloader is itself on the chip. `swd-flash` covers that
+first-boot problem by driving an ST-LINK V2 / V3 through
+[probe-rs](https://probe.rs), so the same binary handles both the
+initial SWD flash and every subsequent over-CAN app update.
+
+The subcommand is **only present in builds with the `swd` Cargo
+feature enabled** (off by default, since the dependency pulls in a
+libusb stack that not every operator wants). To enable:
+
+```bash
+cargo install --path . --features swd
+# or, from a clone:
+cargo build --release --features swd
+```
+
+Examples:
+
+```bash
+# Flash the bootloader .elf to a single attached ST-LINK + STM32H733
+can-flasher swd-flash bootloader.elf
+
+# Pin to a specific probe when several ST-LINKs are wired in
+can-flasher swd-flash bootloader.elf --probe-serial 0670FF555654846687204023
+
+# Different STM32 family (any probe-rs target string works)
+can-flasher swd-flash app.elf --chip STM32G431RBTx
+
+# Raw .bin needs --base; the default is 0x08000000 (main flash start)
+can-flasher swd-flash blob.bin --base 0x08020000
+
+# Skip the readback-and-compare to save ~1s on bench loops
+can-flasher swd-flash bootloader.elf --no-verify
+
+# Leave the chip halted after the write (e.g. for a debugger attach)
+can-flasher swd-flash bootloader.elf --no-reset
+```
+
+Platform prerequisites (libusb stack for the ST-LINK USB endpoint)
+are listed in [INSTALL.md § ST-LINK + SWD](INSTALL.md#st-link--swd-optional-feature-swd).
+
+The feature is currently a **feasibility spike**: ST-LINK only, no
+auto-download of the bootloader artifact, no GDB/RTT pass-through.
+See [REQUIREMENTS.md](../REQUIREMENTS.md) once the spike graduates.
+
+---
+
 ## Exit codes
 
 CI pipelines should branch on the numeric exit code, not the stderr

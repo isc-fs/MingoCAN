@@ -18,6 +18,8 @@ pub mod discover;
 pub mod flash;
 pub mod replay;
 pub mod send_raw;
+#[cfg(feature = "swd")]
+pub mod swd_flash;
 pub mod verify;
 
 // ---- Typed exit-code hints ----
@@ -124,6 +126,12 @@ pub enum Command {
 
     /// List detected CAN adapters on this machine
     Adapters,
+
+    /// (`--features swd`) Flash the bootloader to a bare chip via
+    /// SWD (ST-LINK). Solves the "first boot" problem for ECUs
+    /// that haven't run the CAN bootloader yet.
+    #[cfg(feature = "swd")]
+    SwdFlash(swd_flash::SwdFlashArgs),
 }
 
 // ---- Shared global flags ----
