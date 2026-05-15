@@ -5,12 +5,15 @@
 
 use std::path::PathBuf;
 
+use std::sync::mpsc;
+
 use anyhow::{anyhow, bail, Result};
 use clap::Args;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::bootloader_fetch::{self, BootloaderFormat};
 use crate::cli::{exit_err, ExitCodeHint, GlobalFlags};
-use crate::swd::{self, SwdFlashRequest};
+use crate::swd::{self, SwdFlashRequest, SwdOperation, SwdProgress};
 
 // Bad `--base` is a parse-time problem, not a flash-time one. We
 // reuse `InputFileError` (exit 8) rather than minting a new
@@ -104,8 +107,24 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
     // probe-rs is blocking; run on the blocking pool so the tokio
     // runtime stays responsive (matters for future Studio / VS
     // Code shell-outs, harmless for the standalone CLI).
+    //
+    // The progress callback runs on the blocking thread; we send
+    // updates through an mpsc channel to a draining task that
+    // owns the indicatif bar. The bar is on the calling thread,
+    // so we never touch terminal state from the worker — keeps
+    // indicatif's redraws clean and avoids cross-thread output
+    // interleaving.
     let request_for_msg = request.clone();
-    tokio::task::spawn_blocking(move || swd::flash(&request))
+    let (tx, rx) = mpsc::channel::<SwdProgress>();
+    let flash_handle = tokio::task::spawn_blocking(move || {
+        swd::flash_with_progress(&request, |progress| {
+            let _ = tx.send(progress);
+        })
+    });
+
+    drive_progress_bar(rx);
+
+    flash_handle
         .await
         .map_err(|e| anyhow!("swd-flash task join: {e}"))?
         .map_err(|e| exit_err(ExitCodeHint::FlashError, anyhow!("{e}")))?;
@@ -165,6 +184,66 @@ async fn resolve_artifact(
         (None, None) => bail!(
             "either pass a firmware artifact (positional) or `--release` to fetch the bootloader from the BL release page"
         ),
+    }
+}
+
+/// Drive an indicatif progress bar from the channel of probe-rs
+/// events. Blocks until the sender end closes (i.e. the flash
+/// task finishes). Tearing the bar down ourselves means the
+/// caller doesn't have to coordinate cleanup, and a panic in the
+/// flash thread still leaves the terminal in a clean state.
+fn drive_progress_bar(rx: mpsc::Receiver<SwdProgress>) {
+    let bar = ProgressBar::new(0);
+    bar.set_style(
+        ProgressStyle::with_template("{spinner} {msg:<14} [{bar:40.cyan/blue}] {bytes}/{total_bytes}")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=> "),
+    );
+    bar.enable_steady_tick(std::time::Duration::from_millis(80));
+
+    let mut current_op: Option<SwdOperation> = None;
+
+    while let Ok(event) = rx.recv() {
+        match event {
+            SwdProgress::Started { op, total } => {
+                // Switching phases — reset the bar's length so the
+                // erase / program / verify totals don't bleed into
+                // each other.
+                bar.set_position(0);
+                bar.set_length(total.unwrap_or(0));
+                bar.set_message(op_label(op).to_string());
+                current_op = Some(op);
+            }
+            SwdProgress::Progress { op, delta } => {
+                if Some(op) == current_op {
+                    bar.inc(delta);
+                }
+            }
+            SwdProgress::Finished { op } => {
+                if Some(op) == current_op {
+                    let len = bar.length().unwrap_or(0);
+                    if len > 0 {
+                        bar.set_position(len);
+                    }
+                }
+            }
+            SwdProgress::Failed { .. } => {
+                // Let the surrounding error path print the actual
+                // probe-rs error; the bar just stops.
+                break;
+            }
+        }
+    }
+    bar.finish_and_clear();
+}
+
+fn op_label(op: SwdOperation) -> &'static str {
+    match op {
+        SwdOperation::Erase => "erasing",
+        SwdOperation::Program => "writing",
+        SwdOperation::Verify => "verifying",
+        SwdOperation::Fill => "filling",
+        SwdOperation::Other => "working",
     }
 }
 

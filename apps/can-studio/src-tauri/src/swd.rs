@@ -3,21 +3,28 @@
 // sector erase, write, verify, reset) lives in the library crate
 // so the CLI binary and Studio share one implementation.
 //
-// Two surfaces:
+// Three surfaces:
 //
 //   - `swd_list_probes`        — enumerate attached debug probes
-//   - `swd_flash`              — run one flash operation
+//   - `swd_flash`              — run one flash operation (streams
+//                                 progress on the `swd-flash:event`
+//                                 Tauri channel)
+//   - `swd_erase`              — wipe the whole chip clean
 //
 // `swd_flash` is sync inside probe-rs, so we wrap it in
 // `tokio::task::spawn_blocking` to keep the Tauri runtime
 // responsive (same pattern as the CLI subcommand).
 
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 
 use can_flasher::bootloader_fetch::{self, BootloaderFormat};
-use can_flasher::swd::{self, SwdFlashRequest};
+use can_flasher::swd::{
+    self, SwdEraseRequest, SwdFlashRequest, SwdOperation, SwdProgress,
+};
 
 // ---- DTOs ----
 
@@ -50,6 +57,53 @@ pub struct SwdFlashArgs {
     pub base: Option<String>,
     pub verify: bool,
     pub reset_after: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwdEraseArgs {
+    pub chip: Option<String>,
+    pub probe_serial: Option<String>,
+}
+
+/// One streamed progress event, emitted as the `swd-flash:event`
+/// Tauri channel payload. Mirrors `can_flasher::swd::SwdProgress`
+/// but flattened into a discriminated union the frontend can
+/// pattern-match without unwrapping nested enums.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SwdStreamEvent {
+    Started { op: &'static str, total: Option<u64> },
+    Progress { op: &'static str, delta: u64 },
+    Finished { op: &'static str },
+    Failed { op: &'static str },
+}
+
+fn op_name(op: SwdOperation) -> &'static str {
+    match op {
+        SwdOperation::Erase => "erase",
+        SwdOperation::Program => "program",
+        SwdOperation::Verify => "verify",
+        SwdOperation::Fill => "fill",
+        SwdOperation::Other => "other",
+    }
+}
+
+impl From<SwdProgress> for SwdStreamEvent {
+    fn from(p: SwdProgress) -> Self {
+        match p {
+            SwdProgress::Started { op, total } => Self::Started {
+                op: op_name(op),
+                total,
+            },
+            SwdProgress::Progress { op, delta } => Self::Progress {
+                op: op_name(op),
+                delta,
+            },
+            SwdProgress::Finished { op } => Self::Finished { op: op_name(op) },
+            SwdProgress::Failed { op } => Self::Failed { op: op_name(op) },
+        }
+    }
 }
 
 // ---- Tauri commands ----
@@ -102,7 +156,7 @@ pub async fn swd_fetch_bootloader(tag: Option<String>) -> Result<FetchedBootload
 }
 
 #[tauri::command]
-pub async fn swd_flash(args: SwdFlashArgs) -> Result<(), String> {
+pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<(), String> {
     let base_addr = match args.base.as_deref().map(parse_hex_u64) {
         Some(Some(v)) => v,
         Some(None) => {
@@ -123,10 +177,53 @@ pub async fn swd_flash(args: SwdFlashArgs) -> Result<(), String> {
     request.verify = args.verify;
     request.reset_after = args.reset_after;
 
-    // probe-rs is blocking — keep the Tauri async runtime free.
-    tokio::task::spawn_blocking(move || swd::flash(&request))
+    // probe-rs's progress closure runs on the blocking thread we're
+    // about to spawn. Send the events back to the async runtime via
+    // an mpsc channel so we can `app.emit` from a tokio context.
+    // A bounded(64) is plenty — the flash phase generates a few
+    // hundred events total, and the channel auto-drops if the UI
+    // can't keep up (UI doesn't need every tick, just enough to
+    // animate).
+    let (tx, rx) = mpsc::channel::<SwdStreamEvent>();
+    let flash_handle = tokio::task::spawn_blocking(move || {
+        swd::flash_with_progress(&request, |progress| {
+            // Best-effort send. If the receiver was dropped (window
+            // closed mid-flash), keep flashing — discarding the
+            // event is fine.
+            let _ = tx.send(progress.into());
+        })
+    });
+
+    // Drain progress events while the flash is in-flight. We do
+    // this on the tokio runtime so the UI thread sees updates
+    // immediately rather than batched at the end.
+    let app_for_drain = app.clone();
+    let drain_handle = tokio::task::spawn_blocking(move || {
+        while let Ok(event) = rx.recv() {
+            let _ = app_for_drain.emit("swd-flash:event", &event);
+        }
+    });
+
+    let flash_result = flash_handle
         .await
-        .map_err(|e| format!("swd-flash task join: {e}"))?
+        .map_err(|e| format!("swd-flash task join: {e}"))?;
+    // Wait for the drainer to finish flushing any tail events.
+    let _ = drain_handle.await;
+
+    flash_result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn swd_erase(args: SwdEraseArgs) -> Result<(), String> {
+    let mut request = SwdEraseRequest::new();
+    if let Some(chip) = args.chip {
+        request.chip = chip;
+    }
+    request.probe_serial = args.probe_serial;
+
+    tokio::task::spawn_blocking(move || swd::erase_chip(&request))
+        .await
+        .map_err(|e| format!("swd-erase task join: {e}"))?
         .map_err(|e| e.to_string())
 }
 
@@ -151,5 +248,15 @@ mod tests {
         assert_eq!(parse_hex_u64("0X08020000"), Some(0x0802_0000));
         assert_eq!(parse_hex_u64("134217728"), Some(0x0800_0000));
         assert_eq!(parse_hex_u64("not-hex"), None);
+    }
+
+    #[test]
+    fn op_names_are_stable() {
+        // Pinned strings; frontend matches on these.
+        assert_eq!(op_name(SwdOperation::Erase), "erase");
+        assert_eq!(op_name(SwdOperation::Program), "program");
+        assert_eq!(op_name(SwdOperation::Verify), "verify");
+        assert_eq!(op_name(SwdOperation::Fill), "fill");
+        assert_eq!(op_name(SwdOperation::Other), "other");
     }
 }

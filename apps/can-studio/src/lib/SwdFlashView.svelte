@@ -1,30 +1,35 @@
 <!--
-    SWD flash view — lay the bootloader (or any firmware) onto a
-    bare STM32 via ST-LINK. Wraps the `swd_flash` Tauri command,
-    which itself shells into can-flasher's probe-rs integration.
+    Burn bootloader view — programs an STM32 over SWD with the
+    custom CAN bootloader so the chip can subsequently be flashed
+    over CAN from the Flash tab.
 
-    Solves the chicken-and-egg first-boot problem: a fresh chip
-    can't speak the CAN bootloader's protocol until the bootloader
-    itself is on the chip. Operators used to drop down to
-    STM32CubeProgrammer / OpenOCD for that initial flash; this
-    view collapses both jobs into one app.
+    The team's ECU is a fixed target (STM32H733 at 0x08000000), so
+    the UI doesn't expose chip / base-address fields — those would
+    just be footguns. Operators who need to flash a different
+    family can drop down to the `can-flasher swd-flash` CLI, which
+    keeps the full surface area.
 
-    Scope (v1 spike):
-      - ST-LINK V2 / V3 probes (probe-rs auto-detects)
-      - STM32H733 default; any probe-rs target string works
-      - Erase + write + verify + optional reset
+    Three actions:
+      - **Burn bootloader** — erase + write + verify + reset
+      - **Fetch from releases** — pulls CAN_BL.elf from the BL repo
+      - **Erase chip**  — destructive full-flash wipe (commissioning)
 -->
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, onDestroy } from 'svelte';
     import { open as openDialog } from '@tauri-apps/plugin-dialog';
+    import type { UnlistenFn } from '@tauri-apps/api/event';
 
     import {
         defaultSwdFlashArgs,
         listSwdProbes,
+        onSwdFlashEvent,
+        swdErase,
         swdFetchBootloader,
         swdFlash,
         type ProbeInfo,
         type SwdFlashArgs,
+        type SwdFlashEvent,
+        type SwdOp,
     } from './swd';
 
     type FlashState =
@@ -33,11 +38,60 @@
         | { kind: 'ok'; durationMs: number }
         | { kind: 'error'; message: string };
 
+    type EraseState =
+        | { kind: 'idle' }
+        | { kind: 'confirming' }
+        | { kind: 'running' }
+        | { kind: 'ok' }
+        | { kind: 'error'; message: string };
+
     let args = $state<SwdFlashArgs>(defaultSwdFlashArgs());
     let probes = $state<ProbeInfo[]>([]);
     let probesLoading = $state<boolean>(false);
     let probesError = $state<string | null>(null);
     let flashState = $state<FlashState>({ kind: 'idle' });
+    let eraseState = $state<EraseState>({ kind: 'idle' });
+
+    // ---- Live progress, fed by `swd-flash:event` Tauri events ----
+    // `currentOp` is the operation probe-rs is in the middle of
+    // (erase / program / verify / fill). `total` is the byte count
+    // for that operation when probe-rs tells us; `done` accumulates
+    // the per-event `delta`. Percent is derived; UI binds to it.
+    let currentOp = $state<SwdOp | null>(null);
+    let opDone = $state<number>(0);
+    let opTotal = $state<number | null>(null);
+
+    const pct = $derived(
+        opTotal !== null && opTotal > 0
+            ? Math.min(100, Math.floor((opDone * 100) / opTotal))
+            : null,
+    );
+
+    let unlistenProgress: UnlistenFn | null = null;
+
+    function handleProgress(event: SwdFlashEvent): void {
+        switch (event.kind) {
+            case 'started':
+                currentOp = event.op;
+                opDone = 0;
+                opTotal = event.total;
+                break;
+            case 'progress':
+                if (event.op === currentOp) {
+                    opDone += event.delta;
+                }
+                break;
+            case 'finished':
+            case 'failed':
+                // Snap to 100% on a successful finish so the bar
+                // looks complete even if probe-rs's last delta
+                // didn't quite total to the announced byte count.
+                if (event.kind === 'finished' && event.op === currentOp && opTotal !== null) {
+                    opDone = opTotal;
+                }
+                break;
+        }
+    }
 
     // ---- BL release fetch state ----
     // `releaseTag` is what the operator typed (blank ⇒ latest). The
@@ -110,6 +164,11 @@
             flashState = { kind: 'error', message: 'Pick a firmware artifact first.' };
             return;
         }
+        // Reset the bar — leftover state from a prior run would
+        // otherwise show 100% while the new flash is still erasing.
+        currentOp = null;
+        opDone = 0;
+        opTotal = null;
         const startedAt = performance.now();
         flashState = { kind: 'running', startedAt };
         try {
@@ -141,9 +200,47 @@
         return `${p.identifier} — ${sn}`;
     }
 
-    const running = $derived(flashState.kind === 'running');
+    async function startErase(): Promise<void> {
+        eraseState = { kind: 'running' };
+        try {
+            await swdErase({
+                chip: null, // library default = STM32H733ZGTx
+                probeSerial: args.probeSerial?.trim() || null,
+            });
+            eraseState = { kind: 'ok' };
+        } catch (err) {
+            eraseState = {
+                kind: 'error',
+                message: err instanceof Error ? err.message : String(err),
+            };
+        }
+    }
 
-    onMount(refreshProbes);
+    const running = $derived(flashState.kind === 'running');
+    const erasing = $derived(eraseState.kind === 'running');
+    const opLabel = $derived(
+        currentOp === 'erase'
+            ? 'Erasing flash'
+            : currentOp === 'program'
+              ? 'Writing flash'
+              : currentOp === 'verify'
+                ? 'Verifying flash'
+                : currentOp === 'fill'
+                  ? 'Filling flash'
+                  : 'Working',
+    );
+
+    onMount(async () => {
+        await refreshProbes();
+        unlistenProgress = await onSwdFlashEvent(handleProgress);
+    });
+
+    onDestroy(() => {
+        if (unlistenProgress) {
+            unlistenProgress();
+            unlistenProgress = null;
+        }
+    });
 </script>
 
 <div class="view">
@@ -151,9 +248,11 @@
         <div>
             <h2>Burn bootloader</h2>
             <p class="muted">
-                First-boot a bare STM32 via ST-LINK — lay the bootloader (or
-                any firmware) on the chip over SWD. Drives probe-rs under the
-                hood, same code the CLI's <code>swd-flash</code> uses.
+                The team's CAN bootloader has to be programmed onto the
+                STM32H733 over SWD before any over-CAN flashing can work — a
+                bare chip can't yet speak the bootloader's wire protocol.
+                Burn it once when commissioning a new ECU; from then on,
+                every app update uses the <strong>Flash</strong> tab over CAN.
             </p>
         </div>
         <button
@@ -270,35 +369,6 @@
     </section>
 
     <section class="card">
-        <h3>Target</h3>
-        <div class="grid-2">
-            <label class="field">
-                <span>Chip</span>
-                <input
-                    type="text"
-                    bind:value={args.chip}
-                    placeholder="STM32H733ZGTx"
-                    disabled={running}
-                />
-            </label>
-            <label class="field">
-                <span>Base address</span>
-                <input
-                    type="text"
-                    bind:value={args.base}
-                    placeholder="0x08000000"
-                    disabled={running}
-                />
-            </label>
-        </div>
-        <p class="muted small">
-            Any probe-rs target string works — <code>STM32H7</code>,
-            <code>STM32F4</code>, <code>STM32G431RBTx</code>, etc. Base address
-            is ignored for ELF / HEX inputs.
-        </p>
-    </section>
-
-    <section class="card">
         <h3>Options</h3>
         <label class="toggle">
             <input type="checkbox" bind:checked={args.verify} disabled={running} />
@@ -319,29 +389,95 @@
             type="button"
             class="primary"
             onclick={runFlash}
-            disabled={running || args.artifactPath.trim().length === 0}
+            disabled={running || erasing || args.artifactPath.trim().length === 0}
         >
             {#if running}
-                Flashing…
+                Burning…
             {:else}
-                Flash via SWD
+                Burn bootloader
             {/if}
+        </button>
+        <button
+            type="button"
+            class="danger"
+            onclick={() => (eraseState = { kind: 'confirming' })}
+            disabled={running || erasing}
+        >
+            Erase chip
         </button>
     </div>
 
-    {#if flashState.kind === 'ok'}
+    {#if flashState.kind === 'running'}
+        <div class="status running">
+            <div class="progress-row">
+                <span class="op-label">{opLabel}</span>
+                <span class="pct">
+                    {#if pct !== null}
+                        {pct}%
+                    {:else}
+                        …
+                    {/if}
+                </span>
+            </div>
+            <div
+                class="bar"
+                class:indeterminate={pct === null}
+                role="progressbar"
+                aria-label={opLabel}
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={pct ?? 0}
+            >
+                <div class="fill" style:width={pct !== null ? `${pct}%` : '100%'}></div>
+            </div>
+            <p class="muted small">Don't unplug the probe.</p>
+        </div>
+    {:else if flashState.kind === 'ok'}
         <div class="status ok">
-            ✓ Flashed in {flashState.durationMs} ms
+            ✓ Bootloader burned in {flashState.durationMs} ms. The chip is
+            ready to be flashed over CAN from the <strong>Flash</strong> tab.
         </div>
     {:else if flashState.kind === 'error'}
         <div class="status error">
-            <strong>Flash failed:</strong>
+            <strong>Burn failed:</strong>
             {flashState.message}
         </div>
-    {:else if flashState.kind === 'running'}
+    {/if}
+
+    {#if eraseState.kind === 'confirming'}
+        <div class="status warn">
+            <strong>Erase the entire chip?</strong>
+            This wipes the bootloader and any application code. The chip will
+            need the bootloader burned again before CAN flashing works.
+            <div class="confirm-actions">
+                <button
+                    type="button"
+                    class="danger"
+                    onclick={startErase}
+                >
+                    Yes, erase
+                </button>
+                <button
+                    type="button"
+                    onclick={() => (eraseState = { kind: 'idle' })}
+                >
+                    Cancel
+                </button>
+            </div>
+        </div>
+    {:else if eraseState.kind === 'running'}
         <div class="status running">
             <span class="spinner"></span>
-            Writing flash — don't unplug the probe.
+            Erasing chip — don't unplug the probe.
+        </div>
+    {:else if eraseState.kind === 'ok'}
+        <div class="status ok">
+            ✓ Chip erased. Burn the bootloader next to make it CAN-flashable.
+        </div>
+    {:else if eraseState.kind === 'error'}
+        <div class="status error">
+            <strong>Erase failed:</strong>
+            {eraseState.message}
         </div>
     {/if}
 </div>
@@ -488,6 +624,106 @@
     .actions .primary:hover:not(:disabled) {
         filter: brightness(1.05);
         color: #1a1a1a;
+    }
+
+    .danger {
+        appearance: none;
+        background: transparent;
+        border: 1px solid var(--error);
+        color: var(--error);
+        font: inherit;
+        padding: 8px 14px;
+        border-radius: 6px;
+        cursor: pointer;
+    }
+
+    .danger:hover:not(:disabled) {
+        background: rgba(255, 115, 115, 0.1);
+    }
+
+    .danger:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    /* Progress bar */
+
+    .progress-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 6px;
+    }
+
+    .op-label {
+        font-weight: 500;
+    }
+
+    .pct {
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+        color: var(--text-muted);
+    }
+
+    .bar {
+        height: 8px;
+        background: var(--bg);
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+    }
+
+    .bar .fill {
+        height: 100%;
+        background: var(--accent);
+        transition: width 120ms ease-out;
+    }
+
+    .bar.indeterminate .fill {
+        animation: slide 1.2s ease-in-out infinite;
+        background: linear-gradient(
+            90deg,
+            transparent 0%,
+            var(--accent) 50%,
+            transparent 100%
+        );
+    }
+
+    @keyframes slide {
+        0% {
+            transform: translateX(-100%);
+        }
+        100% {
+            transform: translateX(100%);
+        }
+    }
+
+    .status.warn {
+        color: #ffd166;
+        border-color: rgba(255, 209, 102, 0.4);
+        background: rgba(255, 209, 102, 0.06);
+    }
+
+    .confirm-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+    }
+
+    .confirm-actions button {
+        appearance: none;
+        font: inherit;
+        padding: 8px 14px;
+        border-radius: 6px;
+        cursor: pointer;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text);
+    }
+
+    .confirm-actions button:hover:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--accent);
     }
 
     .status {

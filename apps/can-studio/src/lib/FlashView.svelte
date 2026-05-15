@@ -66,6 +66,36 @@
     let progressMessage = $state<string>('');
     let result = $state<JsonReport | null>(null);
     let error = $state<string | null>(null);
+
+    // ---- Overall flash progress (per-sector granularity) ----
+    // `sectorsPlanned` is the count of sectors the planner said
+    // need writing (role='write'); `sectorsWritten` increments on
+    // every successful `verified` event. The pair gives a clean
+    // 0–100% bar that doesn't include skipped sectors.
+    let sectorsPlanned = $state<number>(0);
+    let sectorsWritten = $state<number>(0);
+    // Per-sector byte progress, refreshed by each `written` event.
+    // Used to fill in fractional progress between sector
+    // completions, so the bar moves continuously on big sectors
+    // rather than jumping in chunks.
+    let currentSectorBytes = $state<number>(0);
+    let currentSectorTotal = $state<number>(0);
+
+    const overallPct = $derived(
+        sectorsPlanned > 0
+            ? Math.min(
+                  100,
+                  Math.floor(
+                      ((sectorsWritten +
+                          (currentSectorTotal > 0
+                              ? currentSectorBytes / currentSectorTotal
+                              : 0)) *
+                          100) /
+                          sectorsPlanned,
+                  ),
+              )
+            : null,
+    );
     // Track which side of "done" the last run landed on so the
     // status indicator can show a clear green/red badge instead
     // of relying on the operator reading the log to figure it
@@ -227,11 +257,31 @@
         result = null;
         error = null;
         lastOutcome = null;
+        // Reset the bar — a previous run's counters would
+        // otherwise show "done" while the new flash is starting.
+        sectorsPlanned = 0;
+        sectorsWritten = 0;
+        currentSectorBytes = 0;
+        currentSectorTotal = 0;
 
         unlisten = await onFlashEvent((event) => {
             log = [...log, formatLogLine(event)];
             const msg = formatProgress(event);
             if (msg !== null) progressMessage = msg;
+            // Drive the overall progress bar from the streamed
+            // events. Counts and byte-totals stay in sync with
+            // the textual `progressMessage` because both are fed
+            // by the same `event` payload.
+            if (event.kind === 'planning' && event.role === 'write') {
+                sectorsPlanned += 1;
+            } else if (event.kind === 'written') {
+                currentSectorBytes = event.bytes;
+                currentSectorTotal = event.total;
+            } else if (event.kind === 'verified') {
+                sectorsWritten += 1;
+                currentSectorBytes = 0;
+                currentSectorTotal = 0;
+            }
             void maybeFollowTail();
         });
 
@@ -686,7 +736,33 @@
                 {/if}
             </strong>
             <span>{progressMessage}</span>
+            {#if running && overallPct !== null}
+                <span class="overall-pct">{overallPct}%</span>
+            {/if}
         </div>
+
+        {#if running}
+            <!--
+                Continuous bar fed by the same event stream as the
+                text status. Indeterminate stripe before the
+                planner emits any sector counts, fills with the
+                accent once `sectorsPlanned > 0`.
+            -->
+            <div
+                class="bar"
+                class:indeterminate={overallPct === null}
+                role="progressbar"
+                aria-label="Flash progress"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={overallPct ?? 0}
+            >
+                <div
+                    class="fill"
+                    style:width={overallPct !== null ? `${overallPct}%` : '100%'}
+                ></div>
+            </div>
+        {/if}
     {/if}
 
     {#if error !== null}
@@ -941,6 +1017,47 @@
         background: rgba(255, 115, 115, 0.08);
     }
     .progress.failure .status-icon { color: var(--error); font-weight: 700; }
+
+    .overall-pct {
+        margin-left: auto;
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+        color: var(--text-muted);
+    }
+
+    .bar {
+        margin-top: 8px;
+        height: 8px;
+        background: var(--bg);
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+    }
+
+    .bar .fill {
+        height: 100%;
+        background: var(--accent);
+        transition: width 120ms ease-out;
+    }
+
+    .bar.indeterminate .fill {
+        animation: bar-slide 1.2s ease-in-out infinite;
+        background: linear-gradient(
+            90deg,
+            transparent 0%,
+            var(--accent) 50%,
+            transparent 100%
+        );
+    }
+
+    @keyframes bar-slide {
+        0% {
+            transform: translateX(-100%);
+        }
+        100% {
+            transform: translateX(100%);
+        }
+    }
     @keyframes pulse {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.4; }

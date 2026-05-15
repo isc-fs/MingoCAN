@@ -47,7 +47,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use probe_rs::flashing::{download_file_with_options, DownloadOptions, Format};
+use probe_rs::flashing::{
+    download_file_with_options, erase_all, DownloadOptions, FlashProgress, Format,
+    ProgressEvent, ProgressOperation,
+};
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::DebugProbeInfo;
 use probe_rs::{Permissions, Session};
@@ -139,6 +142,51 @@ pub fn list_probes() -> Vec<DebugProbeInfo> {
     Lister::new().list_all()
 }
 
+/// Progress notification surfaced to the caller during a flash
+/// operation. A thin remapping of probe-rs's `ProgressEvent` —
+/// keeps callers from having to depend on probe-rs's types
+/// directly and gives us a stable surface to evolve.
+#[derive(Debug, Clone)]
+pub enum SwdProgress {
+    /// A new operation (erase / program / verify / fill) began.
+    /// `total` is the byte count to process, when known.
+    Started { op: SwdOperation, total: Option<u64> },
+    /// Incremental progress on the current operation. `delta` is
+    /// the byte count completed since the previous event (i.e.
+    /// the caller maintains the running total themselves).
+    Progress { op: SwdOperation, delta: u64 },
+    /// Operation finished successfully.
+    Finished { op: SwdOperation },
+    /// Operation failed (download_file_with_options will return
+    /// the actual error; this is informational).
+    Failed { op: SwdOperation },
+}
+
+/// Phase identifier for [`SwdProgress`]. Mirrors probe-rs's
+/// [`ProgressOperation`] but avoids leaking that type onto the
+/// public API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwdOperation {
+    Erase,
+    Program,
+    Verify,
+    Fill,
+    Other,
+}
+
+impl From<ProgressOperation> for SwdOperation {
+    fn from(op: ProgressOperation) -> Self {
+        match op {
+            ProgressOperation::Erase => Self::Erase,
+            ProgressOperation::Program => Self::Program,
+            ProgressOperation::Verify => Self::Verify,
+            ProgressOperation::Fill => Self::Fill,
+            // probe-rs may add new variants; keep us forward-compatible.
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Open + attach + erase + write + verify + (optional) reset.
 ///
 /// The whole operation runs synchronously; probe-rs's I/O is
@@ -147,7 +195,24 @@ pub fn list_probes() -> Vec<DebugProbeInfo> {
 /// `tokio::task::spawn_blocking` because the only async caller
 /// would be the future Studio / VS Code surface, which can
 /// shell out to the CLI binary instead.
+///
+/// Use [`flash_with_progress`] to receive sector-by-sector
+/// status updates; this wrapper just discards them.
 pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
+    flash_with_progress(request, |_| {})
+}
+
+/// Like [`flash`], but invokes `on_progress` for every phase
+/// transition and progress tick that probe-rs surfaces. The
+/// closure runs inside probe-rs's flashing loop; keep it cheap
+/// (push onto an `mpsc`, increment a counter — don't do I/O).
+pub fn flash_with_progress<F>(
+    request: &SwdFlashRequest,
+    mut on_progress: F,
+) -> Result<(), SwdError>
+where
+    F: FnMut(SwdProgress),
+{
     if !request.artifact_path.exists() {
         return Err(SwdError::ArtifactMissing {
             path: request.artifact_path.clone(),
@@ -238,6 +303,38 @@ pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
     options.verify = request.verify;
     options.do_chip_erase = false; // sector-erase is faster; chip-erase risks losing OBs
 
+    // Funnel probe-rs's progress events into the caller's closure.
+    // The closure is shared between this and probe-rs via the
+    // `FlashProgress::new` borrow; both run on the same thread so
+    // RefCell-style interior mutability isn't needed.
+    options.progress = FlashProgress::new(|event: ProgressEvent| match event {
+        ProgressEvent::AddProgressBar { operation, total } => {
+            on_progress(SwdProgress::Started {
+                op: operation.into(),
+                total,
+            });
+        }
+        ProgressEvent::Started(op) => {
+            on_progress(SwdProgress::Started {
+                op: op.into(),
+                total: None,
+            });
+        }
+        ProgressEvent::Progress { operation, size, .. } => {
+            on_progress(SwdProgress::Progress {
+                op: operation.into(),
+                delta: size,
+            });
+        }
+        ProgressEvent::Finished(op) => {
+            on_progress(SwdProgress::Finished { op: op.into() });
+        }
+        ProgressEvent::Failed(op) => {
+            on_progress(SwdProgress::Failed { op: op.into() });
+        }
+        _ => {}
+    });
+
     info!(
         artifact = ?request.artifact_path,
         format = ?format,
@@ -260,6 +357,102 @@ pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
         // warning at the very end of a successful run.
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    Ok(())
+}
+
+/// Inputs to [`erase_chip`] — the same probe + chip selection as
+/// [`SwdFlashRequest`], minus everything to do with the firmware
+/// artefact. Kept as a distinct struct so adding "erase only this
+/// sector range" later doesn't break callers.
+#[derive(Debug, Clone)]
+pub struct SwdEraseRequest {
+    pub chip: String,
+    pub probe_serial: Option<String>,
+}
+
+impl SwdEraseRequest {
+    pub fn new() -> Self {
+        Self {
+            chip: DEFAULT_CHIP.to_string(),
+            probe_serial: None,
+        }
+    }
+}
+
+impl Default for SwdEraseRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Wipe the entire flash. Destructive — the chip comes out empty,
+/// bootloader and all. Operators reach for this when:
+///
+/// - A flash got into a half-written state and needs a clean slate
+/// - They want to commission a chip from scratch (erase → burn BL)
+/// - Read-protection (RDP) was set and they need to factory-reset
+pub fn erase_chip(request: &SwdEraseRequest) -> Result<(), SwdError> {
+    // Probe selection mirrors `flash`. Could refactor into a
+    // shared helper, but inlined here is fewer indirections and
+    // the two call sites diverge enough that DRY isn't a win.
+    let probes = list_probes();
+    let probe_info = match (probes.len(), request.probe_serial.as_deref()) {
+        (0, _) => return Err(SwdError::NoProbe),
+        (1, None) => probes.into_iter().next().unwrap(),
+        (_, Some(target_serial)) => {
+            let available: Vec<_> = probes
+                .iter()
+                .map(|p| {
+                    p.serial_number
+                        .clone()
+                        .unwrap_or_else(|| "(no serial)".into())
+                })
+                .collect();
+            probes
+                .into_iter()
+                .find(|p| p.serial_number.as_deref() == Some(target_serial))
+                .ok_or_else(|| SwdError::SerialNotFound {
+                    requested: target_serial.to_string(),
+                    available: available.join(", "),
+                })?
+        }
+        (n, None) => {
+            let summary: Vec<_> = probes
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{} ({})",
+                        p.identifier,
+                        p.serial_number
+                            .clone()
+                            .unwrap_or_else(|| "(no serial)".into()),
+                    )
+                })
+                .collect();
+            warn!(probe_count = n, "multiple probes attached; need --probe-serial");
+            return Err(SwdError::AmbiguousProbe(summary.join("; ")));
+        }
+    };
+
+    info!(
+        probe = probe_info.identifier,
+        serial = ?probe_info.serial_number,
+        "opening probe for erase",
+    );
+    let probe = probe_info
+        .open()
+        .map_err(|e| SwdError::ProbeRs(format!("open probe: {e}")))?;
+
+    info!(chip = request.chip, "attaching to target for erase");
+    let mut session: Session = probe
+        .attach(&request.chip, Permissions::default())
+        .map_err(|e| SwdError::ProbeRs(format!("attach to {}: {e}", request.chip)))?;
+
+    info!("erasing chip");
+    let mut progress = FlashProgress::empty();
+    erase_all(&mut session, &mut progress, false)
+        .map_err(|e| SwdError::ProbeRs(format!("erase_all: {e}")))?;
 
     Ok(())
 }
