@@ -9,7 +9,7 @@ members = [
 
 [package]
 name        = "can-flasher"
-version     = "2.1.0"
+version     = "2.2.0"
 edition     = "2021"
 rust-version = "1.95"
 description = "Host-side CAN flasher for the isc-fs STM32 CAN bootloader"
