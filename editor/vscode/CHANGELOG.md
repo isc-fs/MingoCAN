@@ -5,6 +5,16 @@ All notable changes to the ISC STM32 CAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-05-15
+
+### Changed
+- Co-release with `can-flasher` v1.3.1, which adds a per-frame
+  SocketCAN `trace!` log (and a permanent ISO-TP regression suite
+  against bootloader v1.2.0 strictness). The extension still shells
+  out to the CLI binary, so the new trace is available end-to-end
+  the moment operators upgrade their installed CLI to v1.3.1+.
+  No extension-side code changes were needed.
+
 ## [0.1.3] — 2026-05-15
 
 ### Changed
