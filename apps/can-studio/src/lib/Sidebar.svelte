@@ -4,6 +4,9 @@
     what's coming. Active row is highlighted by the accent colour.
 -->
 <script lang="ts">
+    import { onMount } from 'svelte';
+    import { getVersion } from '@tauri-apps/api/app';
+
     import type { ViewId } from './stores';
     import { VIEWS } from './stores';
 
@@ -13,6 +16,19 @@
     }
 
     const { activeView, onSelect }: Props = $props();
+
+    // `getVersion()` reads tauri.conf.json's version field — the
+    // same field `release.yml`'s verify-version gate compares the
+    // git tag against, so the sidebar label always matches the
+    // tag operators downloaded the bundle from.
+    let appVersion = $state<string>('');
+    onMount(async () => {
+        try {
+            appVersion = await getVersion();
+        } catch {
+            // Standalone preview (no Tauri runtime) — leave blank.
+        }
+    });
 </script>
 
 <aside class="sidebar">
@@ -20,7 +36,9 @@
         <img src="/icon.png" alt="" />
         <div>
             <h1>ISC CAN Studio</h1>
-            <p class="muted">Tier 2 · DBC + Signals live</p>
+            {#if appVersion.length > 0}
+                <p class="muted">v{appVersion}</p>
+            {/if}
         </div>
     </div>
 
