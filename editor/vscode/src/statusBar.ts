@@ -14,6 +14,11 @@
 
 import * as vscode from 'vscode';
 
+import {
+    currentSnapshot,
+    onDidChangePresence,
+    type PresenceSnapshot,
+} from './adapterPresence';
 import { readConfig } from './config';
 
 let adapterItem: vscode.StatusBarItem | undefined;
@@ -57,26 +62,33 @@ export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     toolsItem.show();
     context.subscriptions.push(toolsItem);
 
-    updateAdapterPill();
+    updateAdapterPill(currentSnapshot());
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration('iscFs')) {
-                updateAdapterPill();
+                updateAdapterPill(currentSnapshot());
             }
         }),
     );
+
+    // Presence-driven updates: when the adapterPresence service
+    // (re)checks the hardware, the pill flips between "present",
+    // "disconnected" (red warning), and "unknown" (no decoration).
+    context.subscriptions.push(onDidChangePresence(updateAdapterPill));
 }
 
-function updateAdapterPill(): void {
+function updateAdapterPill(presence: PresenceSnapshot): void {
     if (adapterItem === undefined) {
         return;
     }
     const cfg = readConfig();
-    // $(plug) is a built-in codicon; $(circle-slash) signals "no
-    // channel set" — operator hasn't picked an adapter yet.
+    // No channel configured yet — operator hasn't picked an adapter
+    // (or the picker run didn't finish). `$(circle-slash)` glyph,
+    // warning background.
     if (cfg.channel.length === 0 && cfg.interface !== 'virtual') {
         adapterItem.text = '$(circle-slash) ISC MingoCAN: no adapter';
+        adapterItem.tooltip = 'Click to pick a CAN adapter';
         adapterItem.backgroundColor = new vscode.ThemeColor(
             'statusBarItem.warningBackground',
         );
@@ -85,6 +97,24 @@ function updateAdapterPill(): void {
     const interfaceLabel = cfg.interface === 'virtual' ? 'virtual' : cfg.interface;
     const channelLabel = cfg.channel.length > 0 ? cfg.channel : '—';
     const nodeLabel = cfg.nodeId.length > 0 ? ` → ${cfg.nodeId}` : '';
+
+    if (presence.presence === 'disconnected') {
+        // Hardware that was configured isn't on the bus anymore —
+        // flag it loudly so the operator notices before the next
+        // click is about to talk to nothing. `$(debug-disconnect)`
+        // is the dedicated disconnected glyph in codicons.
+        adapterItem.text = `$(debug-disconnect) ${interfaceLabel}: ${channelLabel} (disconnected)`;
+        adapterItem.tooltip = `${interfaceLabel}: ${channelLabel} is no longer on the bus. Plug it back in or pick a different adapter.`;
+        adapterItem.backgroundColor = new vscode.ThemeColor(
+            'statusBarItem.warningBackground',
+        );
+        return;
+    }
+
+    // `present` and `unknown` both render the normal pill; the
+    // `unknown` case is brief (cold start, CLI hiccup), and
+    // showing a transient warning there is more confusing than helpful.
     adapterItem.text = `$(plug) ${interfaceLabel}: ${channelLabel}${nodeLabel}`;
+    adapterItem.tooltip = 'Click to switch CAN adapter';
     adapterItem.backgroundColor = undefined;
 }
