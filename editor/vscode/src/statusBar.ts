@@ -47,10 +47,13 @@ export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     // Tools panel — opens the dashboard webview with every
     // action surface side-by-side. Last so it's the rightmost.
     toolsItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 48);
-    toolsItem.command = 'iscFs.openTools';
+    // VS Code auto-generates a `<viewId>.focus` command for every
+    // contributed view, so focusing the activity-bar sidebar
+    // without registering anything ourselves is just this string.
+    toolsItem.command = 'iscFs.tools.focus';
     toolsItem.name = 'ISC MingoCAN: tools';
     toolsItem.text = '$(tools) Tools';
-    toolsItem.tooltip = 'Open the ISC MingoCAN tools panel';
+    toolsItem.tooltip = 'Reveal the ISC MingoCAN tools sidebar';
     toolsItem.show();
     context.subscriptions.push(toolsItem);
 

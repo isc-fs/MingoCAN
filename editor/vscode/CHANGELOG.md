@@ -5,6 +5,26 @@ All notable changes to the ISC MingoCAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Activity-bar sidebar.** A new ISC MingoCAN entry on the
+  activity bar (left rail) reveals a sidebar with two views —
+  **Tools** (one-click access to Build + Flash, Discover, DTCs,
+  Live data, etc.) and **Devices** (the live tree that used to
+  hang off the Explorer). Same shape as PlatformIO's left-rail
+  panel. The Devices view moved out of the Explorer in the
+  process; existing operators get the same view, just on the
+  activity bar instead.
+
+### Changed
+- **Status-bar Tools button now reveals the sidebar.** Click
+  `$(tools) Tools` and the activity-bar sidebar pops open with
+  focus on the Tools webview. The old editor-tab dashboard is
+  still reachable via the command palette as
+  **ISC MingoCAN: Open tools panel**, for operators who'd
+  rather have it side-by-side with code.
+
 ## [2.3.3] — 2026-05-16
 
 ### Added

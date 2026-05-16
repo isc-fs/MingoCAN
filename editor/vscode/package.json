@@ -214,11 +214,26 @@
         }
       }
     },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "iscFsMingoCAN",
+          "title": "ISC MingoCAN",
+          "icon": "media/icon.png"
+        }
+      ]
+    },
     "views": {
-      "explorer": [
+      "iscFsMingoCAN": [
+        {
+          "type": "webview",
+          "id": "iscFs.tools",
+          "name": "Tools",
+          "contextualTitle": "ISC MingoCAN"
+        },
         {
           "id": "iscFs.devices",
-          "name": "ISC MingoCAN Devices",
+          "name": "Devices",
           "icon": "$(circuit-board)",
           "contextualTitle": "ISC MingoCAN"
         }
