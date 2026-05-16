@@ -24,6 +24,7 @@ import { runFlash } from './flash';
 import { LiveDataPanel } from './liveDataPanel';
 import { selectAdapter } from './picker';
 import { registerStatusBarItem } from './statusBar';
+import { ToolsPanel } from './toolsPanel';
 import { DeviceTreeProvider, type IscFsTreeNode } from './tree';
 import { getOutputChannel, showOutputChannel } from './output';
 import { formatNodeId } from './discover';
@@ -87,6 +88,17 @@ export function activate(context: vscode.ExtensionContext): void {
             const cfg = readConfig();
             LiveDataPanel.createOrShow(context, cfg.interface, cfg.channel);
         }),
+    );
+
+    // ---- Tools dashboard panel ----
+    //
+    // Singleton webview with every action surface side-by-side, so
+    // operators have a one-click alternative to the command palette.
+    // Also reachable via the status-bar `Tools` button.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('iscFs.openTools', () =>
+            ToolsPanel.createOrShow(context),
+        ),
     );
 
     // Invalidate the CLI-path discovery cache whenever the operator
