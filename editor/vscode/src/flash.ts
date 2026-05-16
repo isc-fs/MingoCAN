@@ -88,9 +88,23 @@ export async function runFlash(options: FlashOptions): Promise<void> {
                     return;
                 }
                 if (!buildOk) {
-                    void vscode.window.showErrorMessage(
-                        'ISC MingoCAN: build failed. See ISC MingoCAN output channel for details.',
+                    // Surface the output channel so the operator can
+                    // see exactly what the build printed without
+                    // hunting through View → Output. Toast offers
+                    // an action to jump to `iscFs.buildCommand` in
+                    // case the default isn't right for this project.
+                    showOutputChannel();
+                    const change = 'Change build command';
+                    const choice = await vscode.window.showErrorMessage(
+                        'ISC MingoCAN: build failed. See the ISC MingoCAN output channel for details.',
+                        change,
                     );
+                    if (choice === change) {
+                        await vscode.commands.executeCommand(
+                            'workbench.action.openSettings',
+                            'iscFs.buildCommand',
+                        );
+                    }
                     return;
                 }
             } else if (!options.skipBuild) {

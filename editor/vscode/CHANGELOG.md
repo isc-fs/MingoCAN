@@ -8,6 +8,13 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`iscFs.buildCommand` default now configures CMake too** —
+  `cmake -B build -S . && cmake --build build` instead of just
+  `cmake --build build`. Matches STM32CubeIDE's *build then
+  flash* button: clicking Flash on a fresh clone now Just Works
+  without manually running CMake configure first. The configure
+  step is a no-op on subsequent runs when `build/` already
+  exists, so there's no time penalty.
 - **`iscFs.firmwareArtifact` now defaults to `**/build/**/*.{elf,hex,bin}`.**
   New installs no longer need to set it manually for the common
   CMake / Make project layout — the extension auto-discovers the

@@ -165,8 +165,8 @@
         },
         "iscFs.buildCommand": {
           "type": "string",
-          "default": "cmake --build build",
-          "markdownDescription": "Shell command run from the workspace root before flashing. Set to an empty string to skip the build step entirely."
+          "default": "cmake -B build -S . && cmake --build build",
+          "markdownDescription": "Shell command run from the workspace root before flashing — equivalent to STM32CubeIDE's *build then flash* step. The default configures CMake's `build/` directory if needed (no-op when it already exists) and then runs the build, so a fresh clone Just Works. Replace with `make`, `west build`, `cargo build --release`, or any other one-liner that produces the artifact pointed at by `iscFs.firmwareArtifact`. Set to an empty string to skip the build step entirely."
         },
         "iscFs.firmwareArtifact": {
           "type": "string",
