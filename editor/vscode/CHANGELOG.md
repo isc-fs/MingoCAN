@@ -5,7 +5,7 @@ All notable changes to the ISC MingoCAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.3.3] — 2026-05-16
 
 ### Added
 - **`CMakePresets.json` auto-detection.** STM32CubeMX-generated
