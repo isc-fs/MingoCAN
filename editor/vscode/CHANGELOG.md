@@ -8,6 +8,18 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`CMakePresets.json` auto-detection.** STM32CubeMX-generated
+  CMake projects ship a `CMakePresets.json` that pins the
+  arm-none-eabi toolchain file, generator, and `binaryDir` — bare
+  `cmake -B build` doesn't read any of that and either errors or
+  builds for the host. When the extension sees a presets file at
+  the workspace root *and* the operator is still on the default
+  `iscFs.buildCommand`, it transparently swaps in
+  `cmake --preset <X> && cmake --build --preset <X>` (or the
+  appropriate fallback when only configure presets exist). The
+  artifact glob narrows to the preset's `binaryDir` when the path
+  is recoverable. Logged to the output channel so the operator
+  can see which preset was picked.
 - **`iscFs.buildCommand` default now configures CMake too** —
   `cmake -B build -S . && cmake --build build` instead of just
   `cmake --build build`. Matches STM32CubeIDE's *build then
