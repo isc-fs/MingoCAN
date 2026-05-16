@@ -5,7 +5,7 @@ All notable changes to the ISC STM32 CAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.3.1] — 2026-05-16
 
 ### Changed
 - **Renamed to "ISC MingoCAN Flasher"** to match the desktop app
