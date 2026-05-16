@@ -314,7 +314,7 @@
         </header>
         <dl class="about">
             <dt>App</dt>
-            <dd>ISC CAN Studio</dd>
+            <dd>ISC MingoCAN</dd>
 
             <dt>Bundled <code>can-flasher</code></dt>
             <dd>v{canFlasherVersion}</dd>

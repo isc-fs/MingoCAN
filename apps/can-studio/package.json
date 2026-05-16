@@ -2,7 +2,7 @@
   "name": "isc-can-studio",
   "private": true,
   "version": "2.2.0",
-  "description": "ISC CAN Studio — Tauri desktop app for flashing and debugging CAN messages.",
+  "description": "ISC MingoCAN — Tauri desktop app for flashing and debugging CAN messages.",
   "type": "module",
   "scripts": {
     "dev": "vite",

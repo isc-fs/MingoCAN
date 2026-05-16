@@ -35,7 +35,7 @@
     <div class="brand">
         <img src="/icon.png" alt="" />
         <div>
-            <h1>ISC CAN Studio</h1>
+            <h1>ISC MingoCAN</h1>
             {#if appVersion.length > 0}
                 <p class="muted">v{appVersion}</p>
             {/if}

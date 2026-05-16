@@ -1,5 +1,5 @@
 <!--
-    ISC CAN Studio — root layout.
+    ISC MingoCAN — root layout.
 
     Loads persistent settings on mount, then routes between views.
     Selected-adapter state lives in `settings.adapter` (see
