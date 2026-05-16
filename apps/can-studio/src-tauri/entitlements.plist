@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Hardened-runtime entitlements for the macOS bundle.
+
+        The Studio loads third-party CAN-adapter libraries at runtime
+        via `libloading` (`libPCBUSB.dylib` for PEAK PCAN-USB on macOS,
+        `vxlapi64.dll` for Vector on Windows). Those dylibs are signed
+        by their respective vendors — not by us, not by Apple. With
+        hardened runtime on (which Tauri 2 enables by default), macOS
+        library validation refuses to load them silently, and adapter
+        detection comes back empty even with the driver installed.
+
+        `com.apple.security.cs.disable-library-validation` is Apple's
+        documented escape hatch for exactly this case (plugin systems,
+        third-party SDKs). It keeps the rest of hardened runtime's
+        guarantees (no JIT, no executable memory, no dyld env vars)
+        but allows our process to load foreign-signed dylibs.
+
+        Reference: https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_security_cs_disable-library-validation
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

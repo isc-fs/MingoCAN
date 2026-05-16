@@ -2,7 +2,7 @@
   "name": "vscode-stm32-can",
   "displayName": "ISC STM32 CAN Flasher",
   "description": "Build, flash, and diagnose STM32 firmware over CAN — one button, four adapters, live telemetry. Wraps the can-flasher CLI.",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "publisher": "isc-fs",
   "license": "MIT",
   "preview": true,

@@ -1,4 +1,4 @@
-# ISC CAN Studio
+# ISC MingoCAN
 
 Desktop application for **flashing, monitoring, and debugging CAN messages** on
 the ISC Racing Team's Formula Student ECUs. The CLI ([`can-flasher`](../../README.md))
@@ -93,7 +93,7 @@ npm run tauri:build        # produces a platform-native bundle in
 ```
 
 Outputs:
-- macOS: `bundle/macos/ISC CAN Studio.app` and `bundle/dmg/*.dmg`
+- macOS: `bundle/macos/ISC MingoCAN.app` and `bundle/dmg/*.dmg`
 - Linux: `bundle/deb/*.deb`, `bundle/appimage/*.AppImage`, `bundle/rpm/*.rpm`
 - Windows: `bundle/msi/*.msi`, `bundle/nsis/*.exe`
 
@@ -128,7 +128,7 @@ caused by a stale download or by an older bundle that pre-dates the ad-hoc
 signing), strip the quarantine attribute manually:
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/ISC CAN Studio.app"
+xattr -dr com.apple.quarantine "/Applications/ISC MingoCAN.app"
 ```
 
 The proper long-term fix is signing with an Apple Developer ID + notarising;

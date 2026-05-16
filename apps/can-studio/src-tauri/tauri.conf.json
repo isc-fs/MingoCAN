@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ISC CAN Studio",
-  "version": "2.2.0",
+  "productName": "ISC MingoCAN",
+  "version": "2.3.0",
   "identifier": "com.iscracingteam.can-studio",
   "build": {
     "frontendDist": "../dist",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "ISC CAN Studio",
+        "title": "ISC MingoCAN",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -36,7 +36,7 @@
     "category": "DeveloperTool",
     "copyright": "Copyright © 2026 ISC Racing Team",
     "shortDescription": "Flash, monitor, and debug CAN messages on STM32 ECUs.",
-    "longDescription": "ISC CAN Studio is the desktop companion to the can-flasher CLI: a single window that wraps firmware flashing, live device discovery, fault-code diagnostics, and CAN bus monitoring for the ISC racing team's Formula Student ECUs. Cross-platform native via Tauri 2.",
+    "longDescription": "ISC MingoCAN is the desktop companion to the can-flasher CLI: a single window that wraps firmware flashing, live device discovery, fault-code diagnostics, and CAN bus monitoring for the ISC racing team's Formula Student ECUs. Cross-platform native via Tauri 2.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,7 +45,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "entitlements.plist"
     }
   }
 }
