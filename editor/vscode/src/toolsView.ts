@@ -13,6 +13,7 @@
 
 import * as vscode from 'vscode';
 
+import { currentSnapshot, onDidChangePresence } from './adapterPresence';
 import { readConfig } from './config';
 
 const ALLOWED_COMMANDS = new Set<string>([
@@ -47,6 +48,9 @@ export class ToolsViewProvider implements vscode.WebviewViewProvider {
                     this.postAdapterStatus();
                 }
             }),
+            // Presence-driven repaint so the pill shows
+            // "disconnected" the moment the probe is yanked.
+            onDidChangePresence(() => this.postAdapterStatus()),
         );
         context.subscriptions.push(...this.disposables);
     }
@@ -100,12 +104,14 @@ export class ToolsViewProvider implements vscode.WebviewViewProvider {
         if (this.view === undefined) return;
         const cfg = readConfig();
         const hasAdapter = cfg.channel.length > 0 || cfg.interface === 'virtual';
+        const presence = currentSnapshot();
         void this.view.webview.postMessage({
             type: 'adapter',
             hasAdapter,
             interface: cfg.interface,
             channel: cfg.channel.length > 0 ? cfg.channel : null,
             nodeId: cfg.nodeId.length > 0 ? cfg.nodeId : null,
+            disconnected: presence.presence === 'disconnected',
         });
     }
 
@@ -249,16 +255,26 @@ export class ToolsViewProvider implements vscode.WebviewViewProvider {
             const msg = event.data;
             if (msg && msg.type === 'adapter') {
                 const pill = document.getElementById('adapter-pill');
-                if (msg.hasAdapter) {
+                if (!msg.hasAdapter) {
+                    pill.textContent = 'no adapter';
+                    pill.title = 'No adapter selected — click ⇄';
+                    pill.classList.add('warning');
+                } else if (msg.disconnected) {
+                    // Configured adapter isn't on the bus right now.
+                    // Same warning style as "no adapter" so the
+                    // operator notices before clicking Flash.
+                    const label = \`\${msg.interface}: \${msg.channel ?? '—'} (disconnected)\`;
+                    pill.textContent = label;
+                    pill.title =
+                        \`\${msg.interface}: \${msg.channel ?? '—'} is no longer on the bus. \` +
+                        'Plug it back in or pick a different adapter (⇄).';
+                    pill.classList.add('warning');
+                } else {
                     const node = msg.nodeId ? \` → \${msg.nodeId}\` : '';
                     const label = \`\${msg.interface}: \${msg.channel ?? '—'}\${node}\`;
                     pill.textContent = label;
                     pill.title = label;
                     pill.classList.remove('warning');
-                } else {
-                    pill.textContent = 'no adapter';
-                    pill.title = 'No adapter selected — click ⇄';
-                    pill.classList.add('warning');
                 }
             }
         });

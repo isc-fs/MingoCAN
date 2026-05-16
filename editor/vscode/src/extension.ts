@@ -17,6 +17,7 @@
 
 import * as vscode from 'vscode';
 
+import { startAdapterPresenceService } from './adapterPresence';
 import { clearCanFlasherPathCache } from './cliPath';
 import { readConfig } from './config';
 import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
@@ -65,6 +66,14 @@ export function activate(context: vscode.ExtensionContext): void {
             flashThisDevice(node),
         ),
     );
+
+    // Adapter-presence service: pings `can-flasher --json adapters`
+    // periodically (and on window-focus regain) so the status bar
+    // and Tools sidebar flip to a "disconnected" state the moment
+    // the configured probe is yanked. Must start before the status
+    // bar / Tools view subscribe so the cold-start snapshot is
+    // already in flight by the time they render.
+    startAdapterPresenceService(context);
 
     // Status-bar item (Tier B): shows current adapter + node, click to re-pick.
     registerStatusBarItem(context);

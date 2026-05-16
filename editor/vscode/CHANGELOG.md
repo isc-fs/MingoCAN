@@ -5,6 +5,18 @@ All notable changes to the ISC MingoCAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Adapter-presence detection.** The status-bar pill and the
+  Tools sidebar now distinguish *configured* from *connected*.
+  When the operator yanks the cable, both flip to a `(disconnected)`
+  warning state on the next presence check — instead of silently
+  showing the last-known adapter as if it were still on the bus.
+  Checks run on activation, on settings changes, on window-focus
+  regained, and every ~8 s while the window is focused. Polling
+  pauses when the window loses focus.
+
 ## [2.4.0] — 2026-05-16
 
 ### Added
