@@ -86,15 +86,36 @@ export async function runFlash(options: FlashOptions): Promise<void> {
                 }
                 if (!buildOk) {
                     void vscode.window.showErrorMessage(
-                        'ISC CAN: build failed. See ISC CAN output channel for details.',
+                        'ISC CAN: build failed. See ISC MingoCAN output channel for details.',
                     );
                     return;
                 }
+            } else if (!options.skipBuild) {
+                // The operator explicitly asked for build+flash but
+                // `iscFs.buildCommand` is empty. The old behaviour
+                // silently skipped the build, which looked to many
+                // operators like the Flash button "didn't build" —
+                // surface the gap so they can fix the setting
+                // (or knowingly fall through to flash-only).
+                out.appendLine(
+                    '[skip] iscFs.buildCommand is empty; build step skipped',
+                );
+                const choice = await vscode.window.showWarningMessage(
+                    'ISC MingoCAN: `iscFs.buildCommand` is empty — the Flash button skipped the build step and is about to flash the existing artifact.',
+                    'Set build command',
+                    'Continue (flash only)',
+                );
+                if (choice === 'Set build command') {
+                    await vscode.commands.executeCommand(
+                        'workbench.action.openSettings',
+                        'iscFs.buildCommand',
+                    );
+                    return;
+                }
+                // Anything else (dismiss, "Continue") → fall through.
             } else {
                 out.appendLine(
-                    options.skipBuild
-                        ? '[skip] iscFs.flashWithoutBuild: build step skipped'
-                        : '[skip] iscFs.buildCommand is empty; skipping build',
+                    '[skip] iscFs.flashWithoutBuild: build step skipped',
                 );
             }
 
