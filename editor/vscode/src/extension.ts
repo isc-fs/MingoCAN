@@ -17,6 +17,7 @@
 
 import * as vscode from 'vscode';
 
+import { clearCanFlasherPathCache } from './cliPath';
 import { readConfig } from './config';
 import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
 import { runFlash } from './flash';
@@ -85,6 +86,19 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('iscFs.liveData', () => {
             const cfg = readConfig();
             LiveDataPanel.createOrShow(context, cfg.interface, cfg.channel);
+        }),
+    );
+
+    // Invalidate the CLI-path discovery cache whenever the operator
+    // changes `iscFs.canFlasherPath` (or anything else under
+    // `iscFs.*`). Without this the discovery decision sticks for the
+    // whole VS Code session and the operator has to reload the
+    // window to pick up a settings change.
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration('iscFs.canFlasherPath')) {
+                clearCanFlasherPathCache();
+            }
         }),
     );
 }

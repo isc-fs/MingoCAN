@@ -5,6 +5,27 @@ All notable changes to the ISC STM32 CAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Adapters never populated when VS Code was launched from
+  Finder / Dock / launchd on macOS.** The default
+  `iscFs.canFlasherPath` setting was the bare string
+  `"can-flasher"`, which `child_process.spawn` resolves through
+  launchd's reduced `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) — so
+  binaries installed under `~/.local/bin`, `~/.cargo/bin`, or
+  `/opt/homebrew/bin` weren't found. The extension now probes a
+  curated list of well-known install directories whenever the
+  setting is at its default, and falls back to the bare name
+  only if nothing's found. Operator-customised paths are still
+  honoured verbatim.
+
+### Added
+- One-shot notification when the CLI binary can't be spawned
+  (typically because it isn't installed). Buttons jump straight
+  to the latest release page or open the `iscFs.canFlasherPath`
+  setting.
+
 ## [2.0.0] — 2026-05-15 — Unified release model
 
 ### Changed
