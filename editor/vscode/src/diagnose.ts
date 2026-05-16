@@ -83,14 +83,14 @@ export async function runReadDtcs(): Promise<void> {
     out.appendLine(formatDtcs(result.value));
     if (result.value.length > 0) {
         const worstSeverity = pickWorstSeverity(result.value);
-        const msg = `ISC CAN: ${result.value.length} DTC(s) logged (worst: ${worstSeverity}).`;
+        const msg = `ISC MingoCAN: ${result.value.length} DTC(s) logged (worst: ${worstSeverity}).`;
         if (worstSeverity === 'ERROR' || worstSeverity === 'FATAL') {
             void vscode.window.showErrorMessage(msg);
         } else {
             void vscode.window.showWarningMessage(msg);
         }
     } else {
-        void vscode.window.showInformationMessage('ISC CAN: no DTCs logged.');
+        void vscode.window.showInformationMessage('ISC MingoCAN: no DTCs logged.');
     }
 }
 
@@ -107,7 +107,7 @@ export async function runClearDtcs(): Promise<void> {
     // here.
     const proceed = 'Clear DTCs';
     const choice = await vscode.window.showWarningMessage(
-        'ISC CAN: clear every DTC entry on the device? This cannot be undone.',
+        'ISC MingoCAN: clear every DTC entry on the device? This cannot be undone.',
         { modal: true },
         proceed,
     );
@@ -129,7 +129,7 @@ export async function runClearDtcs(): Promise<void> {
         },
     );
     if (result.exitCode === 0) {
-        void vscode.window.showInformationMessage('ISC CAN: DTCs cleared.');
+        void vscode.window.showInformationMessage('ISC MingoCAN: DTCs cleared.');
     } else {
         announceDiagnoseFailure('clear-dtc', result.exitCode, result.stderr);
     }
@@ -147,7 +147,7 @@ async function prepareDiagnose(label: string): Promise<DiagnoseContext | null> {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (workspace === undefined) {
         void vscode.window.showErrorMessage(
-            `ISC CAN: open a workspace folder before running diagnose ${label}.`,
+            `ISC MingoCAN: open a workspace folder before running diagnose ${label}.`,
         );
         return null;
     }
@@ -155,7 +155,7 @@ async function prepareDiagnose(label: string): Promise<DiagnoseContext | null> {
     if (cfg.channel.length === 0 && cfg.interface !== 'virtual') {
         const select = 'Select adapter…';
         const choice = await vscode.window.showErrorMessage(
-            `ISC CAN: no adapter selected. Pick one before running diagnose ${label}.`,
+            `ISC MingoCAN: no adapter selected. Pick one before running diagnose ${label}.`,
             select,
         );
         if (choice === select) {
@@ -174,7 +174,7 @@ function announceDiagnoseFailure(
     const firstLine = stderr.split('\n').find((l) => l.trim().length > 0) ?? '';
     const detail = firstLine.length > 0 ? `\n${firstLine}` : '';
     void vscode.window.showErrorMessage(
-        `ISC CAN: diagnose ${label} failed (exit ${exitCode ?? 'killed'}).${detail}  ` +
+        `ISC MingoCAN: diagnose ${label} failed (exit ${exitCode ?? 'killed'}).${detail}  ` +
             `See ISC CAN output channel.`,
     );
 }

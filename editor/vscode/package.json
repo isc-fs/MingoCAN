@@ -165,12 +165,13 @@
         },
         "iscFs.buildCommand": {
           "type": "string",
-          "default": "cmake --build build",
-          "markdownDescription": "Shell command run from the workspace root before flashing. Set to an empty string to skip the build step entirely."
+          "default": "cmake -B build -S . && cmake --build build",
+          "markdownDescription": "Shell command run from the workspace root before flashing — equivalent to STM32CubeIDE's *build then flash* step. The default configures CMake's `build/` directory if needed (no-op when it already exists) and then runs the build, so a fresh clone Just Works. Replace with `make`, `west build`, `cargo build --release`, or any other one-liner that produces the artifact pointed at by `iscFs.firmwareArtifact`. Set to an empty string to skip the build step entirely."
         },
         "iscFs.firmwareArtifact": {
           "type": "string",
-          "markdownDescription": "Path or glob to the firmware artifact (`.elf`, `.hex`, `.bin`) relative to the workspace root. Example: `build/firmware.elf`. If a glob matches multiple files the extension will prompt."
+          "default": "**/build/**/*.{elf,hex,bin}",
+          "markdownDescription": "Path or glob to the firmware artifact (`.elf`, `.hex`, `.bin`) relative to the workspace root. Default `**/build/**/*.{elf,hex,bin}` finds the output of a typical CMake/Make project. Set explicitly (e.g. `build/firmware.elf`) for projects that produce many candidates; the extension prompts if a glob matches multiple files."
         },
         "iscFs.timeoutMs": {
           "type": "number",

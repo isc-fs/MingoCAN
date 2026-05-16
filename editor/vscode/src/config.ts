@@ -12,6 +12,16 @@ import { DEFAULT_BARE_NAME, resolveCanFlasherPath } from './cliPath';
 
 export type InterfaceType = 'slcan' | 'socketcan' | 'pcan' | 'vector' | 'virtual';
 
+/**
+ * Fallback glob for `iscFs.firmwareArtifact`. Keep in sync with
+ * the `default` in `package.json`'s configuration contribution.
+ * Pulled out as a constant so the runtime can also fall back to
+ * this when an existing operator has the setting saved as the
+ * empty string (e.g. carried over from a pre-v2.3.3 install,
+ * where the setting was unset and stored as `""`).
+ */
+export const DEFAULT_FIRMWARE_GLOB = '**/build/**/*.{elf,hex,bin}';
+
 export interface Config {
     canFlasherPath: string;
     interface: InterfaceType;
@@ -40,7 +50,7 @@ export function readConfig(): Config {
         bitrate: cfg.get<number>('bitrate', 500_000),
         nodeId: cfg.get<string>('nodeId', ''),
         buildCommand: cfg.get<string>('buildCommand', 'cmake --build build'),
-        firmwareArtifact: cfg.get<string>('firmwareArtifact', ''),
+        firmwareArtifact: cfg.get<string>('firmwareArtifact', DEFAULT_FIRMWARE_GLOB),
         timeoutMs: cfg.get<number>('timeoutMs', 500),
         requireWrp: cfg.get<boolean>('requireWrp', false),
         applyWrp: cfg.get<boolean>('applyWrp', false),
