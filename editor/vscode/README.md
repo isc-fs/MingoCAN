@@ -1,4 +1,4 @@
-# ISC STM32 CAN Flasher
+# ISC MingoCAN Flasher
 
 > One-button **build + flash + diagnose** of STM32 firmware over CAN, from inside VS Code.
 

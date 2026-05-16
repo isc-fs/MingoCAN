@@ -1,4 +1,4 @@
-// ISC STM32 CAN Flasher — VS Code extension entry point.
+// ISC MingoCAN Flasher — VS Code extension entry point.
 //
 // Every roadmap surface is now live.
 //

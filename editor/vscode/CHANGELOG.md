@@ -7,6 +7,15 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Renamed to "ISC MingoCAN Flasher"** to match the desktop app
+  rebrand from v2.3.0. The internal extension ID
+  (`isc-fs.vscode-stm32-can`) stays unchanged so existing installs
+  pick up the rename in place. Command-palette category is
+  shortened to `ISC MingoCAN`, the device tree view becomes
+  `ISC MingoCAN Devices`, and the output channel becomes
+  `View → Output → ISC MingoCAN`.
+
 ### Fixed
 - **Adapters never populated when VS Code was launched from
   Finder / Dock / launchd on macOS.** The default

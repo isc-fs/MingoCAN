@@ -78,7 +78,7 @@ export interface SpawnResult {
 /**
  * Run `command` with `args` and stream output line-by-line.
  *
- * Logs the argv to the ISC CAN output channel before spawning so
+ * Logs the argv to the ISC MingoCAN output channel before spawning so
  * operators can see exactly what was run. Resolves once the
  * process exits (or is killed by cancellation); never rejects on
  * non-zero exit — the caller decides what to do with the code.
