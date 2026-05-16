@@ -1,6 +1,6 @@
 {
   "name": "vscode-stm32-can",
-  "displayName": "ISC STM32 CAN Flasher",
+  "displayName": "ISC MingoCAN Flasher",
   "description": "Build, flash, and diagnose STM32 firmware over CAN — one button, four adapters, live telemetry. Wraps the can-flasher CLI.",
   "version": "2.3.0",
   "publisher": "isc-fs",
@@ -69,57 +69,57 @@
       {
         "command": "iscFs.flash",
         "title": "Build & Flash firmware",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       },
       {
         "command": "iscFs.flashWithoutBuild",
         "title": "Flash firmware (skip build)",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       },
       {
         "command": "iscFs.discover",
         "title": "Discover devices on bus",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       },
       {
         "command": "iscFs.selectAdapter",
         "title": "Select CAN adapter…",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       },
       {
         "command": "iscFs.refreshDevices",
         "title": "Refresh device list",
-        "category": "ISC CAN",
+        "category": "ISC MingoCAN",
         "icon": "$(refresh)"
       },
       {
         "command": "iscFs.readDtcs",
         "title": "Read DTCs",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       },
       {
         "command": "iscFs.clearDtcs",
         "title": "Clear DTCs",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       },
       {
         "command": "iscFs.health",
         "title": "Show session health",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       },
       {
         "command": "iscFs.flashThisDevice",
         "title": "Flash this device…",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       },
       {
         "command": "iscFs.liveData",
         "title": "Open live-data panel",
-        "category": "ISC CAN"
+        "category": "ISC MingoCAN"
       }
     ],
     "configuration": {
-      "title": "ISC CAN Flasher",
+      "title": "ISC MingoCAN Flasher",
       "properties": {
         "iscFs.canFlasherPath": {
           "type": "string",
@@ -212,9 +212,9 @@
       "explorer": [
         {
           "id": "iscFs.devices",
-          "name": "ISC CAN Devices",
+          "name": "ISC MingoCAN Devices",
           "icon": "$(circuit-board)",
-          "contextualTitle": "ISC CAN"
+          "contextualTitle": "ISC MingoCAN"
         }
       ]
     },

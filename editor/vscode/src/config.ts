@@ -8,6 +8,8 @@
 
 import * as vscode from 'vscode';
 
+import { DEFAULT_BARE_NAME, resolveCanFlasherPath } from './cliPath';
+
 export type InterfaceType = 'slcan' | 'socketcan' | 'pcan' | 'vector' | 'virtual';
 
 export interface Config {
@@ -27,8 +29,12 @@ export interface Config {
 
 export function readConfig(): Config {
     const cfg = vscode.workspace.getConfiguration('iscFs');
+    // `resolveCanFlasherPath` honours an operator-customised
+    // setting verbatim; only the default bare `"can-flasher"` triggers
+    // a well-known-paths probe. See cliPath.ts for the precedence.
+    const configured = cfg.get<string>('canFlasherPath', DEFAULT_BARE_NAME);
     return {
-        canFlasherPath: cfg.get<string>('canFlasherPath', 'can-flasher'),
+        canFlasherPath: resolveCanFlasherPath(configured),
         interface: cfg.get<InterfaceType>('interface', 'slcan'),
         channel: cfg.get<string>('channel', ''),
         bitrate: cfg.get<number>('bitrate', 500_000),
