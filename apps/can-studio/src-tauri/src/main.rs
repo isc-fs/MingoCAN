@@ -1,4 +1,4 @@
-// ISC CAN Studio — Tauri 2 application entry point.
+// ISC MingoCAN — Tauri 2 application entry point.
 //
 // This is the scaffold: window comes up, frontend loads, one trivial
 // `#[tauri::command]` proves the Rust ↔ JS bridge works end-to-end.

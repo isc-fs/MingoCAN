@@ -1,4 +1,4 @@
-// ISC CAN Studio — Tauri command surface.
+// ISC MingoCAN — Tauri command surface.
 //
 // `main.rs` is the binary entry point; the actual app body lives
 // here so that integration tests in `tests/` can reach the same
@@ -79,5 +79,5 @@ pub fn run() {
             swd::swd_erase,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running the ISC CAN Studio Tauri app");
+        .expect("error while running the ISC MingoCAN Tauri app");
 }
