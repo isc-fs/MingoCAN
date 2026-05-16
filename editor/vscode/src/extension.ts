@@ -25,6 +25,7 @@ import { LiveDataPanel } from './liveDataPanel';
 import { selectAdapter } from './picker';
 import { registerStatusBarItem } from './statusBar';
 import { ToolsPanel } from './toolsPanel';
+import { ToolsViewProvider } from './toolsView';
 import { DeviceTreeProvider, type IscFsTreeNode } from './tree';
 import { getOutputChannel, showOutputChannel } from './output';
 import { formatNodeId } from './discover';
@@ -90,11 +91,26 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
     );
 
-    // ---- Tools dashboard panel ----
+    // ---- Tools view (activity-bar sidebar) ----
     //
-    // Singleton webview with every action surface side-by-side, so
-    // operators have a one-click alternative to the command palette.
-    // Also reachable via the status-bar `Tools` button.
+    // Same shape as PlatformIO's left-rail panel: the MingoCAN
+    // activity-bar icon reveals a sidebar with two views — the
+    // Tools webview (one-click access to every action) and the
+    // Devices tree (live discovery). This is the canonical surface
+    // from v2.3.4 onward.
+    const toolsView = new ToolsViewProvider(context);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(
+            ToolsViewProvider.viewType,
+            toolsView,
+        ),
+    );
+
+    // ---- Legacy "Open tools panel" command ----
+    //
+    // Editor-tab variant of the Tools view. Kept around for
+    // operators who want the dashboard side-by-side with code —
+    // the activity-bar sidebar is what most clicks land on.
     context.subscriptions.push(
         vscode.commands.registerCommand('iscFs.openTools', () =>
             ToolsPanel.createOrShow(context),
