@@ -78,7 +78,7 @@ export interface SpawnResult {
 /**
  * Run `command` with `args` and stream output line-by-line.
  *
- * Logs the argv to the ISC CAN output channel before spawning so
+ * Logs the argv to the ISC MingoCAN output channel before spawning so
  * operators can see exactly what was run. Resolves once the
  * process exits (or is killed by cancellation); never rejects on
  * non-zero exit — the caller decides what to do with the code.
@@ -138,6 +138,13 @@ export function spawnCommand(
             // path handles it uniformly.
             stderrBuf += `${err.message}\n`;
             options.onStderrLine?.(err.message);
+            // ENOENT is the "can-flasher CLI isn't installed (or
+            // isn't on the PATH VS Code sees)" case. Show a
+            // one-shot notification with actions so operators get a
+            // path forward instead of a silently-empty Adapters tree.
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+                maybeNotifyMissingCli(command);
+            }
         });
 
         child.on('close', (code) => {
@@ -262,6 +269,38 @@ export async function runJson<T>(
     } catch {
         return { value: null, ...result };
     }
+}
+
+// ---- ENOENT UX ----
+//
+// We surface this exactly once per VS Code session. Operators
+// who pinned a custom path (and have it wrong) need to see it,
+// but every spawn that ENOENTs would otherwise re-pop the toast.
+
+let enoentNotified = false;
+
+function maybeNotifyMissingCli(command: string): void {
+    if (enoentNotified) return;
+    enoentNotified = true;
+
+    const releaseUrl = 'https://github.com/isc-fs/can-flasher/releases/latest';
+    const message =
+        `Couldn't run \`${command}\` — the can-flasher CLI isn't on the PATH ` +
+        `VS Code sees. Download the latest release for your platform, or ` +
+        `point \`iscFs.canFlasherPath\` at the absolute install path.`;
+
+    void vscode.window
+        .showErrorMessage(message, 'Download CLI', 'Open settings')
+        .then((choice) => {
+            if (choice === 'Download CLI') {
+                void vscode.env.openExternal(vscode.Uri.parse(releaseUrl));
+            } else if (choice === 'Open settings') {
+                void vscode.commands.executeCommand(
+                    'workbench.action.openSettings',
+                    'iscFs.canFlasherPath',
+                );
+            }
+        });
 }
 
 // ---- Argv quoting (display only) ----
