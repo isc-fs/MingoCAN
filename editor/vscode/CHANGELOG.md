@@ -1,9 +1,26 @@
 # Changelog
 
-All notable changes to the ISC STM32 CAN Flasher VS Code extension.
+All notable changes to the ISC MingoCAN Flasher VS Code extension.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- **Status-bar shortcuts** — a `$(rocket) Flash` button and a
+  `$(tools) Tools` button render next to the existing adapter
+  pill at the bottom of the window. One click runs the same
+  `iscFs.flash` / `iscFs.openTools` commands the palette
+  exposes — no more `Cmd+Shift+P` round-trip for the two
+  most-used actions.
+- **Tools dashboard** — a dedicated webview panel
+  (`iscFs.openTools`, also reachable from the status bar)
+  groups every operator-facing action into one screen:
+  Flash, Devices, Diagnostics, plus a live adapter pill. The
+  command palette still works; the panel is the
+  point-and-click alternative for operators who'd rather not
+  memorise command names.
 
 ## [2.3.1] — 2026-05-16
 
