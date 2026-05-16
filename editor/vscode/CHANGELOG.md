@@ -5,6 +5,25 @@ All notable changes to the ISC MingoCAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Status-bar Flash button: lightning-bolt icon + "Build + Flash"
+  label.** The button now reads `$(zap) Build + Flash` instead of
+  `$(rocket) Flash`, making it visually unambiguous what the click
+  does. Same `iscFs.flash` command (build → flash via CAN); only
+  the surface changed.
+- The tools dashboard's primary button gets the matching ⚡ glyph.
+
+### Fixed
+- **"Flash button didn't build" UX.** When `iscFs.buildCommand` is
+  empty, the build step used to be silently skipped — operators
+  saw the click as flash-only and assumed it wasn't building.
+  Now the extension surfaces a warning toast with two actions:
+  *Set build command* (jumps to settings) or *Continue (flash
+  only)* (the previous behaviour). `iscFs.flashWithoutBuild` is
+  unaffected.
+
 ## [2.3.2] — 2026-05-16
 
 ### Added

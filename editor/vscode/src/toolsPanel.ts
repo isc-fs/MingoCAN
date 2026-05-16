@@ -248,7 +248,7 @@ export class ToolsPanel {
         <h2>Flash</h2>
         <div class="grid">
             <button class="primary" data-cmd="iscFs.flash">
-                Build + flash
+                ⚡ Build + Flash
                 <span class="hint" style="margin-left:auto;">⌘P → ISC MingoCAN: Flash</span>
             </button>
             <button data-cmd="iscFs.flashWithoutBuild">
