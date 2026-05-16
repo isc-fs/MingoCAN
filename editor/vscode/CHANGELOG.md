@@ -7,7 +7,28 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`iscFs.firmwareArtifact` now defaults to `**/build/**/*.{elf,hex,bin}`.**
+  New installs no longer need to set it manually for the common
+  CMake / Make project layout — the extension auto-discovers the
+  firmware after a build. Operators with a non-standard build
+  output still set the path explicitly; the existing
+  multi-match quick-pick prompt is unchanged.
+
 ### Changed
+- **No-firmware-artifact error is more actionable.** When the
+  glob matches nothing, the warning now offers two buttons:
+  *Build first* (jumps to `iscFs.buildCommand` so you can
+  confirm it before re-running Flash) and *Set artifact path*
+  (jumps to `iscFs.firmwareArtifact`). Previously the only
+  action was *Open settings*.
+- **All operator-facing strings now say "ISC MingoCAN:".** The
+  rebrand from v2.3.1 missed many of the runtime toasts /
+  progress titles / quick-pick prompts inside the extension
+  source. Swept across `flash.ts`, `diagnose.ts`, `picker.ts`,
+  `extension.ts` so what operators see matches the Extensions
+  panel name.
+
 - **Status-bar Flash button: lightning-bolt icon + "Build + Flash"
   label.** The button now reads `$(zap) Build + Flash` instead of
   `$(rocket) Flash`, making it visually unambiguous what the click

@@ -20,7 +20,7 @@ export async function selectAdapter(): Promise<void> {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (workspace === undefined) {
         void vscode.window.showErrorMessage(
-            'ISC CAN: open a workspace folder before selecting an adapter — the choice is saved to `.vscode/settings.json`.',
+            'ISC MingoCAN: open a workspace folder before selecting an adapter — the choice is saved to `.vscode/settings.json`.',
         );
         return;
     }
@@ -31,7 +31,7 @@ export async function selectAdapter(): Promise<void> {
     const entries = await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Window,
-            title: 'ISC CAN: detecting adapters',
+            title: 'ISC MingoCAN: detecting adapters',
         },
         () => fetchAdapters(cfg, cwd),
     );
@@ -60,7 +60,7 @@ export async function selectAdapter(): Promise<void> {
         const retry = 'Refresh';
         const openSettings = 'Open settings';
         const pick = await vscode.window.showWarningMessage(
-            'ISC CAN: no hardware adapters detected. Plug one in and refresh, or configure manually in settings.',
+            'ISC MingoCAN: no hardware adapters detected. Plug one in and refresh, or configure manually in settings.',
             retry,
             openSettings,
         );
@@ -77,7 +77,7 @@ export async function selectAdapter(): Promise<void> {
     }
 
     const choice = await vscode.window.showQuickPick(items, {
-        title: 'ISC CAN: pick a CAN adapter',
+        title: 'ISC MingoCAN: pick a CAN adapter',
         placeHolder: 'Currently active adapter is pre-selected',
         matchOnDescription: true,
         matchOnDetail: true,
@@ -97,7 +97,7 @@ export async function selectAdapter(): Promise<void> {
             `--interface ${choice.entry.interface} --channel ${choice.entry.channel}`,
     );
     void vscode.window.showInformationMessage(
-        `ISC CAN: adapter set to ${choice.entry.label} (${scopeName(scope)} scope).`,
+        `ISC MingoCAN: adapter set to ${choice.entry.label} (${scopeName(scope)} scope).`,
     );
 }
 
