@@ -2,7 +2,7 @@
   "name": "vscode-stm32-can",
   "displayName": "ISC MingoCAN Flasher",
   "description": "Build, flash, and diagnose STM32 firmware over CAN — one button, four adapters, live telemetry. Wraps the can-flasher CLI.",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "publisher": "isc-fs",
   "license": "MIT",
   "preview": true,
