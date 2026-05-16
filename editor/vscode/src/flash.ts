@@ -21,7 +21,14 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { buildGlobalArgv, type Config, readConfig } from './config';
+import { detectCmakePreset } from './cmakePresets';
+import {
+    buildGlobalArgv,
+    DEFAULT_BUILD_COMMAND,
+    DEFAULT_FIRMWARE_GLOB,
+    type Config,
+    readConfig,
+} from './config';
 import {
     type FlashEvent,
     type FlashReport,
@@ -48,32 +55,54 @@ export async function runFlash(options: FlashOptions): Promise<void> {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (workspace === undefined) {
         void vscode.window.showErrorMessage(
-            'ISC CAN: open a workspace folder before flashing.',
+            'ISC MingoCAN: open a workspace folder before flashing.',
         );
         return;
     }
     const cwd = workspace.uri.fsPath;
     const cfg = readConfig();
 
+    // Auto-fill an empty `iscFs.firmwareArtifact` with the default
+    // glob from package.json. Operators carrying the setting forward
+    // as an empty string (saved that way by older versions, or
+    // explicitly cleared) get the glob-based discovery without
+    // having to touch settings. The artifact resolver below handles
+    // 0 / 1 / many matches.
     if (cfg.firmwareArtifact.trim().length === 0) {
-        const open = 'Open settings';
-        const pick = await vscode.window.showErrorMessage(
-            'ISC CAN: set `iscFs.firmwareArtifact` to the .elf/.hex/.bin to flash.',
-            open,
+        cfg.firmwareArtifact = DEFAULT_FIRMWARE_GLOB;
+        out.appendLine(
+            `[info] iscFs.firmwareArtifact is empty; falling back to ${DEFAULT_FIRMWARE_GLOB}`,
         );
-        if (pick === open) {
-            await vscode.commands.executeCommand(
-                'workbench.action.openSettings',
-                'iscFs.firmwareArtifact',
+    }
+
+    // STM32CubeMX-generated CMake projects ship a CMakePresets.json
+    // pinning the arm-none-eabi toolchain — bare `cmake -B build`
+    // either errors out or builds for the host. When a presets file
+    // is present AND the operator is still on the default build
+    // command, transparently swap in the `--preset` form so the
+    // Flash button "just works" on those projects. Logged so the
+    // operator can see which preset got picked.
+    const preset = detectCmakePreset(cwd);
+    if (preset !== null && cfg.buildCommand === DEFAULT_BUILD_COMMAND) {
+        out.appendLine(
+            `[info] detected CMakePresets.json; using preset-driven build: ${preset.command}`,
+        );
+        cfg.buildCommand = preset.command;
+        if (
+            preset.artifactGlobHint !== null &&
+            cfg.firmwareArtifact === DEFAULT_FIRMWARE_GLOB
+        ) {
+            out.appendLine(
+                `[info] narrowing artifact glob to ${preset.artifactGlobHint}`,
             );
+            cfg.firmwareArtifact = preset.artifactGlobHint;
         }
-        return;
     }
 
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: 'ISC CAN: flashing firmware',
+            title: 'ISC MingoCAN: flashing firmware',
             cancellable: true,
         },
         async (progress, token) => {
@@ -85,16 +114,51 @@ export async function runFlash(options: FlashOptions): Promise<void> {
                     return;
                 }
                 if (!buildOk) {
-                    void vscode.window.showErrorMessage(
-                        'ISC CAN: build failed. See ISC CAN output channel for details.',
+                    // Surface the output channel so the operator can
+                    // see exactly what the build printed without
+                    // hunting through View → Output. Toast offers
+                    // an action to jump to `iscFs.buildCommand` in
+                    // case the default isn't right for this project.
+                    showOutputChannel();
+                    const change = 'Change build command';
+                    const choice = await vscode.window.showErrorMessage(
+                        'ISC MingoCAN: build failed. See the ISC MingoCAN output channel for details.',
+                        change,
+                    );
+                    if (choice === change) {
+                        await vscode.commands.executeCommand(
+                            'workbench.action.openSettings',
+                            'iscFs.buildCommand',
+                        );
+                    }
+                    return;
+                }
+            } else if (!options.skipBuild) {
+                // The operator explicitly asked for build+flash but
+                // `iscFs.buildCommand` is empty. The old behaviour
+                // silently skipped the build, which looked to many
+                // operators like the Flash button "didn't build" —
+                // surface the gap so they can fix the setting
+                // (or knowingly fall through to flash-only).
+                out.appendLine(
+                    '[skip] iscFs.buildCommand is empty; build step skipped',
+                );
+                const choice = await vscode.window.showWarningMessage(
+                    'ISC MingoCAN: `iscFs.buildCommand` is empty — the Flash button skipped the build step and is about to flash the existing artifact.',
+                    'Set build command',
+                    'Continue (flash only)',
+                );
+                if (choice === 'Set build command') {
+                    await vscode.commands.executeCommand(
+                        'workbench.action.openSettings',
+                        'iscFs.buildCommand',
                     );
                     return;
                 }
+                // Anything else (dismiss, "Continue") → fall through.
             } else {
                 out.appendLine(
-                    options.skipBuild
-                        ? '[skip] iscFs.flashWithoutBuild: build step skipped'
-                        : '[skip] iscFs.buildCommand is empty; skipping build',
+                    '[skip] iscFs.flashWithoutBuild: build step skipped',
                 );
             }
 
@@ -172,15 +236,30 @@ async function resolveArtifact(
         10,
     );
     if (matches.length === 0) {
-        const open = 'Open settings';
+        const setPath = 'Set artifact path';
+        const buildFirst = 'Build first';
+        const detail =
+            pattern === DEFAULT_FIRMWARE_GLOB
+                ? "no `.elf` / `.hex` / `.bin` produced under `build/` yet — run your build first, or set `iscFs.firmwareArtifact` to the path your toolchain actually produces"
+                : `no file matched \`${pattern}\` under ${cwd}`;
         const pick = await vscode.window.showErrorMessage(
-            `ISC CAN: no firmware artifact matched \`${pattern}\` under ${cwd}.`,
-            open,
+            `ISC MingoCAN: ${detail}.`,
+            buildFirst,
+            setPath,
         );
-        if (pick === open) {
+        if (pick === setPath) {
             await vscode.commands.executeCommand(
                 'workbench.action.openSettings',
                 'iscFs.firmwareArtifact',
+            );
+        } else if (pick === buildFirst) {
+            // Surface the build command setting so the operator can
+            // confirm it before re-running Flash. We don't auto-
+            // invoke a build here — the next Flash click will do
+            // both stages once the operator has produced an artifact.
+            await vscode.commands.executeCommand(
+                'workbench.action.openSettings',
+                'iscFs.buildCommand',
             );
         }
         return null;
@@ -197,7 +276,7 @@ async function resolveArtifact(
         }))
         .sort((a, b) => a.label.localeCompare(b.label));
     const picked = await vscode.window.showQuickPick(items, {
-        title: 'ISC CAN: pick a firmware artifact',
+        title: 'ISC MingoCAN: pick a firmware artifact',
         matchOnDescription: true,
     });
     out.appendLine(
@@ -243,7 +322,7 @@ async function runFlashStep(
 
     if (result.cancelled) {
         void vscode.window.showWarningMessage(
-            'ISC CAN: flash cancelled. Device may be in an intermediate state — re-run to recover.',
+            'ISC MingoCAN: flash cancelled. Device may be in an intermediate state — re-run to recover.',
         );
         return;
     }
@@ -296,14 +375,14 @@ function announceSuccess(report: FlashReport | null, artifactPath: string): void
         // future report-schema change. Still a success; just less
         // informative.
         void vscode.window.showInformationMessage(
-            `ISC CAN: flashed ${base} ✓ (no JSON report parsed; see output channel)`,
+            `ISC MingoCAN: flashed ${base} ✓ (no JSON report parsed; see output channel)`,
         );
         return;
     }
     const sectors = report.sectors_written.length;
     const skipped = report.sectors_skipped.length;
     void vscode.window.showInformationMessage(
-        `ISC CAN: flashed ${base} ✓  ` +
+        `ISC MingoCAN: flashed ${base} ✓  ` +
             `${sectors} sector(s) written, ${skipped} skipped, ${report.duration_ms} ms.`,
     );
 }
@@ -315,7 +394,7 @@ function announceFailure(exitCode: number | null, stderr: string): void {
     const firstLine = stderr.split('\n').find((l) => l.trim().length > 0) ?? '';
     const detail = firstLine.length > 0 ? `\n${firstLine}` : '';
     void vscode.window.showErrorMessage(
-        `ISC CAN: flash failed (exit ${exitCode ?? 'killed'}: ${hint}).${detail}  ` +
+        `ISC MingoCAN: flash failed (exit ${exitCode ?? 'killed'}: ${hint}).${detail}  ` +
             `See ISC CAN output channel.`,
     );
 }

@@ -12,6 +12,26 @@ import { DEFAULT_BARE_NAME, resolveCanFlasherPath } from './cliPath';
 
 export type InterfaceType = 'slcan' | 'socketcan' | 'pcan' | 'vector' | 'virtual';
 
+/**
+ * Fallback glob for `iscFs.firmwareArtifact`. Keep in sync with
+ * the `default` in `package.json`'s configuration contribution.
+ * Pulled out as a constant so the runtime can also fall back to
+ * this when an existing operator has the setting saved as the
+ * empty string (e.g. carried over from a pre-v2.3.3 install,
+ * where the setting was unset and stored as `""`).
+ */
+export const DEFAULT_FIRMWARE_GLOB = '**/build/**/*.{elf,hex,bin}';
+
+/**
+ * Default `iscFs.buildCommand`. Keep in sync with the `default`
+ * in `package.json`. The runtime checks against this so it can
+ * swap in a smarter, preset-aware command when a
+ * `CMakePresets.json` is detected — operator-customised values
+ * are left alone.
+ */
+export const DEFAULT_BUILD_COMMAND =
+    'cmake -B build -S . && cmake --build build';
+
 export interface Config {
     canFlasherPath: string;
     interface: InterfaceType;
@@ -39,8 +59,8 @@ export function readConfig(): Config {
         channel: cfg.get<string>('channel', ''),
         bitrate: cfg.get<number>('bitrate', 500_000),
         nodeId: cfg.get<string>('nodeId', ''),
-        buildCommand: cfg.get<string>('buildCommand', 'cmake --build build'),
-        firmwareArtifact: cfg.get<string>('firmwareArtifact', ''),
+        buildCommand: cfg.get<string>('buildCommand', DEFAULT_BUILD_COMMAND),
+        firmwareArtifact: cfg.get<string>('firmwareArtifact', DEFAULT_FIRMWARE_GLOB),
         timeoutMs: cfg.get<number>('timeoutMs', 500),
         requireWrp: cfg.get<boolean>('requireWrp', false),
         applyWrp: cfg.get<boolean>('applyWrp', false),

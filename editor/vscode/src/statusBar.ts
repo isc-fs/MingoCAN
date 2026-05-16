@@ -3,7 +3,7 @@
 // command palette:
 //
 //   $(plug) <iface>:<channel> → <node>     ← click to switch adapter
-//   $(rocket) Flash                         ← click to build + flash
+//   $(zap) Build + Flash                    ← click to build then flash
 //   $(tools) Tools                          ← click to open the dashboard panel
 //
 // Priorities are descending so they render left-to-right in that
@@ -33,9 +33,14 @@ export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     // the palette exposes (build → flash via CAN → optional jump).
     flashItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
     flashItem.command = 'iscFs.flash';
-    flashItem.name = 'ISC MingoCAN: flash';
-    flashItem.text = '$(rocket) Flash';
-    flashItem.tooltip = 'Build firmware and flash it to the selected device over CAN';
+    flashItem.name = 'ISC MingoCAN: build + flash';
+    // $(zap) is the lightning-bolt codicon — universally "flash"
+    // even for non-English operators. The "Build + Flash" label is
+    // explicit so nobody confuses it with `iscFs.flashWithoutBuild`.
+    flashItem.text = '$(zap) Build + Flash';
+    flashItem.tooltip =
+        'Run `iscFs.buildCommand` (default `cmake --build build`) and then flash ' +
+        'the produced artifact to the selected device over CAN.';
     flashItem.show();
     context.subscriptions.push(flashItem);
 

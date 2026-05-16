@@ -126,7 +126,7 @@ export function deactivate(): void {
 async function flashThisDevice(node?: IscFsTreeNode): Promise<void> {
     if (node === undefined || node.kind !== 'device') {
         void vscode.window.showInformationMessage(
-            'ISC CAN: right-click a device in the ISC CAN Devices view, then choose "Flash this device…".',
+            'ISC MingoCAN: right-click a device in the ISC MingoCAN Devices view, then choose "Flash this device…".',
         );
         return;
     }

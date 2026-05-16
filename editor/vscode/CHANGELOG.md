@@ -5,6 +5,65 @@ All notable changes to the ISC MingoCAN Flasher VS Code extension.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.3] — 2026-05-16
+
+### Added
+- **`CMakePresets.json` auto-detection.** STM32CubeMX-generated
+  CMake projects ship a `CMakePresets.json` that pins the
+  arm-none-eabi toolchain file, generator, and `binaryDir` — bare
+  `cmake -B build` doesn't read any of that and either errors or
+  builds for the host. When the extension sees a presets file at
+  the workspace root *and* the operator is still on the default
+  `iscFs.buildCommand`, it transparently swaps in
+  `cmake --preset <X> && cmake --build --preset <X>` (or the
+  appropriate fallback when only configure presets exist). The
+  artifact glob narrows to the preset's `binaryDir` when the path
+  is recoverable. Logged to the output channel so the operator
+  can see which preset was picked.
+- **`iscFs.buildCommand` default now configures CMake too** —
+  `cmake -B build -S . && cmake --build build` instead of just
+  `cmake --build build`. Matches STM32CubeIDE's *build then
+  flash* button: clicking Flash on a fresh clone now Just Works
+  without manually running CMake configure first. The configure
+  step is a no-op on subsequent runs when `build/` already
+  exists, so there's no time penalty.
+- **`iscFs.firmwareArtifact` now defaults to `**/build/**/*.{elf,hex,bin}`.**
+  New installs no longer need to set it manually for the common
+  CMake / Make project layout — the extension auto-discovers the
+  firmware after a build. Operators with a non-standard build
+  output still set the path explicitly; the existing
+  multi-match quick-pick prompt is unchanged.
+
+### Changed
+- **No-firmware-artifact error is more actionable.** When the
+  glob matches nothing, the warning now offers two buttons:
+  *Build first* (jumps to `iscFs.buildCommand` so you can
+  confirm it before re-running Flash) and *Set artifact path*
+  (jumps to `iscFs.firmwareArtifact`). Previously the only
+  action was *Open settings*.
+- **All operator-facing strings now say "ISC MingoCAN:".** The
+  rebrand from v2.3.1 missed many of the runtime toasts /
+  progress titles / quick-pick prompts inside the extension
+  source. Swept across `flash.ts`, `diagnose.ts`, `picker.ts`,
+  `extension.ts` so what operators see matches the Extensions
+  panel name.
+
+- **Status-bar Flash button: lightning-bolt icon + "Build + Flash"
+  label.** The button now reads `$(zap) Build + Flash` instead of
+  `$(rocket) Flash`, making it visually unambiguous what the click
+  does. Same `iscFs.flash` command (build → flash via CAN); only
+  the surface changed.
+- The tools dashboard's primary button gets the matching ⚡ glyph.
+
+### Fixed
+- **"Flash button didn't build" UX.** When `iscFs.buildCommand` is
+  empty, the build step used to be silently skipped — operators
+  saw the click as flash-only and assumed it wasn't building.
+  Now the extension surfaces a warning toast with two actions:
+  *Set build command* (jumps to settings) or *Continue (flash
+  only)* (the previous behaviour). `iscFs.flashWithoutBuild` is
+  unaffected.
+
 ## [2.3.2] — 2026-05-16
 
 ### Added
