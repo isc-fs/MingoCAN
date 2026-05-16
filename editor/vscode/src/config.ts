@@ -22,6 +22,16 @@ export type InterfaceType = 'slcan' | 'socketcan' | 'pcan' | 'vector' | 'virtual
  */
 export const DEFAULT_FIRMWARE_GLOB = '**/build/**/*.{elf,hex,bin}';
 
+/**
+ * Default `iscFs.buildCommand`. Keep in sync with the `default`
+ * in `package.json`. The runtime checks against this so it can
+ * swap in a smarter, preset-aware command when a
+ * `CMakePresets.json` is detected — operator-customised values
+ * are left alone.
+ */
+export const DEFAULT_BUILD_COMMAND =
+    'cmake -B build -S . && cmake --build build';
+
 export interface Config {
     canFlasherPath: string;
     interface: InterfaceType;
@@ -49,7 +59,7 @@ export function readConfig(): Config {
         channel: cfg.get<string>('channel', ''),
         bitrate: cfg.get<number>('bitrate', 500_000),
         nodeId: cfg.get<string>('nodeId', ''),
-        buildCommand: cfg.get<string>('buildCommand', 'cmake --build build'),
+        buildCommand: cfg.get<string>('buildCommand', DEFAULT_BUILD_COMMAND),
         firmwareArtifact: cfg.get<string>('firmwareArtifact', DEFAULT_FIRMWARE_GLOB),
         timeoutMs: cfg.get<number>('timeoutMs', 500),
         requireWrp: cfg.get<boolean>('requireWrp', false),

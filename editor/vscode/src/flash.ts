@@ -21,8 +21,10 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { detectCmakePreset } from './cmakePresets';
 import {
     buildGlobalArgv,
+    DEFAULT_BUILD_COMMAND,
     DEFAULT_FIRMWARE_GLOB,
     type Config,
     readConfig,
@@ -71,6 +73,30 @@ export async function runFlash(options: FlashOptions): Promise<void> {
         out.appendLine(
             `[info] iscFs.firmwareArtifact is empty; falling back to ${DEFAULT_FIRMWARE_GLOB}`,
         );
+    }
+
+    // STM32CubeMX-generated CMake projects ship a CMakePresets.json
+    // pinning the arm-none-eabi toolchain — bare `cmake -B build`
+    // either errors out or builds for the host. When a presets file
+    // is present AND the operator is still on the default build
+    // command, transparently swap in the `--preset` form so the
+    // Flash button "just works" on those projects. Logged so the
+    // operator can see which preset got picked.
+    const preset = detectCmakePreset(cwd);
+    if (preset !== null && cfg.buildCommand === DEFAULT_BUILD_COMMAND) {
+        out.appendLine(
+            `[info] detected CMakePresets.json; using preset-driven build: ${preset.command}`,
+        );
+        cfg.buildCommand = preset.command;
+        if (
+            preset.artifactGlobHint !== null &&
+            cfg.firmwareArtifact === DEFAULT_FIRMWARE_GLOB
+        ) {
+            out.appendLine(
+                `[info] narrowing artifact glob to ${preset.artifactGlobHint}`,
+            );
+            cfg.firmwareArtifact = preset.artifactGlobHint;
+        }
     }
 
     await vscode.window.withProgress(
