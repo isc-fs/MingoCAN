@@ -188,9 +188,15 @@ can-flasher --interface slcan --channel /dev/ttyACM0 config ob read
 can-flasher --interface slcan --channel /dev/ttyACM0 config ob apply-wrp \
   --sector-mask 0x01
 
-can-flasher --interface slcan --channel /dev/ttyACM0 config nvm read   --key 0x0001
-can-flasher --interface slcan --channel /dev/ttyACM0 config nvm write  --key 0x0002 --value 0xDEADBEEF
-can-flasher --interface slcan --channel /dev/ttyACM0 config nvm erase  --key 0x0002
+can-flasher --interface slcan --channel /dev/ttyACM0 config nvm read   0x0001
+can-flasher --interface slcan --channel /dev/ttyACM0 config nvm write  0x0002 0xDEADBEEF
+can-flasher --interface slcan --channel /dev/ttyACM0 config nvm erase  0x0002
+
+# Boot-only keys (e.g. BL_NVM_KEY_NODE_ID = 0x0001) take effect on
+# the next bootloader start — pass --reset to send CMD_RESET right
+# after the write ACK so you don't have to power-cycle manually.
+can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0x3 \
+  config nvm write 0x0001 0x02 --reset
 
 # bootloader 0.2+ — wipe the entire NVM sector (every key + metadata)
 can-flasher --interface slcan --channel /dev/ttyACM0 config nvm format --yes
