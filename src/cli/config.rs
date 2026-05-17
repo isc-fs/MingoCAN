@@ -27,8 +27,9 @@ use tracing::debug;
 
 use super::GlobalFlags;
 use crate::protocol::commands::{
-    cmd_nvm_format, cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read,
+    cmd_nvm_format, cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read, cmd_reset,
 };
+use crate::protocol::opcodes::ResetMode;
 use crate::protocol::records::ObStatus;
 use crate::protocol::Response;
 use crate::session::{Session, SessionConfig};
@@ -95,6 +96,15 @@ pub enum NvmAction {
         /// Value, either a quoted UTF-8 string or `0x`-prefixed hex blob.
         /// Max 20 bytes (BL_NVM_MAX_VALUE_LEN).
         value: String,
+
+        /// After the write ACK, send `CMD_RESET [Bootloader]` so the
+        /// bootloader reboots and re-resolves NVM keys on the next
+        /// boot. Required for boot-only keys like
+        /// `BL_NVM_KEY_NODE_ID = 0x0001`; harmless but pointless for
+        /// runtime-resolved keys (operator opts in explicitly to
+        /// avoid surprise reboots).
+        #[arg(long = "reset", default_value_t = false)]
+        reset: bool,
     },
 
     /// Tombstone a parameter (value-length = 0)
@@ -126,7 +136,9 @@ pub async fn run(args: ConfigArgs, global: &GlobalFlags) -> Result<()> {
         },
         ConfigAction::Nvm { action } => match action {
             NvmAction::Read { key } => run_nvm_read(key, global).await,
-            NvmAction::Write { key, value } => run_nvm_write(key, value, global).await,
+            NvmAction::Write { key, value, reset } => {
+                run_nvm_write(key, value, reset, global).await
+            }
             NvmAction::Erase { key } => run_nvm_erase(key, global).await,
             NvmAction::Format { yes } => run_nvm_format(yes, global).await,
         },
@@ -399,7 +411,12 @@ fn render_nvm_read(key: u16, value: &[u8], json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_nvm_write(key: u16, value: String, global: &GlobalFlags) -> Result<()> {
+async fn run_nvm_write(
+    key: u16,
+    value: String,
+    reset: bool,
+    global: &GlobalFlags,
+) -> Result<()> {
     let value_bytes =
         parse_nvm_value(&value).with_context(|| format!("parsing value argument '{value}'"))?;
     if value_bytes.is_empty() {
@@ -425,14 +442,65 @@ async fn run_nvm_write(key: u16, value: String, global: &GlobalFlags) -> Result<
         .send_command(&cmd_nvm_write(key, &value_bytes))
         .await
         .context("sending NVM_WRITE");
-    let _ = session.disconnect().await;
-    let resp = resp?;
+    // If --reset is set, defer the disconnect until after we've
+    // fired CMD_RESET so the session's keepalive doesn't race the
+    // device coming back up. When the write itself fails we still
+    // want a clean disconnect, so handle that branch below.
+    if !reset {
+        let _ = session.disconnect().await;
+    }
+    let resp = match resp {
+        Ok(r) => r,
+        Err(err) => {
+            // Make sure we shut down keepalive even on the error path.
+            if reset {
+                let _ = session.disconnect().await;
+            }
+            return Err(err);
+        }
+    };
 
     match resp {
         Response::Ack { .. } => {
+            // Optional reset: send `CMD_RESET [Bootloader]` so the
+            // bootloader reboots and re-resolves NVM keys (e.g. the
+            // new node-id from BL_NVM_KEY_NODE_ID). Bootloader mode
+            // also sets the boot-request magic so the device comes
+            // back up in the BL rather than auto-jumping to the app
+            // — keeping the operator in a known state to re-verify
+            // the write with `cf discover` / `cf config nvm read`.
+            //
+            // The reset frame is fire-and-forget by design — the
+            // bootloader resets before sending an ACK, so we never
+            // see one. Errors from the send call are silenced for
+            // the same reason; the next `discover` is the real
+            // verification of "did the chip come back".
+            if reset {
+                let reset_send =
+                    session.send_command(&cmd_reset(ResetMode::Bootloader)).await;
+                let _ = session.disconnect().await;
+                // Log at trace level so an operator running with
+                // RUST_LOG=trace can see exactly what happened.
+                if let Err(err) = reset_send {
+                    tracing::trace!(
+                        ?err,
+                        "CMD_RESET send returned an error after NVM_WRITE — \
+                         expected when the bootloader reboots before ACKing",
+                    );
+                }
+            }
             if global.json {
                 println!(
-                    r#"{{"status":"ok","key":"0x{key:04X}","bytes_written":{}}}"#,
+                    r#"{{"status":"ok","key":"0x{key:04X}","bytes_written":{},"reset":{}}}"#,
+                    value_bytes.len(),
+                    reset
+                );
+            } else if reset {
+                println!(
+                    "Wrote {} byte(s) to NVM key 0x{key:04X}.\n\
+                     Sent CMD_RESET [Bootloader]; the device is now rebooting and \
+                     will re-resolve NVM keys on next boot.\n\
+                     Run `can-flasher discover` to confirm the new state.",
                     value_bytes.len()
                 );
             } else {

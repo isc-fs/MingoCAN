@@ -9,9 +9,11 @@ use tokio::sync::oneshot;
 
 use can_flasher::protocol::commands::{
     cmd_connect_self, cmd_nvm_format, cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read,
+    cmd_reset,
 };
 use can_flasher::protocol::opcodes::CommandOpcode;
 use can_flasher::protocol::opcodes::NackCode;
+use can_flasher::protocol::opcodes::ResetMode;
 use can_flasher::protocol::records::ObStatus;
 use can_flasher::protocol::Response;
 use can_flasher::session::{Session, SessionConfig};
@@ -308,4 +310,108 @@ async fn nvm_read_needs_session() {
         other => panic!("expected Nack(BadSession), got {other:?}"),
     }
     tear_down(session, cancel, handle).await;
+}
+
+// ---- nvm write + --reset semantics (gh #231 task 1) ----
+//
+// These tests replicate the wire pattern produced by
+// `run_nvm_write(..., reset, ...)` in `src/cli/config.rs` and
+// assert the stub observed exactly one (or zero) `CMD_RESET`
+// frames after the NVM write ACK arrives. The integration goes
+// through the same Session + StubDevice harness as the rest of
+// this file; we only need a slightly richer setup that hands
+// back the stub's `reset_counter_handle` so we can inspect it
+// after tear_down.
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
+
+/// Variant of `spawn_session_and_stub` that also returns the
+/// stub's reset-counter handle. Tests that need to verify "did
+/// the host send a CMD_RESET" use this; the other tests in this
+/// file ignore the counter and use the smaller helper.
+async fn spawn_with_reset_inspector() -> (
+    Session,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicU32>,
+) {
+    let bus = VirtualBus::new();
+    let host = bus.host_backend();
+    let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+    drop(bus);
+
+    let stub = StubDevice::new(device, STUB_NODE);
+    // Grab the counter handle *before* moving the stub into its
+    // run-loop task — once it's moved we can't get at it.
+    let reset_counter = stub.reset_counter_handle();
+
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let _ = stub.run(cancel_rx).await;
+    });
+
+    let config = SessionConfig {
+        target_node: STUB_NODE,
+        keepalive_interval: Duration::from_millis(5_000),
+        command_timeout: Duration::from_millis(200),
+        ..SessionConfig::default()
+    };
+    let session = Session::attach(Box::new(host), config);
+    (session, cancel_tx, handle, reset_counter)
+}
+
+#[tokio::test]
+async fn nvm_write_without_reset_does_not_send_cmd_reset() {
+    // Mirrors `run_nvm_write(..., reset = false, ...)`:
+    //   CONNECT → NVM_WRITE → disconnect.
+    let (session, cancel, handle, reset_counter) =
+        spawn_with_reset_inspector().await;
+    session.send_command(&cmd_connect_self()).await.unwrap();
+
+    let resp = session
+        .send_command(&cmd_nvm_write(0x0001, &[0x02]))
+        .await
+        .unwrap();
+    assert!(matches!(resp, Response::Ack { .. }));
+
+    tear_down(session, cancel, handle).await;
+
+    // No CMD_RESET should have crossed the wire — the operator
+    // didn't opt in.
+    assert_eq!(
+        reset_counter.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "default (reset=false) flow must not send CMD_RESET",
+    );
+}
+
+#[tokio::test]
+async fn nvm_write_with_reset_sends_cmd_reset_bootloader() {
+    // Mirrors `run_nvm_write(..., reset = true, ...)`:
+    //   CONNECT → NVM_WRITE → CMD_RESET[Bootloader] → disconnect.
+    let (session, cancel, handle, reset_counter) =
+        spawn_with_reset_inspector().await;
+    session.send_command(&cmd_connect_self()).await.unwrap();
+
+    let resp = session
+        .send_command(&cmd_nvm_write(0x0001, &[0x02]))
+        .await
+        .unwrap();
+    assert!(matches!(resp, Response::Ack { .. }));
+
+    // CMD_RESET is the boot-only-NVM-key escape hatch. We don't
+    // care whether the ACK arrives — real hardware reboots before
+    // sending one — only that the host emitted the frame.
+    let _ = session
+        .send_command(&cmd_reset(ResetMode::Bootloader))
+        .await;
+
+    tear_down(session, cancel, handle).await;
+
+    assert_eq!(
+        reset_counter.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "reset=true flow must emit exactly one CMD_RESET frame",
+    );
 }
