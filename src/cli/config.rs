@@ -438,49 +438,44 @@ async fn run_nvm_write(
         .await
         .context("CONNECT before NVM_WRITE")?;
 
+    // Stage 1 — NVM_WRITE.
+    //
+    // We deliberately do NOT disconnect early: when `--reset` is
+    // set we need to keep the session alive to fire CMD_RESET
+    // right after the write ACK, and `Session::disconnect(self)`
+    // consumes the session by value. The single `let _ =
+    // session.disconnect().await` at the end of each branch keeps
+    // keepalive teardown clean either way.
     let resp = session
         .send_command(&cmd_nvm_write(key, &value_bytes))
-        .await
-        .context("sending NVM_WRITE");
-    // If --reset is set, defer the disconnect until after we've
-    // fired CMD_RESET so the session's keepalive doesn't race the
-    // device coming back up. When the write itself fails we still
-    // want a clean disconnect, so handle that branch below.
-    if !reset {
-        let _ = session.disconnect().await;
-    }
+        .await;
+
     let resp = match resp {
         Ok(r) => r,
         Err(err) => {
-            // Make sure we shut down keepalive even on the error path.
-            if reset {
-                let _ = session.disconnect().await;
-            }
-            return Err(err);
+            let _ = session.disconnect().await;
+            return Err(err).context("sending NVM_WRITE");
         }
     };
 
     match resp {
         Response::Ack { .. } => {
-            // Optional reset: send `CMD_RESET [Bootloader]` so the
-            // bootloader reboots and re-resolves NVM keys (e.g. the
-            // new node-id from BL_NVM_KEY_NODE_ID). Bootloader mode
-            // also sets the boot-request magic so the device comes
-            // back up in the BL rather than auto-jumping to the app
-            // — keeping the operator in a known state to re-verify
-            // the write with `cf discover` / `cf config nvm read`.
+            // Stage 2 (opt-in) — fire-and-forget CMD_RESET so the
+            // bootloader reboots and re-resolves NVM keys on the
+            // next boot. `Bootloader` mode sets the boot-request
+            // magic so the chip comes back up in the BL rather
+            // than auto-jumping to the app — operator stays in a
+            // known state for the verifying `cf discover` /
+            // `cf config nvm read`.
             //
-            // The reset frame is fire-and-forget by design — the
-            // bootloader resets before sending an ACK, so we never
-            // see one. Errors from the send call are silenced for
-            // the same reason; the next `discover` is the real
-            // verification of "did the chip come back".
+            // Real hardware reboots before sending the ACK we'd
+            // otherwise wait for, so any error from the send call
+            // is expected; trace-log it and move on. The real
+            // verification is the operator's next `cf discover`.
             if reset {
-                let reset_send =
-                    session.send_command(&cmd_reset(ResetMode::Bootloader)).await;
-                let _ = session.disconnect().await;
-                // Log at trace level so an operator running with
-                // RUST_LOG=trace can see exactly what happened.
+                let reset_send = session
+                    .send_command(&cmd_reset(ResetMode::Bootloader))
+                    .await;
                 if let Err(err) = reset_send {
                     tracing::trace!(
                         ?err,
@@ -489,6 +484,8 @@ async fn run_nvm_write(
                     );
                 }
             }
+            let _ = session.disconnect().await;
+
             if global.json {
                 println!(
                     r#"{{"status":"ok","key":"0x{key:04X}","bytes_written":{},"reset":{}}}"#,
@@ -514,8 +511,15 @@ async fn run_nvm_write(
         Response::Nack {
             rejected_opcode,
             code,
-        } => bail!("device NACK'd NVM_WRITE (opcode 0x{rejected_opcode:02X}): {code}"),
-        other => bail!("unexpected reply to NVM_WRITE: {}", other.kind_str()),
+        } => {
+            let _ = session.disconnect().await;
+            bail!("device NACK'd NVM_WRITE (opcode 0x{rejected_opcode:02X}): {code}")
+        }
+        other => {
+            let kind = other.kind_str();
+            let _ = session.disconnect().await;
+            bail!("unexpected reply to NVM_WRITE: {kind}")
+        }
     }
 }
 
