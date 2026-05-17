@@ -125,6 +125,13 @@ pub struct StubDevice {
     /// Used exclusively by tests that need to fake a post-write
     /// CRC mismatch — real bootloader CRC is always honest.
     flash_crc_overrides: HashMap<u8, u32>,
+    /// Count of `CMD_RESET` frames the stub has answered since
+    /// construction. `Arc<AtomicU32>` so a test can clone the
+    /// handle before the stub gets moved into its run-loop task
+    /// (and then assert the count post-mortem). Test-only
+    /// inspection surface — real hardware would be rebooting by
+    /// the time the host could ask.
+    reset_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl StubDevice {
@@ -143,7 +150,16 @@ impl StubDevice {
             expected_verify: None,
             flash_buffer: vec![0xFF; BL_APP_MAX_SIZE as usize],
             flash_crc_overrides: HashMap::new(),
+            reset_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
+    }
+
+    /// Cheaply-cloneable handle to the reset counter. Tests grab
+    /// this *before* moving the stub into its run-loop task, then
+    /// inspect via `Ordering::Relaxed` once they're done driving
+    /// the wire. See `tests/config_subcommand.rs`.
+    pub fn reset_counter_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicU32> {
+        self.reset_count.clone()
     }
 
     /// Configure the `CMD_FLASH_VERIFY` gate. `Some((crc, size,
@@ -459,6 +475,12 @@ impl StubDevice {
     /// (would kill the test harness). Real hardware would reboot
     /// after emitting the ACK.
     async fn handle_reset(&self, peer: u8, payload: &[u8]) -> Result<()> {
+        // Bump first — even malformed CMD_RESET frames count toward
+        // "did the host send a reset?" inspection by the integration
+        // tests. Real hardware would also have started rebooting
+        // before deciding whether to NACK.
+        self.reset_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // payload[0] is the opcode, payload[1] should be the mode.
         if payload.len() < 2 {
             return self
