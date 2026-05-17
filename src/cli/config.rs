@@ -411,12 +411,7 @@ fn render_nvm_read(key: u16, value: &[u8], json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_nvm_write(
-    key: u16,
-    value: String,
-    reset: bool,
-    global: &GlobalFlags,
-) -> Result<()> {
+async fn run_nvm_write(key: u16, value: String, reset: bool, global: &GlobalFlags) -> Result<()> {
     let value_bytes =
         parse_nvm_value(&value).with_context(|| format!("parsing value argument '{value}'"))?;
     if value_bytes.is_empty() {

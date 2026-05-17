@@ -323,8 +323,8 @@ async fn nvm_read_needs_session() {
 // back the stub's `reset_counter_handle` so we can inspect it
 // after tear_down.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 
 /// Variant of `spawn_session_and_stub` that also returns the
 /// stub's reset-counter handle. Tests that need to verify "did
@@ -365,8 +365,7 @@ async fn spawn_with_reset_inspector() -> (
 async fn nvm_write_without_reset_does_not_send_cmd_reset() {
     // Mirrors `run_nvm_write(..., reset = false, ...)`:
     //   CONNECT → NVM_WRITE → disconnect.
-    let (session, cancel, handle, reset_counter) =
-        spawn_with_reset_inspector().await;
+    let (session, cancel, handle, reset_counter) = spawn_with_reset_inspector().await;
     session.send_command(&cmd_connect_self()).await.unwrap();
 
     let resp = session
@@ -390,8 +389,7 @@ async fn nvm_write_without_reset_does_not_send_cmd_reset() {
 async fn nvm_write_with_reset_sends_cmd_reset_bootloader() {
     // Mirrors `run_nvm_write(..., reset = true, ...)`:
     //   CONNECT → NVM_WRITE → CMD_RESET[Bootloader] → disconnect.
-    let (session, cancel, handle, reset_counter) =
-        spawn_with_reset_inspector().await;
+    let (session, cancel, handle, reset_counter) = spawn_with_reset_inspector().await;
     session.send_command(&cmd_connect_self()).await.unwrap();
 
     let resp = session
