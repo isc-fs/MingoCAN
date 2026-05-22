@@ -29,13 +29,14 @@
         type ProbeInfo,
         type SwdFlashArgs,
         type SwdFlashEvent,
+        type SwdFlashReport,
         type SwdOp,
     } from './swd';
 
     type FlashState =
         | { kind: 'idle' }
         | { kind: 'running'; startedAt: number }
-        | { kind: 'ok'; durationMs: number }
+        | { kind: 'ok'; durationMs: number; report: SwdFlashReport }
         | { kind: 'error'; message: string };
 
     type EraseState =
@@ -182,10 +183,11 @@
                 verify: args.verify,
                 resetAfter: args.resetAfter,
             };
-            await swdFlash(submitted);
+            const report = await swdFlash(submitted);
             flashState = {
                 kind: 'ok',
                 durationMs: Math.round(performance.now() - startedAt),
+                report,
             };
         } catch (err) {
             flashState = {
@@ -193,6 +195,12 @@
                 message: err instanceof Error ? err.message : String(err),
             };
         }
+    }
+
+    function formatSize(bytes: number): string {
+        if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(2)} MB`;
+        if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(1)} KB`;
+        return `${bytes} B`;
     }
 
     function describeProbe(p: ProbeInfo): string {
@@ -434,8 +442,35 @@
         </div>
     {:else if flashState.kind === 'ok'}
         <div class="status ok">
-            ✓ Bootloader burned in {flashState.durationMs} ms. The chip is
-            ready to be flashed over CAN from the <strong>Flash</strong> tab.
+            <div>
+                ✓ Bootloader burned in {flashState.durationMs} ms. The chip is
+                ready to be flashed over CAN from the <strong>Flash</strong> tab.
+            </div>
+            <!--
+                Verifiable fingerprint of what's on the chip. probe-rs
+                read back the flash and byte-compared it against this
+                CRC's source bytes, so this is a true post-write proof
+                — operators can record it in bench notes and reconcile
+                between boards (cf. isc-fs/stm32-can-bootloader#117).
+            -->
+            <dl class="fingerprint">
+                <dt>Size</dt>
+                <dd>{formatSize(flashState.report.sizeBytes)}</dd>
+                <dt>CRC32</dt>
+                <dd><code>{flashState.report.crc32Hex}</code></dd>
+                <dt>Verify</dt>
+                <dd>
+                    {#if flashState.report.verified}
+                        ✓ probe-rs read-back compare
+                    {:else}
+                        ✗ skipped (--no-verify)
+                    {/if}
+                </dd>
+                {#if flashState.report.targetVoltageV !== null}
+                    <dt>VTref</dt>
+                    <dd>{flashState.report.targetVoltageV.toFixed(2)} V</dd>
+                {/if}
+            </dl>
         </div>
     {:else if flashState.kind === 'error'}
         <div class="status error">
@@ -773,6 +808,27 @@
     .fetch-error {
         margin: 6px 0 0;
         color: var(--error);
+    }
+
+    /* Post-flash fingerprint — verifiable proof of what's on the
+       chip. Compact key/value grid that lines up vertically so an
+       operator can grep / copy the row they need. */
+    .fingerprint {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 4px 16px;
+        margin: 10px 0 0;
+        font-size: 0.85rem;
+    }
+
+    .fingerprint dt {
+        color: var(--text-muted);
+        font-weight: 500;
+    }
+
+    .fingerprint dd {
+        margin: 0;
+        font-family: var(--font-mono);
     }
 
     .refresh {

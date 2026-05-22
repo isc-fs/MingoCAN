@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use can_flasher::bootloader_fetch::{self, BootloaderFormat};
-use can_flasher::swd::{self, SwdEraseRequest, SwdFlashRequest, SwdOperation, SwdProgress};
+use can_flasher::swd::{
+    self, SwdEraseRequest, SwdFlashReport, SwdFlashRequest, SwdOperation, SwdProgress,
+};
 
 // ---- DTOs ----
 
@@ -62,6 +64,31 @@ pub struct SwdFlashArgs {
 pub struct SwdEraseArgs {
     pub chip: Option<String>,
     pub probe_serial: Option<String>,
+}
+
+/// Frontend-facing flash report. Mirrors `can_flasher::swd::SwdFlashReport`
+/// with the CRC re-shaped as a hex string so the UI can paste it
+/// verbatim into operator notes / bench logs.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwdFlashReportDto {
+    pub verified: bool,
+    /// `"0x{:08X}"`-formatted hex string, e.g. `"0xDEADBEEF"`.
+    pub crc32_hex: String,
+    pub size_bytes: u64,
+    /// VTref in volts, when the probe reports it.
+    pub target_voltage_v: Option<f32>,
+}
+
+impl From<SwdFlashReport> for SwdFlashReportDto {
+    fn from(r: SwdFlashReport) -> Self {
+        Self {
+            verified: r.verified,
+            crc32_hex: format!("0x{:08X}", r.crc32),
+            size_bytes: r.size_bytes,
+            target_voltage_v: r.target_voltage_v,
+        }
+    }
 }
 
 /// One streamed progress event, emitted as the `swd-flash:event`
@@ -163,7 +190,7 @@ pub async fn swd_fetch_bootloader(tag: Option<String>) -> Result<FetchedBootload
 }
 
 #[tauri::command]
-pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<(), String> {
+pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<SwdFlashReportDto, String> {
     let base_addr = match args.base.as_deref().map(parse_hex_u64) {
         Some(Some(v)) => v,
         Some(None) => {
@@ -217,7 +244,7 @@ pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<(), String>
     // Wait for the drainer to finish flushing any tail events.
     let _ = drain_handle.await;
 
-    flash_result.map_err(|e| e.to_string())
+    flash_result.map(SwdFlashReportDto::from).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
