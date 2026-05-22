@@ -244,7 +244,9 @@ pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<SwdFlashRep
     // Wait for the drainer to finish flushing any tail events.
     let _ = drain_handle.await;
 
-    flash_result.map(SwdFlashReportDto::from).map_err(|e| e.to_string())
+    flash_result
+        .map(SwdFlashReportDto::from)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

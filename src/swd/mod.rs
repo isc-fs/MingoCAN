@@ -272,10 +272,7 @@ where
     // can record this in bench notes and reconcile against another
     // ECU's CRC to confirm "same binary, same chip state."
     let artifact_bytes = std::fs::read(&request.artifact_path).map_err(|e| {
-        SwdError::ProbeRs(format!(
-            "read artifact {:?}: {e}",
-            request.artifact_path
-        ))
+        SwdError::ProbeRs(format!("read artifact {:?}: {e}", request.artifact_path))
     })?;
     let artifact_crc32 = crate::firmware::crc32(&artifact_bytes);
     let artifact_size = artifact_bytes.len() as u64;
@@ -368,7 +365,7 @@ where
     // `target_voltage()` returns `Ok(None)` on probes without a
     // VTref divider (some bare ST-LINK dev boards); we accept that
     // as "unknown" rather than fail the flash over it.
-    let target_voltage_v = probe.target_voltage().ok().flatten();
+    let target_voltage_v = probe.get_target_voltage().ok().flatten();
     info!(?target_voltage_v, "probe target VTref voltage");
 
     info!(chip = request.chip, "attaching to target");
