@@ -190,10 +190,7 @@ fn path_stem(raw: &str) -> Option<&str> {
     // slash works on both POSIX and Windows for our purposes —
     // we're parsing a string the operator typed, not walking the
     // filesystem).
-    let basename = raw
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())?;
+    let basename = raw.rsplit(['/', '\\']).next().filter(|s| !s.is_empty())?;
 
     // Strip the firmware extension if we recognise it. We don't
     // strip arbitrary extensions because a role name like `ams.fw`
