@@ -16,6 +16,7 @@ pub mod config;
 pub mod diagnose;
 pub mod discover;
 pub mod flash;
+pub mod provision;
 pub mod replay;
 pub mod send_raw;
 #[cfg(feature = "swd")]
@@ -123,6 +124,11 @@ pub enum Command {
     /// Send one raw CAN frame — generic primitive for app-level
     /// commands (e.g. running-app reboot-to-BL, bench probes)
     SendRaw(send_raw::SendRawArgs),
+
+    /// Assign a board's node-id by role name (ECU=1, AMS=2, uDV=3).
+    /// Sugar over `config nvm write node-id` + reset — operator
+    /// types the role, the host fills in the number.
+    Provision(provision::ProvisionArgs),
 
     /// List detected CAN adapters on this machine
     Adapters,

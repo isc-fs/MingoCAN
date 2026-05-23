@@ -23,6 +23,7 @@ Commands:
   config      Read/write device configuration (NVM) and option bytes (WRP)
   replay      Record or replay a CAN session (testing)
   send-raw    Send one raw CAN frame (app-level reboot-to-BL, bench probes)
+  provision   Assign a board's node-id by role name (ecu / ams / udv)
   adapters    List detected CAN adapters on this machine
 
 Global Options:
@@ -208,6 +209,44 @@ can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0x3 \
 # bootloader 0.2+ — wipe the entire NVM sector (every key + metadata)
 can-flasher --interface slcan --channel /dev/ttyACM0 config nvm format --yes
 ```
+
+---
+
+## `provision` — assign a node-id by role name
+
+The team's three boards on the shared CAN bus each get a known
+4-bit node-id. `provision` is sugar over `config nvm write node-id …`
+that lets the operator type the role and the host fills in the
+number, then resets the chip so the new node-id takes effect.
+
+| Role | Node-id |
+|---|---|
+| `ecu` | `0x01` |
+| `ams` | `0x02` |
+| `udv` | `0x03` |
+
+Roles are case-insensitive (`AMS`, `ams`, `Ams` all work).
+
+```bash
+# Freshly-flashed board (no node-id yet) — talk to it on broadcast
+# (0xF, the default) and provision it as the AMS.
+can-flasher --interface slcan --channel /dev/ttyACM0 \
+  provision ams
+
+# Re-provisioning a board that already has a node-id (currently 0x2,
+# becoming 0x3 — the uDV). Target its current id so we don't race
+# with the other boards on the bus.
+can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0x2 \
+  provision udv
+
+# Skip the post-write reset (chained writes; the final one resets)
+can-flasher --interface slcan --channel /dev/ttyACM0 \
+  provision ecu --no-reset
+```
+
+After a successful provision (with reset), follow up with
+`can-flasher discover` — the board should reappear at the new
+node-id.
 
 ---
 
