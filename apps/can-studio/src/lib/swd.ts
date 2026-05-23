@@ -36,8 +36,26 @@ export function listSwdProbes(): Promise<ProbeInfo[]> {
     return invoke<ProbeInfo[]>('swd_list_probes');
 }
 
-export function swdFlash(args: SwdFlashArgs): Promise<void> {
-    return invoke<void>('swd_flash', { args });
+/**
+ * Per-flash summary returned by `swd_flash`. Mirrors
+ * `SwdFlashReportDto` in apps/can-studio/src-tauri/src/swd.rs.
+ *
+ * `crc32Hex` is the CRC32 of the source artifact's raw bytes.
+ * Combined with `verified: true` (probe-rs's readback-compare,
+ * default-on), it's a verifiable fingerprint of what's on the
+ * chip's flash right now — useful for reconciling a suspected-bad
+ * ECU against a known-good one (e.g. carrier MLC1 vs MLC3 in
+ * isc-fs/stm32-can-bootloader#117).
+ */
+export interface SwdFlashReport {
+    verified: boolean;
+    crc32Hex: string;
+    sizeBytes: number;
+    targetVoltageV: number | null;
+}
+
+export function swdFlash(args: SwdFlashArgs): Promise<SwdFlashReport> {
+    return invoke<SwdFlashReport>('swd_flash', { args });
 }
 
 /** A bootloader artefact resolved on the local disk. */

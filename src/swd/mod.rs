@@ -176,6 +176,39 @@ pub enum SwdOperation {
     Fill,
 }
 
+/// Per-flash summary returned by [`flash`] / [`flash_with_progress`].
+///
+/// Surfacing this in the CLI / UI gives operators a verifiable
+/// fingerprint of *what* got written — useful when reconciling a
+/// suspected-bad ECU against a known-good one (e.g. the carrier
+/// MLC1 vs MLC3 case in
+/// [bootloader#117](https://github.com/isc-fs/stm32-can-bootloader/issues/117)).
+///
+/// `crc32` is the CRC of the source artifact bytes. Combined with
+/// `verify == true` (probe-rs's readback-compare), that's
+/// equivalent to "the same CRC is on the chip's flash right now":
+/// every byte we sent matched what probe-rs read back, and our
+/// CRC was computed over those same bytes.
+#[derive(Debug, Clone)]
+pub struct SwdFlashReport {
+    /// `true` when probe-rs's `verify` pass ran and succeeded
+    /// (the default). `false` only when the operator opted out
+    /// with `--no-verify` / verify=false in the request.
+    pub verified: bool,
+    /// CRC32 of the source artifact file's raw bytes. Stable
+    /// fingerprint operators can record in bench notes / compare
+    /// across boards.
+    pub crc32: u32,
+    /// Total bytes of the source artifact (file size).
+    pub size_bytes: u64,
+    /// VTref voltage at the probe's target pin, in volts, sampled
+    /// once at session start. `None` when the probe doesn't report
+    /// it (e.g. dev-only ST-LINK boards without a VTref divider).
+    /// A low value here is one of the failure modes worth catching
+    /// — a brown-out mid-write corrupts flash silently.
+    pub target_voltage_v: Option<f32>,
+}
+
 impl From<ProgressOperation> for SwdOperation {
     fn from(op: ProgressOperation) -> Self {
         // probe-rs 0.31's `ProgressOperation` is exhaustive over
@@ -202,7 +235,7 @@ impl From<ProgressOperation> for SwdOperation {
 ///
 /// Use [`flash_with_progress`] to receive sector-by-sector
 /// status updates; this wrapper just discards them.
-pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
+pub fn flash(request: &SwdFlashRequest) -> Result<SwdFlashReport, SwdError> {
     flash_with_progress(request, |_| {})
 }
 
@@ -210,7 +243,10 @@ pub fn flash(request: &SwdFlashRequest) -> Result<(), SwdError> {
 /// transition and progress tick that probe-rs surfaces. The
 /// closure runs inside probe-rs's flashing loop; keep it cheap
 /// (push onto an `mpsc`, increment a counter — don't do I/O).
-pub fn flash_with_progress<F>(request: &SwdFlashRequest, mut on_progress: F) -> Result<(), SwdError>
+pub fn flash_with_progress<F>(
+    request: &SwdFlashRequest,
+    mut on_progress: F,
+) -> Result<SwdFlashReport, SwdError>
 where
     F: FnMut(SwdProgress),
 {
@@ -227,6 +263,34 @@ where
             path: request.artifact_path.clone(),
         })?
         .to_ascii_lowercase();
+
+    // Compute a fingerprint of the source bytes up front. The CRC
+    // we surface to the operator is *of the artifact file* — but
+    // because probe-rs's verify (default-on) reads back the flash
+    // and byte-compares against those exact bytes, a successful
+    // flash means the same CRC is sitting on the chip. Operators
+    // can record this in bench notes and reconcile against another
+    // ECU's CRC to confirm "same binary, same chip state."
+    let artifact_bytes = std::fs::read(&request.artifact_path).map_err(|e| {
+        SwdError::ProbeRs(format!("read artifact {:?}: {e}", request.artifact_path))
+    })?;
+    let artifact_crc32 = crate::firmware::crc32(&artifact_bytes);
+    let artifact_size = artifact_bytes.len() as u64;
+    drop(artifact_bytes); // free RAM before the flash op runs
+
+    // Operators sometimes pass `--no-verify` for bench-loop speed.
+    // It's an intentional foot-gun for the SWD path because a
+    // silent bit-error there ships a half-corrupt bootloader.
+    // Log loudly at the start so it ends up in the operator's
+    // session transcript without needing trace-level logs.
+    if !request.verify {
+        warn!(
+            "verify=false — probe-rs will skip the post-write \
+             readback. A silent bit-error here will not be caught \
+             until the chip misbehaves on the bus. \
+             Re-run without --no-verify for production work."
+        );
+    }
 
     // probe-rs's `Format` variants take per-format options. We pass
     // `Default::default()` everywhere — the defaults match what
@@ -290,9 +354,19 @@ where
     );
 
     // ---- Open + attach ------------------------------------------------
-    let probe = probe_info
+    let mut probe = probe_info
         .open()
         .map_err(|e| SwdError::ProbeRs(format!("open probe: {e}")))?;
+
+    // Sample VTref BEFORE `attach()` consumes the Probe by value.
+    // A low / missing voltage here is one of the silent-failure
+    // modes the issue tracker flagged — a brown-out mid-write
+    // can corrupt flash without throwing a probe-rs error.
+    // `target_voltage()` returns `Ok(None)` on probes without a
+    // VTref divider (some bare ST-LINK dev boards); we accept that
+    // as "unknown" rather than fail the flash over it.
+    let target_voltage_v = probe.get_target_voltage().ok().flatten();
+    info!(?target_voltage_v, "probe target VTref voltage");
 
     info!(chip = request.chip, "attaching to target");
     let mut session: Session = probe
@@ -361,7 +435,18 @@ where
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    Ok(())
+    info!(
+        crc32 = format!("0x{artifact_crc32:08X}"),
+        size_bytes = artifact_size,
+        verified = request.verify,
+        "swd flash complete",
+    );
+    Ok(SwdFlashReport {
+        verified: request.verify,
+        crc32: artifact_crc32,
+        size_bytes: artifact_size,
+        target_voltage_v,
+    })
 }
 
 /// Inputs to [`erase_chip`] — the same probe + chip selection as
