@@ -82,15 +82,17 @@ pub enum ObAction {
 pub enum NvmAction {
     /// Read a parameter by key
     Read {
-        /// 16-bit key, hex (`0x1000`) or decimal
-        #[arg(value_parser = parse_hex_u16)]
+        /// 16-bit key. Accepts hex (`0x0001`), decimal (`1`), or a
+        /// friendly alias (`node-id`). See `parse_nvm_key`.
+        #[arg(value_parser = parse_nvm_key)]
         key: u16,
     },
 
     /// Write a parameter
     Write {
-        /// 16-bit key, hex (`0x1000`) or decimal
-        #[arg(value_parser = parse_hex_u16)]
+        /// 16-bit key. Accepts hex (`0x0001`), decimal (`1`), or a
+        /// friendly alias (`node-id`). See `parse_nvm_key`.
+        #[arg(value_parser = parse_nvm_key)]
         key: u16,
 
         /// Value, either a quoted UTF-8 string or `0x`-prefixed hex blob.
@@ -109,8 +111,9 @@ pub enum NvmAction {
 
     /// Tombstone a parameter (value-length = 0)
     Erase {
-        /// 16-bit key, hex (`0x1000`) or decimal
-        #[arg(value_parser = parse_hex_u16)]
+        /// 16-bit key. Accepts hex (`0x0001`), decimal (`1`), or a
+        /// friendly alias (`node-id`). See `parse_nvm_key`.
+        #[arg(value_parser = parse_nvm_key)]
         key: u16,
     },
 
@@ -626,6 +629,43 @@ fn parse_nvm_value(raw: &str) -> Result<Vec<u8>> {
     }
 }
 
+/// Parse an NVM key argument. Accepts either a hex/decimal literal
+/// (the existing surface) or a friendly name from [`NVM_KEY_ALIASES`].
+///
+/// Bench-friendly: `cf config nvm write node-id 0x02` is the
+/// motivating use case from
+/// [gh #231](https://github.com/isc-fs/can-flasher/issues/231) task 2.
+/// The registry is intentionally tiny — one entry today (`node-id`
+/// → `BL_NVM_KEY_NODE_ID = 0x0001`); grows only when the BL adds
+/// more well-known keys and the team agrees on the rendered name.
+///
+/// Resolution order:
+///
+///  1. **Alias hit** (case-sensitive, dashed): use the mapped key.
+///  2. **Hex / decimal**: fall through to [`parse_hex_u16`].
+fn parse_nvm_key(raw: &str) -> Result<u16, String> {
+    let trimmed = raw.trim();
+    for (alias, key) in NVM_KEY_ALIASES {
+        if *alias == trimmed {
+            return Ok(*key);
+        }
+    }
+    parse_hex_u16(trimmed)
+}
+
+/// Well-known NVM key aliases. The host doesn't own the key
+/// definitions — they live in the bootloader's `bl_nvm.h`. We
+/// hard-code the ones we want operator-friendly access to here
+/// and trust the BL audit / release notes to flag drift.
+///
+/// Keep entries kebab-case for keyboard-friendly typing (no shift
+/// key required, mirrors `--node-id` global flag styling).
+const NVM_KEY_ALIASES: &[(&str, u16)] = &[
+    // BL_NVM_KEY_NODE_ID — runtime override for the bootloader's
+    // 4-bit node id, resolved at BL start (stm32-can-bootloader@e7510f0).
+    ("node-id", 0x0001),
+];
+
 fn parse_hex_u16(raw: &str) -> Result<u16, String> {
     let trimmed = raw.trim();
     let (body, radix) = if let Some(rest) = trimmed
@@ -656,6 +696,43 @@ fn parse_hex_u32(raw: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
     use crate::protocol::records::{ObStatus, OB_APPLY_TOKEN};
+
+    #[test]
+    fn parse_nvm_key_resolves_node_id_alias() {
+        // The canonical bench shorthand from gh #231 task 2.
+        assert_eq!(parse_nvm_key("node-id").unwrap(), 0x0001);
+    }
+
+    #[test]
+    fn parse_nvm_key_still_accepts_hex_and_decimal() {
+        // Aliases are additive — every existing operator workflow
+        // (hex literal, decimal) still resolves.
+        assert_eq!(parse_nvm_key("0x0001").unwrap(), 0x0001);
+        assert_eq!(parse_nvm_key("0X1000").unwrap(), 0x1000);
+        assert_eq!(parse_nvm_key("1").unwrap(), 1);
+        assert_eq!(parse_nvm_key("65535").unwrap(), 0xFFFF);
+    }
+
+    #[test]
+    fn parse_nvm_key_rejects_unknown_string() {
+        // A typo like "node_id" (underscore not dash) should NOT
+        // silently parse as something else — surface the error so
+        // the operator sees their typo, not a mystery NACK.
+        assert!(parse_nvm_key("node_id").is_err());
+        assert!(parse_nvm_key("bitrate").is_err());
+        assert!(parse_nvm_key("not-a-key").is_err());
+    }
+
+    #[test]
+    fn nvm_key_aliases_are_unique() {
+        // Defence against future entries colliding on the same key
+        // or same alias — both would silently confuse operators.
+        for (i, (a, _)) in NVM_KEY_ALIASES.iter().enumerate() {
+            for (b, _) in &NVM_KEY_ALIASES[i + 1..] {
+                assert_ne!(a, b, "alias {a:?} listed twice");
+            }
+        }
+    }
 
     #[test]
     fn parse_nvm_value_accepts_plain_string() {
