@@ -76,7 +76,10 @@ pub async fn run(args: ProvisionArgs, global: &GlobalFlags) -> Result<()> {
         // are easier to catch when we say it out loud.
         match source {
             RoleSource::Explicit => {
-                println!("Provisioning role {:?} → node-id 0x{node_id:02X}", args.role);
+                println!(
+                    "Provisioning role {:?} → node-id 0x{node_id:02X}",
+                    args.role
+                );
             }
             RoleSource::FromPath(role_name) => {
                 println!(
@@ -110,11 +113,7 @@ const BL_NVM_KEY_NODE_ID: u16 = 0x0001;
 /// Names are kebab-friendly (lowercase, ASCII letters / digits)
 /// because operators type them at the shell. `resolve_role`
 /// compares case-insensitively so `AMS` and `ams` both resolve.
-const ROLES: &[(&str, u8)] = &[
-    ("ecu", 0x01),
-    ("ams", 0x02),
-    ("udv", 0x03),
-];
+const ROLES: &[(&str, u8)] = &[("ecu", 0x01), ("ams", 0x02), ("udv", 0x03)];
 
 /// Firmware-artifact extensions recognised when inferring a role
 /// from a path. Matches `swd::flash`'s supported formats.
@@ -192,7 +191,7 @@ fn path_stem(raw: &str) -> Option<&str> {
     // we're parsing a string the operator typed, not walking the
     // filesystem).
     let basename = raw
-        .rsplit(|c: char| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .filter(|s| !s.is_empty())?;
 
