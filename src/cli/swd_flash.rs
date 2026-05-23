@@ -81,6 +81,16 @@ pub struct SwdFlashArgs {
     /// letting it run.
     #[arg(long, default_value_t = false)]
     pub no_reset: bool,
+
+    /// Use sector-erase instead of the new chip-erase default
+    /// (#247). Sector-erase saves ~3 s but reproduced silent
+    /// flash corruption on STM32H7 even with verify enabled —
+    /// you almost certainly want chip-erase (the default). Pass
+    /// `--sector-erase` only when you have a specific reason
+    /// (e.g. preserving NVM in adjacent sectors) and have read
+    /// the issue.
+    #[arg(long, default_value_t = false)]
+    pub sector_erase: bool,
 }
 
 pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
@@ -103,6 +113,7 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
     request.base_addr = base_addr;
     request.verify = !args.no_verify;
     request.reset_after = !args.no_reset;
+    request.sector_erase_only = args.sector_erase;
 
     // probe-rs is blocking; run on the blocking pool so the tokio
     // runtime stays responsive (matters for future Studio / VS
