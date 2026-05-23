@@ -19,6 +19,14 @@ export interface SwdFlashArgs {
     base: string | null;
     verify: boolean;
     resetAfter: boolean;
+    /**
+     * When `true`, fall back to sector-erase. Default `false`
+     * (chip-erase) after #247 — sector-erase reproduced silent
+     * flash corruption on STM32H7 even with verify enabled. The
+     * backend defaults this when the field is omitted, so most
+     * callers can leave it out.
+     */
+    sectorEraseOnly?: boolean;
 }
 
 export function defaultSwdFlashArgs(): SwdFlashArgs {

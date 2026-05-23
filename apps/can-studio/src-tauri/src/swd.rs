@@ -57,6 +57,13 @@ pub struct SwdFlashArgs {
     pub base: Option<String>,
     pub verify: bool,
     pub reset_after: bool,
+    /// When `true`, fall back to sector-erase. Default `false`
+    /// (chip-erase) after #247 — sector-erase reproduced silent
+    /// flash corruption on STM32H7 even with verify enabled.
+    /// `Option` so older frontends that don't send the field
+    /// inherit the safe default.
+    #[serde(default)]
+    pub sector_erase_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +217,11 @@ pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<SwdFlashRep
     request.base_addr = base_addr;
     request.verify = args.verify;
     request.reset_after = args.reset_after;
+    // Default to chip-erase (`sector_erase_only=false`) when the
+    // frontend doesn't pin a value. Matches the post-#247
+    // library default and keeps older UI builds on the safe path
+    // even before the toggle gets wired in.
+    request.sector_erase_only = args.sector_erase_only.unwrap_or(false);
 
     // probe-rs's progress closure runs on the blocking thread we're
     // about to spawn. Send the events back to the async runtime via
