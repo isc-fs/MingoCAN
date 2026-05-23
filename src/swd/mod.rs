@@ -51,9 +51,9 @@ use probe_rs::flashing::{
     download_file_with_options, erase_all, DownloadOptions, FlashProgress, Format, ProgressEvent,
     ProgressOperation,
 };
-use probe_rs::MemoryInterface;
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::DebugProbeInfo;
+use probe_rs::MemoryInterface;
 use probe_rs::{Permissions, Session};
 use thiserror::Error;
 use tracing::{info, warn};
