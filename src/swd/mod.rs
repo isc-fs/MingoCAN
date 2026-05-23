@@ -84,14 +84,30 @@ pub struct SwdFlashRequest {
     /// (the file carries its own addresses); for raw `.bin`
     /// inputs the address is required.
     pub base_addr: u64,
-    /// Verify the readback after write. The probe-rs default is
-    /// `true`; we expose the toggle so a power-user can skip the
-    /// extra ~1s of read traffic during bench tests.
+    /// Verify the readback after write. When `true` we do BOTH
+    /// probe-rs's own verify pass (during download) AND a
+    /// host-side readback of chip flash that re-CRCs the bytes
+    /// independently. The host-side pass is the authoritative
+    /// one for [#247](https://github.com/isc-fs/can-flasher/issues/247)
+    /// — probe-rs's verify trusted bytes the flash algorithm had
+    /// just written, which hid silent corruption on H7. The
+    /// host-side readback talks to flash via the Cortex-M AHB so
+    /// it can't be fooled by the flash algorithm's view.
     pub verify: bool,
     /// Issue a reset (with `Sysresetreq`) after the flash
     /// completes. The bootloader needs a reset to start running
     /// from its newly-written address, so the default is `true`.
     pub reset_after: bool,
+    /// Erase only the sectors that contain bytes from the
+    /// artifact (`true`), instead of the whole chip flash bank
+    /// (`false`, the new default after #247). Sector-erase is
+    /// ~3 s faster but the corruption pattern in #247 was
+    /// reproducibly silent on sector-erase + write; chip-erase
+    /// is the canonical "start clean" path and is what
+    /// STM32CubeProgrammer does by default for the same `.elf`.
+    /// Option bytes live in their own bank on STM32H7, so
+    /// chip-erase of user flash doesn't touch them.
+    pub sector_erase_only: bool,
 }
 
 impl SwdFlashRequest {
@@ -106,6 +122,7 @@ impl SwdFlashRequest {
             base_addr: DEFAULT_BASE_ADDR,
             verify: true,
             reset_after: true,
+            sector_erase_only: false,
         }
     }
 }
@@ -129,6 +146,19 @@ pub enum SwdError {
     ArtifactBadExtension { ext: String },
     #[error("probe-rs: {0}")]
     ProbeRs(String),
+    #[error(
+        "host-side flash verify FAILED: chip readback CRC32 0x{got:08X} != source CRC32 0x{want:08X} \
+         (verified {bytes} bytes from 0x{base:08X}). \
+         The flash write looked successful but the bytes on chip don't match the source — this is \
+         the silent-corruption mode tracked in #247. Re-flash with STM32CubeProgrammer to recover, \
+         and treat this chip as not-burned until you do."
+    )]
+    VerifyMismatch {
+        want: u32,
+        got: u32,
+        base: u64,
+        bytes: usize,
+    },
 }
 
 /// Enumerate every attached debug probe. Useful for an operator
@@ -264,31 +294,35 @@ where
         })?
         .to_ascii_lowercase();
 
-    // Compute a fingerprint of the source bytes up front. The CRC
-    // we surface to the operator is *of the artifact file* — but
-    // because probe-rs's verify (default-on) reads back the flash
-    // and byte-compares against those exact bytes, a successful
-    // flash means the same CRC is sitting on the chip. Operators
-    // can record this in bench notes and reconcile against another
-    // ECU's CRC to confirm "same binary, same chip state."
-    let artifact_bytes = std::fs::read(&request.artifact_path).map_err(|e| {
-        SwdError::ProbeRs(format!("read artifact {:?}: {e}", request.artifact_path))
+    // Parse the artifact into a flat (base_addr, data) image. This
+    // is the SAME view of "what bytes will land on chip" that the
+    // host-side verify reads back from flash, so a CRC over
+    // `image.data` is the authoritative fingerprint — comparable
+    // across operators and across boards. (v2.4.3 mistakenly
+    // CRC'd the raw file bytes, which for `.elf` includes the
+    // ELF headers / debug info and has nothing to do with what
+    // gets flashed. #247.)
+    let image = crate::firmware::loader::load(&request.artifact_path, None).map_err(|e| {
+        SwdError::ProbeRs(format!(
+            "parse artifact {:?}: {e}",
+            request.artifact_path
+        ))
     })?;
-    let artifact_crc32 = crate::firmware::crc32(&artifact_bytes);
-    let artifact_size = artifact_bytes.len() as u64;
-    drop(artifact_bytes); // free RAM before the flash op runs
+    let source_crc32 = crate::firmware::crc32(&image.data);
+    let image_base = u64::from(image.base_addr);
+    let image_size = image.data.len();
 
     // Operators sometimes pass `--no-verify` for bench-loop speed.
-    // It's an intentional foot-gun for the SWD path because a
-    // silent bit-error there ships a half-corrupt bootloader.
-    // Log loudly at the start so it ends up in the operator's
-    // session transcript without needing trace-level logs.
+    // After #247 we treat it as a much harder foot-gun: probe-rs's
+    // internal verify alone wasn't sufficient (it returned OK on
+    // corrupt flash), and skipping the host-side readback removes
+    // the only remaining authoritative check. Surface it loudly.
     if !request.verify {
         warn!(
-            "verify=false — probe-rs will skip the post-write \
-             readback. A silent bit-error here will not be caught \
-             until the chip misbehaves on the bus. \
-             Re-run without --no-verify for production work."
+            "verify=false — skipping host-side flash readback. \
+             Silent corruption (see issue #247) will not be caught \
+             until the chip misbehaves on the bus. Re-run without \
+             --no-verify before declaring the chip burned."
         );
     }
 
@@ -375,8 +409,19 @@ where
 
     // ---- Download ----------------------------------------------------
     let mut options = DownloadOptions::default();
+    // probe-rs's verify is kept on (cheap, occasionally catches
+    // things). The host-side readback below is the authoritative
+    // check — both off only when the operator explicitly passes
+    // --no-verify.
     options.verify = request.verify;
-    options.do_chip_erase = false; // sector-erase is faster; chip-erase risks losing OBs
+    // Default to chip-erase (sector_erase_only=false) after #247.
+    // Sector-erase on STM32H7 reproduced silent flash corruption
+    // even though probe-rs's verify passed; chip-erase + write
+    // matches what STM32CubeProgrammer does for the same artifact
+    // and produces a working BL every time. Option bytes live in
+    // their own bank on H7 so chip-erase of user flash leaves
+    // them alone.
+    options.do_chip_erase = !request.sector_erase_only;
 
     // Funnel probe-rs's progress events into the caller's closure.
     // The closure is shared between this and probe-rs via the
@@ -421,6 +466,49 @@ where
     download_file_with_options(&mut session, &request.artifact_path, format, options)
         .map_err(|e| SwdError::ProbeRs(format!("download_file: {e}")))?;
 
+    // ---- Host-side flash readback (#247 safety net) ------------------
+    //
+    // probe-rs's `verify=true` on its own returned OK on corrupt
+    // flash in #247: the flash algorithm computes a CRC of bytes
+    // it had just written, so any bug in that algorithm's view of
+    // flash (wrong word size, missing wait state, stale cache) is
+    // invisible to it. We do a second pass here: read the bytes
+    // back from chip flash via the Cortex-M AHB and CRC them
+    // independently. If those CRCs disagree, the write was bad
+    // regardless of what probe-rs's verify said.
+    //
+    // Skip only when the operator explicitly opted out with
+    // verify=false; the no-verify warning above already told them
+    // the safety net is off.
+    if request.verify {
+        info!(
+            base = format!("0x{image_base:08X}"),
+            size_bytes = image_size,
+            "reading flash back over SWD for host-side verify",
+        );
+        let mut readback = vec![0u8; image_size];
+        {
+            let mut core = session
+                .core(0)
+                .map_err(|e| SwdError::ProbeRs(format!("get core for readback: {e}")))?;
+            core.read(image_base, &mut readback)
+                .map_err(|e| SwdError::ProbeRs(format!("read flash readback: {e}")))?;
+        }
+        let readback_crc32 = crate::firmware::crc32(&readback);
+        if readback_crc32 != source_crc32 {
+            return Err(SwdError::VerifyMismatch {
+                want: source_crc32,
+                got: readback_crc32,
+                base: image_base,
+                bytes: image_size,
+            });
+        }
+        info!(
+            crc32 = format!("0x{readback_crc32:08X}"),
+            "host-side verify passed",
+        );
+    }
+
     // ---- Reset --------------------------------------------------------
     if request.reset_after {
         info!("resetting target");
@@ -436,15 +524,15 @@ where
     }
 
     info!(
-        crc32 = format!("0x{artifact_crc32:08X}"),
-        size_bytes = artifact_size,
+        crc32 = format!("0x{source_crc32:08X}"),
+        size_bytes = image_size,
         verified = request.verify,
         "swd flash complete",
     );
     Ok(SwdFlashReport {
         verified: request.verify,
-        crc32: artifact_crc32,
-        size_bytes: artifact_size,
+        crc32: source_crc32,
+        size_bytes: image_size as u64,
         target_voltage_v,
     })
 }
