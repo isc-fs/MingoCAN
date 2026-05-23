@@ -227,6 +227,19 @@ number, then resets the chip so the new node-id takes effect.
 
 Roles are case-insensitive (`AMS`, `ams`, `Ams` all work).
 
+The role argument also accepts a firmware-artifact path —
+useful when you already have `ams.elf` in front of you and don't
+want to retype the role:
+
+```bash
+# Filename-inferred role (matches `ams.elf`, `build/AMS.HEX`,
+# `../firmware/uDV.bin`, etc. — case-insensitive on both stem
+# and extension; only `.elf` / `.hex` / `.bin` are treated as
+# firmware-shaped).
+can-flasher --interface slcan --channel /dev/ttyACM0 \
+  provision build/ams.elf
+```
+
 ```bash
 # Freshly-flashed board (no node-id yet) — talk to it on broadcast
 # (0xF, the default) and provision it as the AMS.
