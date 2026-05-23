@@ -21,6 +21,11 @@
         type FlashRequest,
         type JsonReport,
     } from './flash';
+    import {
+        inferRoleFromArtifact,
+        provisionNodeId,
+        type Role,
+    } from './provision';
     import { settings } from './settings.svelte';
 
     // Static fallback templates — shown alongside any CMake presets
@@ -102,6 +107,24 @@
     // out. null means "no run yet" or "currently running".
     let lastOutcome = $state<'success' | 'failure' | null>(null);
     let copyState = $state<'idle' | 'copied'>('idle');
+
+    // ---- Provision-after-flash ---------------------------------
+    // When the artifact filename matches a role (`ams.elf` /
+    // `ecu.hex` / `udv.bin` etc.) we offer to write the matching
+    // node-id NVM key + reset the board after a successful flash.
+    // The toggle is operator-controlled — auto-checked when a
+    // role gets detected so the common case is one-click, but
+    // never magically fires without the operator's consent.
+    const detectedRole = $derived<Role | null>(
+        inferRoleFromArtifact(settings.flash.artifactPath.trim()),
+    );
+    let provisionAfterFlash = $state<boolean>(true);
+    let provisionState = $state<
+        | { kind: 'idle' }
+        | { kind: 'running' }
+        | { kind: 'ok'; role: string }
+        | { kind: 'error'; message: string }
+    >({ kind: 'idle' });
 
     // CMake build presets discovered from <cwd>/CMakePresets.json,
     // refreshed whenever the build cwd changes. Empty when there's
@@ -318,6 +341,42 @@
             result = report;
             progressMessage = `done in ${report.duration_ms} ms`;
             lastOutcome = 'success';
+
+            // Provision-after-flash hook. Skipped when the operator
+            // unchecked the box, when there's no detectable role
+            // from the artifact name, or when the adapter isn't
+            // backed by an interface we can drive. Failures here
+            // don't roll back the flash — surface the error and
+            // let the operator re-run `provision` standalone if
+            // they need to retry.
+            const role = detectedRole;
+            if (provisionAfterFlash && role !== null) {
+                provisionState = { kind: 'running' };
+                try {
+                    await provisionNodeId({
+                        role: role.name,
+                        interface: settings.adapter.interface!,
+                        channel:
+                            settings.adapter.channel.length > 0
+                                ? settings.adapter.channel
+                                : null,
+                        bitrate: settings.adapter.bitrate,
+                        nodeId: settings.adapter.nodeId,
+                        timeoutMs: settings.adapter.timeoutMs,
+                    });
+                    provisionState = { kind: 'ok', role: role.name };
+                } catch (provErr) {
+                    provisionState = {
+                        kind: 'error',
+                        message:
+                            provErr instanceof Error
+                                ? provErr.message
+                                : String(provErr),
+                    };
+                }
+            } else {
+                provisionState = { kind: 'idle' };
+            }
         } catch (err) {
             error = err instanceof Error ? err.message : String(err);
             progressMessage = 'failed';
@@ -679,6 +738,32 @@
             <label><input type="checkbox" bind:checked={settings.flash.finalCommit} /> Final CMD_FLASH_VERIFY commit</label>
             <label><input type="checkbox" bind:checked={settings.flash.jump} /> Jump to app after flash</label>
             <label><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
+            <!--
+                Provision-after-flash auto-detects the role from
+                the artifact's basename. We always render the
+                checkbox so its presence isn't a surprise, but
+                disable + dim it when no role is recoverable from
+                the filename. Tooltip explains the requirement.
+            -->
+            <label
+                class:provision-disabled={detectedRole === null}
+                title={detectedRole === null
+                    ? 'Artifact filename must match a role (ams.elf / ecu.hex / udv.bin) to enable.'
+                    : `After flash: write node-id 0x${detectedRole.nodeId
+                          .toString(16)
+                          .padStart(2, '0')} to NVM and reset.`}
+            >
+                <input
+                    type="checkbox"
+                    bind:checked={provisionAfterFlash}
+                    disabled={detectedRole === null}
+                />
+                Provision as
+                <strong>
+                    {detectedRole === null ? '—' : detectedRole.name.toUpperCase()}
+                </strong>
+                after flash
+            </label>
         </div>
     </div>
 
@@ -776,6 +861,30 @@
             {result.sectors_skipped.length} skipped,
             {result.duration_ms} ms.
             CRC {result.crc32}, {result.size} bytes.
+        </div>
+    {/if}
+
+    <!--
+        Provision-after-flash status. Lives next to the flash
+        result so the operator can read the whole one-click
+        outcome in one glance: "flashed ✓, provisioned ✓".
+        Suppressed in `idle` (no role detected or operator
+        unchecked the box) — no noise in that case.
+    -->
+    {#if provisionState.kind === 'running'}
+        <div class="result provisioning">
+            <strong>Provisioning…</strong>
+            writing node-id NVM key, resetting the bootloader.
+        </div>
+    {:else if provisionState.kind === 'ok'}
+        <div class="result success">
+            <strong>Provisioned as {provisionState.role.toUpperCase()}.</strong>
+            Run <code>discover</code> to confirm the new node-id.
+        </div>
+    {:else if provisionState.kind === 'error'}
+        <div class="result error">
+            <strong>Provision failed:</strong>
+            {provisionState.message}
         </div>
     {/if}
 
@@ -962,6 +1071,23 @@
         display: flex;
         gap: 6px;
         align-items: center;
+    }
+    .opts label.provision-disabled {
+        opacity: 0.45;
+        cursor: help;
+    }
+    .result.provisioning {
+        background: var(--surface);
+        border-color: var(--border);
+    }
+    .result.success {
+        background: rgba(6, 214, 160, 0.06);
+        border-color: rgba(6, 214, 160, 0.4);
+    }
+    .result.error {
+        background: rgba(255, 115, 115, 0.08);
+        border-color: var(--error);
+        color: var(--error);
     }
     .actions { display: flex; gap: 8px; }
     button {
