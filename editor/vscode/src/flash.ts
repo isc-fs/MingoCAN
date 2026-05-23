@@ -329,6 +329,13 @@ async function runFlashStep(
     if (result.exitCode === 0) {
         const report = parseFlashReport(result.stdout);
         announceSuccess(report, artifactPath);
+        // Look at the artifact filename — if it matches a known
+        // role (`ams.elf`, `build/ECU.HEX`, etc.) offer to write the
+        // node-id NVM key + reset, completing the
+        // commission-this-board flow in one toast. Falls through to
+        // a no-op when the filename doesn't match — keeps routine
+        // flashes (e.g. `firmware.elf`) silent.
+        await maybeOfferProvision(artifactPath, cfg, cwd);
         return;
     }
     announceFailure(result.exitCode, result.stderr);
@@ -365,6 +372,92 @@ function progressMessage(ev: FlashEvent): string {
             return 'committing';
         case 'done':
             return `done in ${ev.duration_ms} ms`;
+    }
+}
+
+// ---- Provision-after-flash hook ----
+//
+// Mirrors the role registry in `src/cli/provision.rs`. Kept
+// duplicated rather than scraped from the CLI's --help output so
+// the extension can detect the role offline and the toast wording
+// is something we can iterate on without round-tripping a release.
+const PROVISION_ROLES: ReadonlyArray<{ name: string; nodeId: number }> = [
+    { name: 'ecu', nodeId: 0x01 },
+    { name: 'ams', nodeId: 0x02 },
+    { name: 'udv', nodeId: 0x03 },
+];
+const FIRMWARE_EXTS: ReadonlyArray<string> = ['elf', 'hex', 'bin'];
+
+/**
+ * If `artifactPath`'s basename stem matches a role from
+ * `PROVISION_ROLES`, ask the operator whether to run
+ * `can-flasher provision <role>` (which writes the node-id NVM
+ * key + resets the bootloader). Returns silently when the filename
+ * doesn't match a role — routine flashes don't get prompted.
+ */
+async function maybeOfferProvision(
+    artifactPath: string,
+    cfg: Config,
+    cwd: string,
+): Promise<void> {
+    const role = inferRoleFromArtifact(artifactPath);
+    if (role === null) {
+        return;
+    }
+    const out = getOutputChannel();
+    const accept = `Provision as ${role.name.toUpperCase()}`;
+    const skip = 'Skip';
+    const choice = await vscode.window.showInformationMessage(
+        `ISC MingoCAN: \`${path.basename(artifactPath)}\` looks like the **${role.name.toUpperCase()}** firmware. ` +
+            `Also write node-id 0x${role.nodeId.toString(16).padStart(2, '0')} to NVM and reset the device?`,
+        accept,
+        skip,
+    );
+    if (choice !== accept) {
+        out.appendLine(`[info] provision-after-flash skipped for role ${role.name}`);
+        return;
+    }
+    await runProvision(role.name, cfg, cwd);
+}
+
+/** Extract a role from the artifact path's basename stem.
+ *  Mirrors `cli/provision.rs::resolve_role_or_path`'s rules for
+ *  inferred-from-path inputs (firmware-shaped extensions only,
+ *  case-insensitive). */
+function inferRoleFromArtifact(
+    artifactPath: string,
+): { name: string; nodeId: number } | null {
+    const base = path.basename(artifactPath);
+    const lastDot = base.lastIndexOf('.');
+    if (lastDot <= 0) return null; // no extension or hidden-dotfile
+    const stem = base.slice(0, lastDot);
+    const ext = base.slice(lastDot + 1).toLowerCase();
+    if (!FIRMWARE_EXTS.includes(ext)) return null;
+    const lowered = stem.toLowerCase();
+    return PROVISION_ROLES.find((r) => r.name === lowered) ?? null;
+}
+
+/** Shell out to `can-flasher provision <role>` with the current
+ *  global flags. Streams stdout/stderr to the output channel and
+ *  surfaces a toast on success / failure. */
+async function runProvision(role: string, cfg: Config, cwd: string): Promise<void> {
+    const out = getOutputChannel();
+    out.appendLine('');
+    out.appendLine(`---- provision ${new Date().toISOString()} ----`);
+    const argv = [...buildGlobalArgv(cfg), 'provision', role];
+    const result = await spawnCommand(cfg.canFlasherPath, argv, {
+        cwd,
+        onStdoutLine: (line) => out.appendLine(line),
+        onStderrLine: (line) => out.appendLine(line),
+    });
+    if (result.exitCode === 0) {
+        void vscode.window.showInformationMessage(
+            `ISC MingoCAN: provisioned as ${role.toUpperCase()}. Run \`discover\` to confirm the new node-id.`,
+        );
+    } else {
+        void vscode.window.showErrorMessage(
+            `ISC MingoCAN: provision ${role} failed (exit ${result.exitCode ?? 'killed'}). See output channel.`,
+        );
     }
 }
 
