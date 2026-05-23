@@ -198,6 +198,13 @@ can-flasher --interface slcan --channel /dev/ttyACM0 config nvm erase  0x0002
 can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0x3 \
   config nvm write 0x0001 0x02 --reset
 
+# Friendly aliases work in any position a key is accepted (read /
+# write / erase). Same write as above, less to remember:
+can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0x3 \
+  config nvm write node-id 0x02 --reset
+# Current registry: `node-id` → 0x0001. New entries land alongside
+# bootloader additions.
+
 # bootloader 0.2+ — wipe the entire NVM sector (every key + metadata)
 can-flasher --interface slcan --channel /dev/ttyACM0 config nvm format --yes
 ```
