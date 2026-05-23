@@ -124,17 +124,55 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
 
     drive_progress_bar(rx);
 
-    flash_handle
+    let report = flash_handle
         .await
         .map_err(|e| anyhow!("swd-flash task join: {e}"))?
         .map_err(|e| exit_err(ExitCodeHint::FlashError, anyhow!("{e}")))?;
 
+    // Summary line + verifiable fingerprint. Format chosen so it's
+    // easy to grep / paste into a bench log:
+    //   ✓ flashed bootloader.elf to STM32H733ZGTx via SWD
+    //     ↳ 64.0 KB · CRC32=0xDEADBEEF · verified ✓ · VTref=3.27 V
     println!(
         "✓ flashed {} to chip {} via SWD",
         request_for_msg.artifact_path.display(),
         request_for_msg.chip
     );
+    println!("    ↳ {}", format_report_line(&report));
+    if !report.verified {
+        eprintln!(
+            "warning: --no-verify was set; probe-rs did not read back the flash. \
+             A silent bit-error here can ship a half-corrupt bootloader. \
+             Re-run without --no-verify before declaring the chip good."
+        );
+    }
     Ok(())
+}
+
+fn format_report_line(report: &swd::SwdFlashReport) -> String {
+    let mut parts = vec![
+        format_size(report.size_bytes),
+        format!("CRC32=0x{:08X}", report.crc32),
+        if report.verified {
+            "verified ✓".to_string()
+        } else {
+            "verified ✗ (--no-verify)".to_string()
+        },
+    ];
+    if let Some(v) = report.target_voltage_v {
+        parts.push(format!("VTref={v:.2} V"));
+    }
+    parts.join(" · ")
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.2} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.1} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Pick the actual on-disk artefact for the flash request. Either
