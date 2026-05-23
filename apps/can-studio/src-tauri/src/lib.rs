@@ -14,6 +14,7 @@ mod dbc;
 mod diagnose;
 mod flash;
 mod live_data;
+mod provision;
 mod swd;
 
 use can_flasher::cli::adapters::{collect_report, AdapterReport};
@@ -77,6 +78,7 @@ pub fn run() {
             swd::swd_flash,
             swd::swd_fetch_bootloader,
             swd::swd_erase,
+            provision::provision_node_id,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC MingoCAN Tauri app");
