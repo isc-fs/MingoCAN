@@ -51,6 +51,7 @@ use probe_rs::flashing::{
     download_file_with_options, erase_all, DownloadOptions, FlashProgress, Format, ProgressEvent,
     ProgressOperation,
 };
+use probe_rs::MemoryInterface;
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::DebugProbeInfo;
 use probe_rs::{Permissions, Session};
@@ -303,10 +304,7 @@ where
     // ELF headers / debug info and has nothing to do with what
     // gets flashed. #247.)
     let image = crate::firmware::loader::load(&request.artifact_path, None).map_err(|e| {
-        SwdError::ProbeRs(format!(
-            "parse artifact {:?}: {e}",
-            request.artifact_path
-        ))
+        SwdError::ProbeRs(format!("parse artifact {:?}: {e}", request.artifact_path))
     })?;
     let source_crc32 = crate::firmware::crc32(&image.data);
     let image_base = u64::from(image.base_addr);
