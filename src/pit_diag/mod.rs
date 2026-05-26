@@ -241,6 +241,25 @@ pub const fn is_real_cell_index(cell_idx: u16) -> bool {
     (cell_idx as usize) < AMS_NUM_CELLS
 }
 
+// ---- Compile-time invariants ------------------------------------
+//
+// Belt-and-braces — if anyone tweaks one constant out of sync with
+// the others, these `assert!` calls fail to compile. They live at
+// module scope (not inside `#[cfg(test)]`) because they're not
+// run-time tests — clippy's `assertions_on_constants` rightly
+// flags assertions on fully-const expressions, since they'd
+// silently no-op in release builds. `const _: () = assert!(...)`
+// instead aborts compilation.
+
+const _: () = assert!(AMS_NUM_MODULES * AMS_CELLS_PER_MODULE == AMS_NUM_CELLS);
+const _: () = assert!(AMS_NUM_MODULES * AMS_NTC_PER_MODULE == AMS_NUM_NTCS);
+const _: () = assert!(AMS_CELLV_NUM_FRAMES == (AMS_CELLV_LAST_ID - AMS_CELLV_BASE_ID + 1) as usize);
+const _: () = assert!(AMS_NTC_NUM_FRAMES == (AMS_NTC_LAST_ID - AMS_NTC_BASE_ID + 1) as usize);
+// 24 frames × 4 cells/frame = 96 slots > 95 cells (room for sentinel).
+const _: () = assert!(AMS_CELLV_NUM_FRAMES * 4 > AMS_NUM_CELLS);
+// 25 frames × 8 NTCs/frame = 200 = AMS_NUM_NTCS exactly.
+const _: () = assert!(AMS_NTC_NUM_FRAMES * 8 == AMS_NUM_NTCS);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,11 +307,8 @@ mod tests {
     #[test]
     fn decodes_cell_voltage_mid_stream() {
         // Frame 0x685 (idx 5) carries cells 20..=23.
-        let frame = CanFrame::new(
-            0x685,
-            &[0x0D, 0x48, 0x0D, 0x50, 0x0D, 0x55, 0x0D, 0x60],
-        )
-        .unwrap();
+        let frame =
+            CanFrame::new(0x685, &[0x0D, 0x48, 0x0D, 0x50, 0x0D, 0x55, 0x0D, 0x60]).unwrap();
         let decoded = decode_frame(&frame).unwrap();
         match decoded {
             PitDiagFrame::CellVoltage(c) => {
@@ -332,14 +348,14 @@ mod tests {
         let frame = CanFrame::new(
             0x6A2,
             &[
-                25,         // +25 °C
-                26,         // +26 °C
-                24,         // +24 °C
-                0xFE,       // -2 °C
-                22,         // +22 °C
-                21,         // +21 °C
-                0x80,       // -128 °C (INT8_MIN, sentinel / unwired)
-                19,         // +19 °C
+                25,   // +25 °C
+                26,   // +26 °C
+                24,   // +24 °C
+                0xFE, // -2 °C
+                22,   // +22 °C
+                21,   // +21 °C
+                0x80, // -128 °C (INT8_MIN, sentinel / unwired)
+                19,   // +19 °C
             ],
         )
         .unwrap();
@@ -361,7 +377,11 @@ mod tests {
         let frame = CanFrame::new(0x6C2, &payload).unwrap();
         let decoded = decode_frame(&frame).unwrap();
         match decoded {
-            PitDiagFrame::Diag { id, payload: p, len } => {
+            PitDiagFrame::Diag {
+                id,
+                payload: p,
+                len,
+            } => {
                 assert_eq!(id, 0x6C2);
                 assert_eq!(&p[..], &payload[..]);
                 assert_eq!(len, 8);
@@ -384,26 +404,9 @@ mod tests {
         assert_eq!(decode_frame(&frame), None);
     }
 
-    #[test]
-    fn pack_geometry_constants_are_consistent() {
-        // Belt-and-braces — if anyone tweaks one constant they should
-        // see the assert fire immediately.
-        assert_eq!(
-            AMS_NUM_MODULES * AMS_CELLS_PER_MODULE,
-            AMS_NUM_CELLS
-        );
-        assert_eq!(AMS_NUM_MODULES * AMS_NTC_PER_MODULE, AMS_NUM_NTCS);
-        assert_eq!(
-            AMS_CELLV_NUM_FRAMES,
-            (AMS_CELLV_LAST_ID - AMS_CELLV_BASE_ID + 1) as usize
-        );
-        assert_eq!(
-            AMS_NTC_NUM_FRAMES,
-            (AMS_NTC_LAST_ID - AMS_NTC_BASE_ID + 1) as usize
-        );
-        // 24 frames × 4 cells/frame = 96 slots ≥ 95 cells + 1 sentinel.
-        assert!(AMS_CELLV_NUM_FRAMES * 4 >= AMS_NUM_CELLS + 1);
-        // 25 frames × 8 NTCs/frame = 200 = AMS_NUM_NTCS exactly.
-        assert_eq!(AMS_NTC_NUM_FRAMES * 8, AMS_NUM_NTCS);
-    }
+    // Pack-geometry invariants are now compile-time `const _: () =
+    // assert!(...)` at module scope — see the block above this
+    // `tests` module. Keeping them out of `#[test]` keeps clippy
+    // happy (no `assertions_on_constants` warnings) and turns the
+    // invariant into a build break rather than a silent test pass.
 }

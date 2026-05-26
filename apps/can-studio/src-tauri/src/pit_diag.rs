@@ -135,11 +135,7 @@ pub enum PitDiagEvent {
     /// replaces this with typed variants; for now the raw payload
     /// makes it across so the operator can at least see the frame
     /// arriving in the bus monitor.
-    Diag {
-        id: u16,
-        data: [u8; 8],
-        dlc: u8,
-    },
+    Diag { id: u16, data: [u8; 8], dlc: u8 },
 }
 
 impl PitDiagEvent {
@@ -330,9 +326,7 @@ pub async fn pit_diag_disable(
     // flag set. Best-effort: a failed send still falls through to
     // the task teardown.
     let interface = parse_interface(&request.interface)?;
-    if let Ok(backend) =
-        open_backend(interface, request.channel.as_deref(), request.bitrate)
-    {
+    if let Ok(backend) = open_backend(interface, request.channel.as_deref(), request.bitrate) {
         let _ = backend.send(build_arm_frame(false)).await;
     }
 

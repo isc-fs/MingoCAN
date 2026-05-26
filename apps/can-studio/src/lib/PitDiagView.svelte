@@ -69,7 +69,6 @@
     // even when individual cell values aren't visibly changing.
     let framesThisScan = $state<number>(0);
     let lastScanFrames = $state<number>(0);
-    let lastScanAt = Date.now();
     let scanIntervalId: ReturnType<typeof setInterval> | null = null;
 
     // Derived stats — pack mean + spread (max − min mV). Recomputed
@@ -215,7 +214,6 @@
         scanIntervalId = setInterval(() => {
             lastScanFrames = framesThisScan;
             framesThisScan = 0;
-            lastScanAt = Date.now();
         }, 1000);
     });
 
