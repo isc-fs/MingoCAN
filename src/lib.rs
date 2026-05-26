@@ -14,6 +14,7 @@ pub mod cli;
 pub mod firmware;
 pub mod flash;
 pub mod logging;
+pub mod pit_diag;
 pub mod protocol;
 pub mod session;
 #[cfg(feature = "swd")]
