@@ -1,30 +1,103 @@
-/* ISC MingoCAN — global styles.
-   Dark theme keyed to the same #F2B233 / #1F1F1F palette as the
-   extension icon and the VS Code-extension webview. CSS variables
-   so a future light-theme toggle is a one-place change. */
+/* ISC MingoCAN — global design system.
+   Source of truth for color, spacing, type, radii, shadows.
+   Every view should reach for these tokens before defining its
+   own local CSS. The utility classes below cover ~90 % of common
+   shapes (buttons, cards, fields, pills); view-local styles only
+   handle truly view-specific layouts (cell-V grids, log windows,
+   chart canvases). */
 
 :root {
     color-scheme: dark;
 
-    --bg: #1f1f1f;
+    /* ---- Color tokens ---- */
+
+    /* Surface ramp — darkest bg, then progressively lighter
+       elevation tones. Use --bg for the app shell, --surface for
+       cards/sections, --surface-elev for things lifted above the
+       page (popovers, toasts, the active sidebar row). */
+    --bg: #1a1a1a;
+    --bg-soft: #1f1f1f;
     --surface: #262626;
-    --hover: #2f2f2f;
+    --surface-elev: #2d2d2d;
+    --hover: #303030;
     --border: #383838;
+    --border-strong: #4a4a4a;
     --code-bg: #2d2d2d;
 
+    /* Text ramp — primary, secondary (less emphasised but still
+       readable), muted (helpers, hints). */
     --text: #ececec;
-    --text-muted: #999;
-    --error: #ff7373;
+    --text-secondary: #c0c0c0;
+    --text-muted: #8a8a8a;
 
+    /* Brand accent — the ISC yellow. Plus a soft variant for
+       hover backgrounds + transparent fills, and a strong variant
+       for pressed/active states. */
     --accent: #f2b233;
+    --accent-hover: #f8c150;
+    --accent-soft: rgba(242, 178, 51, 0.12);
+    --accent-strong: #d99c1f;
 
+    /* Semantic colors — each pair (base + soft background) for
+       status pills, badges, alert banners. */
+    --success: #4ade80;
+    --success-soft: rgba(74, 222, 128, 0.12);
+    --warning: #fbbf24;
+    --warning-soft: rgba(251, 191, 36, 0.12);
+    --danger: #ff7373;
+    --danger-soft: rgba(255, 115, 115, 0.12);
+    --info: #60a5fa;
+    --info-soft: rgba(96, 165, 250, 0.12);
+
+    /* Aliases — keep --error working for legacy references. */
+    --error: var(--danger);
+
+    /* ---- Spacing scale ---- */
+    /* 4px rhythm. Use --space-2 (8px) for tight gaps, --space-3
+       (12px) for fields, --space-4 (16px) for sections, --space-6
+       (24px) for page padding. */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-7: 32px;
+    --space-8: 48px;
+
+    /* ---- Radii ---- */
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-pill: 999px;
+
+    /* ---- Shadows ---- */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
+
+    /* ---- Type scale ---- */
+    --text-xs: 0.72rem;
+    --text-sm: 0.82rem;
+    --text-base: 0.9rem;
+    --text-lg: 1rem;
+    --text-xl: 1.15rem;
+    --text-2xl: 1.4rem;
+
+    /* ---- Fonts ---- */
     --font-sans:
-        -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto,
+        -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto,
         'Helvetica Neue', Arial, sans-serif;
     --font-mono:
-        ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas,
-        'Liberation Mono', monospace;
+        ui-monospace, 'JetBrains Mono', 'SF Mono', SFMono-Regular, Menlo, Monaco,
+        Consolas, 'Liberation Mono', monospace;
+
+    /* ---- Motion ---- */
+    --motion-fast: 100ms ease-out;
+    --motion-base: 160ms ease-out;
 }
+
+/* ---- Document reset ---- */
 
 html,
 body {
@@ -42,4 +115,385 @@ body {
 
 #app {
     min-height: 100vh;
+}
+
+/* Scrollbar — subtle, matches the surface tones rather than the
+   stark default macOS overlay. */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: var(--radius-pill);
+    border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--border-strong);
+}
+
+/* Focus rings — visible but not screamingly bright. Keyboard-only
+   so mouse users don't get the outline on click. */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+/* ---- Typography helpers ---- */
+
+.muted {
+    color: var(--text-muted);
+}
+
+.text-secondary {
+    color: var(--text-secondary);
+}
+
+.small {
+    font-size: var(--text-sm);
+}
+
+.mono {
+    font-family: var(--font-mono);
+}
+
+/* ---- Layout primitives ---- */
+
+.stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+.stack-sm {
+    gap: var(--space-2);
+}
+.stack-lg {
+    gap: var(--space-5);
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+.row-spread {
+    justify-content: space-between;
+}
+
+.divider {
+    height: 1px;
+    background: var(--border);
+    border: none;
+    margin: var(--space-4) 0;
+}
+
+/* ---- Buttons ---- */
+
+.btn,
+button.btn {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4);
+    font: inherit;
+    font-size: var(--text-base);
+    cursor: pointer;
+    transition:
+        border-color var(--motion-fast),
+        background var(--motion-fast),
+        color var(--motion-fast);
+}
+.btn:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    background: var(--hover);
+}
+.btn:active:not(:disabled) {
+    background: var(--bg-soft);
+}
+.btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Primary — the accent-coloured CTA. Reserve for the main action
+   in a section (Flash, Burn bootloader, Provision). */
+.btn-primary {
+    background: var(--accent);
+    color: #1a1a1a;
+    border-color: var(--accent);
+    font-weight: 600;
+}
+.btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: #1a1a1a;
+}
+.btn-primary:active:not(:disabled) {
+    background: var(--accent-strong);
+    border-color: var(--accent-strong);
+}
+
+/* Secondary — same shape as .btn base but uses accent text on
+   hover. Useful for "view this" / "switch that" links-as-buttons. */
+.btn-secondary:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* Ghost — transparent background, no border until hover.
+   Inline within text, table rows, list items. */
+.btn-ghost {
+    background: transparent;
+    border-color: transparent;
+}
+.btn-ghost:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: var(--border);
+}
+
+/* Danger — destructive actions (Clear DTCs, Erase chip). Outline
+   in danger color; fills only on hover so accidental clicks don't
+   blend in with the rest of the row. */
+.btn-danger {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+.btn-danger:hover:not(:disabled) {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+/* Compact size — for inline secondary actions next to fields. */
+.btn-sm {
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+}
+
+/* Square icon button — 36px, single glyph. The refresh-pill /
+   adapter-switch chevron pattern. */
+.icon-btn {
+    appearance: none;
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-lg);
+    cursor: pointer;
+    transition:
+        border-color var(--motion-fast),
+        color var(--motion-fast);
+}
+.icon-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.icon-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* ---- Cards ---- */
+
+.card {
+    padding: var(--space-4) var(--space-5);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+}
+
+.card-tight {
+    padding: var(--space-3) var(--space-4);
+}
+
+.card-elev {
+    background: var(--surface-elev);
+    box-shadow: var(--shadow-sm);
+}
+
+/* Card header — title + optional action button on the right. */
+.card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-3);
+}
+.card-header h3 {
+    margin: 0;
+    font-size: var(--text-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+/* ---- Form fields ---- */
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+.field > .label,
+.field > span:first-child {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+.input,
+.field input[type='text'],
+.field input[type='number'],
+.field select,
+.field textarea {
+    appearance: none;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-base);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    transition: border-color var(--motion-fast);
+}
+.input:focus,
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.input:disabled,
+.field input:disabled,
+.field select:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+/* Toggle — labelled checkbox / radio. Used on the SWD options card. */
+.toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    cursor: pointer;
+}
+.toggle input {
+    accent-color: var(--accent);
+}
+
+/* ---- Pills + badges ---- */
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-pill);
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+}
+.pill-accent {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.pill-success {
+    background: var(--success-soft);
+    border-color: var(--success);
+    color: var(--success);
+}
+.pill-warning {
+    background: var(--warning-soft);
+    border-color: var(--warning);
+    color: var(--warning);
+}
+.pill-danger {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+    color: var(--danger);
+}
+.pill-info {
+    background: var(--info-soft);
+    border-color: var(--info);
+    color: var(--info);
+}
+
+/* ---- Status banners ---- */
+
+.banner {
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: var(--radius-md);
+}
+.banner-success {
+    color: var(--success);
+    border-color: var(--success);
+    background: var(--success-soft);
+}
+.banner-warning {
+    color: var(--warning);
+    border-color: var(--warning);
+    background: var(--warning-soft);
+}
+.banner-danger {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: var(--danger-soft);
+}
+
+/* ---- View shell ---- */
+/* Every top-level view shares the same outer chrome: comfortable
+   page padding, vertical stack of sections, scroll on Y when
+   content overflows. */
+.view {
+    padding: var(--space-6) var(--space-7) var(--space-7);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+}
+
+.view > header {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
+}
+.view > header > div {
+    flex: 1;
+}
+.view > header h2 {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-2xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+.view > header p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--text-base);
+    max-width: 70ch;
 }
