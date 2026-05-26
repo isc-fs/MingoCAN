@@ -36,7 +36,8 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use can_flasher::pit_diag::{
-    build_arm_frame, decode_frame, CellVoltageFrame, NtcTempFrame, PitDiagFrame, AMS_ACK_ID,
+    build_arm_frame, decode_frame, CellVoltageFrame, FsmState, FsmStatusFrame, ModeLock,
+    NtcTempFrame, PitDiagFrame, PollTimingFrame, AMS_ACK_ID,
 };
 use can_flasher::transport::open_backend;
 
@@ -105,6 +106,31 @@ pub enum PitDiagStatus {
     Error { message: String },
 }
 
+/// String form of the FSM state, ready for direct UI rendering. Stays
+/// in lockstep with `can_flasher::pit_diag::FsmState` but uses
+/// camelCase so the frontend can switch on the value without a
+/// translation layer.
+fn fsm_state_name(s: FsmState) -> String {
+    match s {
+        FsmState::Start => "start".into(),
+        FsmState::Precharge => "precharge".into(),
+        FsmState::Transition => "transition".into(),
+        FsmState::Run => "run".into(),
+        FsmState::Charge => "charge".into(),
+        FsmState::Error => "error".into(),
+        FsmState::Unknown(b) => format!("unknown(0x{b:02X})"),
+    }
+}
+
+fn mode_lock_name(m: ModeLock) -> String {
+    match m {
+        ModeLock::Undecided => "undecided".into(),
+        ModeLock::Car => "car".into(),
+        ModeLock::Charger => "charger".into(),
+        ModeLock::Unknown(b) => format!("unknown(0x{b:02X})"),
+    }
+}
+
 /// Per-frame event. Discriminated union — the `kind` tag tells the
 /// frontend which variant payload to expect. Mirrors the library's
 /// `PitDiagFrame` enum but with camelCase field names + a stable
@@ -131,11 +157,23 @@ pub enum PitDiagEvent {
         first_ntc: u16,
         temps_c: [i8; 8],
     },
-    /// One of the 7 FSM/balance/boot/crash/fw-ID frames. Slice 2
-    /// replaces this with typed variants; for now the raw payload
-    /// makes it across so the operator can at least see the frame
-    /// arriving in the bus monitor.
-    Diag { id: u16, data: [u8; 8], dlc: u8 },
+    /// `0x6C0` — FSM extended status. Stringified state + mode for
+    /// the frontend's convenience; cockpit flags as bools; PEC count
+    /// as a raw u16.
+    FsmStatus {
+        state: String,
+        mode_locked: String,
+        tsms: bool,
+        dash_chg: bool,
+        ams_ok: bool,
+        pec_error_total: u16,
+    },
+    /// `0x6C1` — V-poll + T-sweep timing telemetry.
+    PollTiming {
+        last_v_poll_ms: u16,
+        worst_v_poll_ms: u16,
+        t_sweep_fail_mask: u32,
+    },
 }
 
 impl PitDiagEvent {
@@ -160,10 +198,29 @@ impl PitDiagEvent {
                 first_ntc,
                 temps_c,
             },
-            PitDiagFrame::Diag { id, payload, len } => Self::Diag {
-                id,
-                data: payload,
-                dlc: len,
+            PitDiagFrame::FsmStatus(FsmStatusFrame {
+                state,
+                mode_locked,
+                tsms,
+                dash_chg,
+                ams_ok,
+                pec_error_total,
+            }) => Self::FsmStatus {
+                state: fsm_state_name(state),
+                mode_locked: mode_lock_name(mode_locked),
+                tsms,
+                dash_chg,
+                ams_ok,
+                pec_error_total,
+            },
+            PitDiagFrame::PollTiming(PollTimingFrame {
+                last_v_poll_ms,
+                worst_v_poll_ms,
+                t_sweep_fail_mask,
+            }) => Self::PollTiming {
+                last_v_poll_ms,
+                worst_v_poll_ms,
+                t_sweep_fail_mask,
             },
         }
     }

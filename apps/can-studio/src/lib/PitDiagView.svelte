@@ -1,26 +1,31 @@
 <!--
-    Pit-diag view — Slice 1.
+    Pit-diag view — Slice 2.
 
-    AMS observer mode. Hits Enable → backend sends 0x7F0#DEADBEEF →
-    waits for the ACK on 0x7F1 → spawns a streaming task that decodes
-    the 56-frame, 1 Hz diagnostic stream.
+    AMS observer mode. Arming emits 0x7F0#DEADBEEF → AMS replies on
+    0x7F1 → the 1 Hz diagnostic stream flows here. The stream is 51
+    frames per scan today (24 cell-V + 25 NTC + 2 diag); future AMS
+    firmware will add balance / boot / crash / firmware-ID frames
+    inside the same 0x6C0..=… range.
 
-    Two panels here (the rest of the diag block — FSM, balance, boot,
-    crash, firmware ID — gets typed UI in slice 2):
+    Surfaces (slice 2):
 
-      - Cell voltages: 5 modules × 19 cells = 95 tiles, color-coded
-        by deviation from the pack mean.
-      - NTC temps:     5 modules × 40 NTCs   = 200 tiles, color-coded
-        on an absolute °C scale.
+      - Pack spread bar: max − min mV with warn/bad thresholds
+      - Cell voltages grid: 5 modules × 19 cells = 95 tiles,
+        deviation-from-mean colour ramp
+      - NTC heatmap: 5 modules × 40 NTCs = 200 tiles, absolute °C
+      - FSM extended status card (0x6C0): state badge, mode chip,
+        cockpit input LEDs, PEC error count
+      - Poll-timing card (0x6C1): V-poll ms last + worst-case +
+        T-sweep failure mask
 
-    A spread bar above the cell grid shows max-min in mV so the
-    engineer can read pack health at a glance.
+    Safety net: the view counts every pit-diag frame received per
+    1 Hz window and banners a warning if the count drifts from the
+    expected 51 — a canary for "the AMS firmware's wire shape has
+    changed since this constant was last verified".
 
-    Safety guardrails: the Enable button shows a confirmation step
-    (single click → "Hold to arm" → second click). The view does a
-    best-effort disarm on unmount so a tab-switch doesn't leave the
-    AMS streaming forever — the firmware also clears the flag on
-    reboot, but belt + braces.
+    Arm UX: the Enable button uses a two-click confirm flow so the
+    operator can't accidentally flip the AMS into pit-diag mode
+    mid-session. Unmount triggers a best-effort disarm.
 -->
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte';
@@ -29,7 +34,6 @@
     import {
         AMS_CELLS_PER_MODULE,
         AMS_EXPECTED_FRAMES_PER_SCAN,
-        AMS_FW_ID_ID,
         AMS_NUM_CELLS,
         AMS_NTC_PER_MODULE,
         AMS_NUM_MODULES,
@@ -51,6 +55,21 @@
         | { kind: 'armed'; since: number }
         | { kind: 'error'; message: string };
 
+    interface FsmSnapshot {
+        state: string;
+        modeLocked: string;
+        tsms: boolean;
+        dashChg: boolean;
+        amsOk: boolean;
+        pecErrorTotal: number;
+    }
+
+    interface PollSnapshot {
+        lastVPollMs: number;
+        worstVPollMs: number;
+        tSweepFailMask: number;
+    }
+
     const adapterReady = $derived(
         settings.adapter.interface !== null &&
             (settings.adapter.interface === 'virtual' ||
@@ -61,35 +80,25 @@
 
     // Pack-wide arrays — `null` means "no reading yet". The frame
     // events trickle in across the 1-second scan; the UI renders the
-    // partial picture rather than waiting for a complete scan, so
-    // the operator sees data within ~16ms of the first arrival.
+    // partial picture rather than waiting for a complete scan.
     let cellsMv = $state<(number | null)[]>(new Array(AMS_NUM_CELLS).fill(null));
     let ntcsC = $state<(number | null)[]>(new Array(AMS_NUM_NTCS).fill(null));
 
+    // Latest FSM + poll-timing snapshots. Each arrives once per
+    // scan; we just keep the most recent (no history yet — slice 3
+    // could add a trend line for the V-poll latency).
+    let fsm = $state<FsmSnapshot | null>(null);
+    let poll = $state<PollSnapshot | null>(null);
+
     // Scan-rate tracking — counts EVERY pit-diag frame received in
-    // a 1Hz window, including the diag block (0x6C0..0x6C6) that
-    // slice 1 doesn't decode but still arrives on the wire. The
-    // running tally is reset on each tick; `lastScanFrames` holds
-    // the previous window's total, which the safety-net banner
-    // compares against AMS_EXPECTED_FRAMES_PER_SCAN (56). A drift
-    // here is the canary for "the AMS firmware's wire shape has
-    // changed and the hand-coded layout is stale".
+    // a 1 Hz window. Compared against AMS_EXPECTED_FRAMES_PER_SCAN
+    // (51 today) to detect schema drift. A divergence > ±2 fires
+    // the warning banner: the wire shape has likely changed since
+    // the host's hand-coded layout was last verified.
     let framesThisScan = $state<number>(0);
     let lastScanFrames = $state<number>(0);
     let scanIntervalId: ReturnType<typeof setInterval> | null = null;
 
-    // Raw bytes of the most-recent firmware-ID frame (0x6C6). Slice 2
-    // decodes this into typed semver / git-hash / node-id fields;
-    // for slice 1 we just surface the raw bytes so the operator can
-    // eyeball them against the AMS firmware they bench-verified. If
-    // the bytes change unexpectedly between sessions, the wire
-    // format may have shifted.
-    let firmwareIdRawHex = $state<string | null>(null);
-
-    // Schema-drift signal — true when the observed frames/scan
-    // count is meaningfully off the expected 56. Tolerance of ±2
-    // absorbs the natural jitter at the start/end of a window
-    // (some scans may straddle a tick by one or two frames).
     const schemaDriftSuspected = $derived(
         lastScanFrames > 0 &&
             Math.abs(lastScanFrames - AMS_EXPECTED_FRAMES_PER_SCAN) > 2,
@@ -133,6 +142,26 @@
         if (count === 0) return null;
         return { min, max, count };
     });
+
+    // Number of T-sweep bits set in the poll-timing failure mask.
+    // Each set bit is one NTC channel that flagged a sweep failure
+    // on the most recent sweep — a quick at-a-glance count is more
+    // useful than the raw u32.
+    const tSweepFailBits = $derived(
+        poll === null ? 0 : popcount(poll.tSweepFailMask),
+    );
+
+    function popcount(n: number): number {
+        // u32 popcount via the standard SWAR trick. Number is f64
+        // in JS but the input fits 32 bits so we can use bitwise.
+        let x = n >>> 0;
+        let count = 0;
+        while (x !== 0) {
+            count += x & 1;
+            x >>>= 1;
+        }
+        return count;
+    }
 
     let unlistenFrame: UnlistenFn | null = null;
     let unlistenStatus: UnlistenFn | null = null;
@@ -181,13 +210,14 @@
             return;
         }
         armState = { kind: 'arming' };
-        // Reset the pack + safety-net signals so old values don't
-        // linger across an arm cycle.
+        // Reset everything so old values don't linger across an
+        // arm cycle.
         cellsMv = new Array(AMS_NUM_CELLS).fill(null);
         ntcsC = new Array(AMS_NUM_NTCS).fill(null);
+        fsm = null;
+        poll = null;
         framesThisScan = 0;
         lastScanFrames = 0;
-        firmwareIdRawHex = null;
         try {
             await pitDiagEnable(buildRequest());
             // armState transitions to 'armed' via the Armed status
@@ -206,10 +236,6 @@
         try {
             await pitDiagDisable(buildRequest());
         } catch (err) {
-            // Surface the error but still drop to idle — the user
-            // intent is "stop". If the disarm frame didn't make it,
-            // the firmware's reboot-clears-flag fallback still saves
-            // us.
             armState = {
                 kind: 'error',
                 message: err instanceof Error ? err.message : String(err),
@@ -223,7 +249,6 @@
         unlistenStatus = await onPitDiagStatus(handleStatus);
         unlistenFrame = await onPitDiagFrame((event) => {
             if (event.kind === 'cellVoltage') {
-                // Mutate-then-reassign so Svelte 5 sees the change.
                 const next = cellsMv.slice();
                 writeCellsInto(next, event);
                 cellsMv = next;
@@ -233,26 +258,27 @@
                 writeNtcsInto(next, event);
                 ntcsC = next;
                 framesThisScan += 1;
-            } else if (event.kind === 'diag') {
-                // Slice 1 doesn't decode the 0x6C0..0x6C6 block, but
-                // we still count them toward the scan total (so the
-                // schema-drift detector sees the full 56) and pluck
-                // the firmware-ID frame's raw bytes for the header.
+            } else if (event.kind === 'fsmStatus') {
+                fsm = {
+                    state: event.state,
+                    modeLocked: event.modeLocked,
+                    tsms: event.tsms,
+                    dashChg: event.dashChg,
+                    amsOk: event.amsOk,
+                    pecErrorTotal: event.pecErrorTotal,
+                };
                 framesThisScan += 1;
-                if (event.id === AMS_FW_ID_ID) {
-                    const bytes = event.data.slice(0, event.dlc);
-                    firmwareIdRawHex = bytes
-                        .map((b: number) =>
-                            b.toString(16).toUpperCase().padStart(2, '0'),
-                        )
-                        .join(' ');
-                }
+            } else if (event.kind === 'pollTiming') {
+                poll = {
+                    lastVPollMs: event.lastVPollMs,
+                    worstVPollMs: event.worstVPollMs,
+                    tSweepFailMask: event.tSweepFailMask,
+                };
+                framesThisScan += 1;
             }
             // Ack events come during arm/disarm; they're handled by
             // the status listener, not counted toward a scan window.
         });
-        // 1Hz scan-rate ticker — every second, snapshot the running
-        // frame count and reset for the next window.
         scanIntervalId = setInterval(() => {
             lastScanFrames = framesThisScan;
             framesThisScan = 0;
@@ -263,8 +289,6 @@
         if (unlistenFrame !== null) unlistenFrame();
         if (unlistenStatus !== null) unlistenStatus();
         if (scanIntervalId !== null) clearInterval(scanIntervalId);
-        // Best-effort disarm on unmount — operator unintentionally
-        // navigating away shouldn't leave the AMS streaming.
         if (armState.kind === 'armed') {
             try {
                 await pitDiagDisable(buildRequest());
@@ -276,10 +300,10 @@
         }
     });
 
-    // Color ramps — cells are scored by deviation from pack mean
-    // (green = near mean, yellow = ±20mV away, red = ±50mV+). Temps
-    // are scored on an absolute scale (blue = cold, green =
-    // operating, orange/red = hot).
+    // Colour ramps — cells by deviation from pack mean, NTCs on an
+    // absolute °C scale. Tuned by eye against typical AMS readings;
+    // the operator gets a glanceable picture without having to read
+    // numbers off every tile.
     function cellColor(mv: number | null): string {
         if (mv === null || packStats === null) return 'var(--bg)';
         const dev = Math.abs(mv - packStats.mean);
@@ -290,14 +314,14 @@
 
     function ntcColor(c: number | null): string {
         if (c === null) return 'var(--bg)';
-        if (c < 0) return '#1976d2'; // sub-zero — alarming for li-ion
+        if (c < 0) return '#1976d2'; // sub-zero — alarming for Li-ion
         if (c < 20) return '#0288d1'; // cool
         if (c < 40) return '#388e3c'; // operating
         if (c < 55) return '#f57c00'; // warm
-        return '#c2185b';              // hot — outside spec
+        return '#c2185b'; // hot — outside spec
     }
 
-    // 5×19 / 5×40 grid layout — module is rows, slot is cols.
+    // 5×19 / 5×40 grid layouts — module is rows, slot is cols.
     const cellRows = $derived(
         Array.from({ length: AMS_NUM_MODULES }, (_, m) =>
             Array.from({ length: AMS_CELLS_PER_MODULE }, (_, s) => {
@@ -314,21 +338,43 @@
             }),
         ),
     );
+
+    // Map the FSM state string to a pill modifier class. "run" /
+    // "charge" are good states; "error" and "unknown(…)" are bad;
+    // the rest are transitions.
+    function fsmStateTone(state: string): 'success' | 'warning' | 'danger' | 'info' {
+        if (state === 'run' || state === 'charge') return 'success';
+        if (state === 'error' || state.startsWith('unknown')) return 'danger';
+        return 'info';
+    }
+
+    // V-poll headroom — firmware budget is ~50 ms per the
+    // CAN_MAP.md poll-timing comment. Past 40 ms = warn, past 50 ms
+    // = bad.
+    function pollTone(ms: number | undefined): 'success' | 'warning' | 'danger' {
+        if (ms === undefined) return 'success';
+        if (ms > 50) return 'danger';
+        if (ms > 40) return 'warning';
+        return 'success';
+    }
 </script>
 
 <div class="view">
     <header>
-        <h2>Pit diag</h2>
-        <p class="muted">
-            AMS observer mode. Arming emits <code>0x7F0#DEADBEEF</code> →
-            AMS replies on <code>0x7F1</code> → the full 1 Hz diagnostic
-            stream (56 frames/scan) flows here. Disarm sends the
-            zero-payload frame; firmware also clears the flag on reboot.
-        </p>
+        <div>
+            <h2>Pit diag</h2>
+            <p class="muted">
+                AMS observer mode. Arming emits <code>0x7F0#DEADBEEF</code>;
+                the AMS replies on <code>0x7F1</code> and starts streaming
+                the diagnostic stream at 1 Hz ({AMS_EXPECTED_FRAMES_PER_SCAN}
+                frames/scan today). Disarm sends the zero-payload frame;
+                firmware also clears the flag on reboot.
+            </p>
+        </div>
     </header>
 
     {#if !adapterReady}
-        <div class="warning">
+        <div class="banner banner-warning">
             <strong>No adapter selected.</strong> Pick one in the
             <em>Adapters</em> view first — pit-diag needs an
             <code>--interface</code>/<code>--channel</code> pair.
@@ -336,11 +382,11 @@
     {/if}
 
     <!-- Controls row -->
-    <div class="toolbar">
+    <div class="toolbar card card-tight">
         {#if armState.kind === 'idle' || armState.kind === 'error'}
             <button
                 type="button"
-                class="primary"
+                class="btn btn-primary"
                 disabled={!adapterReady}
                 onclick={confirmArm}
             >
@@ -349,15 +395,19 @@
         {:else if armState.kind === 'confirming'}
             <div class="confirm">
                 <span class="confirm-text">Arm AMS pit-diag stream?</span>
-                <button type="button" class="primary" onclick={arm}>
+                <button type="button" class="btn btn-primary" onclick={arm}>
                     Yes, arm
                 </button>
-                <button type="button" onclick={cancelArm}>Cancel</button>
+                <button type="button" class="btn" onclick={cancelArm}>
+                    Cancel
+                </button>
             </div>
         {:else if armState.kind === 'arming'}
-            <button type="button" disabled>Arming…</button>
+            <button type="button" class="btn" disabled>Arming…</button>
         {:else if armState.kind === 'armed'}
-            <button type="button" onclick={disarm}>Disable</button>
+            <button type="button" class="btn btn-danger" onclick={disarm}>
+                Disable
+            </button>
             <span class="stat">
                 <strong class="status-dot armed">●</strong>
                 <span>armed</span>
@@ -378,59 +428,126 @@
     </div>
 
     {#if armState.kind === 'error'}
-        <div class="error">
+        <div class="banner banner-danger">
             <strong>Arm failed:</strong>
             {armState.message}
         </div>
     {/if}
 
     <!--
-        Safety-net banners. The slice 1 decoder hardcodes the AMS
-        firmware's wire shape (56 frames/scan, exact ID ranges, byte
-        layouts). Two signals catch a drift before it silently
-        mis-decodes:
-
-          1. Frame-count drift — if the AMS firmware adds or drops
-             frames from a scan, lastScanFrames will diverge from
-             AMS_EXPECTED_FRAMES_PER_SCAN.
-          2. Firmware-ID payload — the raw 0x6C6 bytes are surfaced
-             so the operator can eyeball them against the AMS build
-             they bench-verified. Slice 2 promotes this to a typed
-             semver banner.
+        Safety net: when the observed frames/scan count drifts from
+        the expected 51 by more than ±2, banner a warning. This
+        catches the AMS team adding or removing frames before silent
+        miscalibration bites the operator.
     -->
     {#if schemaDriftSuspected}
-        <div class="warning">
+        <div class="banner banner-warning">
             <strong>Schema drift suspected.</strong>
             Last scan carried {lastScanFrames} frames, expected
             {AMS_EXPECTED_FRAMES_PER_SCAN}. The AMS firmware's pit-diag
-            wire shape may have changed since the tool was built —
-            the cell-V grid + NTC heatmap below may be partial or
+            wire shape may have changed since the host's layout was
+            last verified — the panels below may be partial or
             mis-routed. Verify against
             <code>src/pit_diag/mod.rs</code> and re-run.
         </div>
     {/if}
 
-    {#if firmwareIdRawHex !== null}
-        <div class="fw-id">
-            <span class="fw-id-label">AMS firmware ID (raw)</span>
-            <code class="fw-id-bytes mono">{firmwareIdRawHex}</code>
-            <span class="muted small">
-                Slice 2 decodes this into semver / git hash / node-id.
-                For now: eyeball the bytes against the firmware you
-                bench-verified — a change here means a new AMS build.
-            </span>
+    <!-- FSM + poll-timing row (only renders once we've seen at
+         least one of each). -->
+    {#if fsm !== null || poll !== null}
+        <div class="diag-row">
+            {#if fsm !== null}
+                <section class="card diag-card">
+                    <div class="card-header">
+                        <h3>FSM extended status</h3>
+                        <span class="muted small mono">0x6C0</span>
+                    </div>
+                    <div class="diag-grid">
+                        <div class="diag-cell">
+                            <span class="diag-label">State</span>
+                            <span class="pill pill-{fsmStateTone(fsm.state)}">
+                                {fsm.state}
+                            </span>
+                        </div>
+                        <div class="diag-cell">
+                            <span class="diag-label">Mode</span>
+                            <span class="pill">{fsm.modeLocked}</span>
+                        </div>
+                        <div class="diag-cell">
+                            <span class="diag-label">TSMS</span>
+                            <span class="led" class:on={fsm.tsms}></span>
+                        </div>
+                        <div class="diag-cell">
+                            <span class="diag-label">DASH_CHG</span>
+                            <span class="led" class:on={fsm.dashChg}></span>
+                        </div>
+                        <div class="diag-cell">
+                            <span class="diag-label">AMS_OK</span>
+                            <span class="led" class:on={fsm.amsOk}></span>
+                        </div>
+                        <div class="diag-cell">
+                            <span class="diag-label">PEC errors</span>
+                            <span class="diag-value mono">
+                                {fsm.pecErrorTotal}
+                            </span>
+                        </div>
+                    </div>
+                </section>
+            {/if}
+
+            {#if poll !== null}
+                <section class="card diag-card">
+                    <div class="card-header">
+                        <h3>Poll timing</h3>
+                        <span class="muted small mono">0x6C1</span>
+                    </div>
+                    <div class="diag-grid">
+                        <div class="diag-cell">
+                            <span class="diag-label">V-poll last</span>
+                            <span class="pill pill-{pollTone(poll.lastVPollMs)} mono">
+                                {poll.lastVPollMs} ms
+                            </span>
+                        </div>
+                        <div class="diag-cell">
+                            <span class="diag-label">V-poll worst</span>
+                            <span class="pill pill-{pollTone(poll.worstVPollMs)} mono">
+                                {poll.worstVPollMs} ms
+                            </span>
+                        </div>
+                        <div class="diag-cell wide">
+                            <span class="diag-label">T-sweep fail mask</span>
+                            <span class="diag-value mono">
+                                0x{poll.tSweepFailMask
+                                    .toString(16)
+                                    .toUpperCase()
+                                    .padStart(8, '0')}
+                                {#if tSweepFailBits > 0}
+                                    <span class="muted">
+                                        · {tSweepFailBits} channel{tSweepFailBits === 1 ? '' : 's'} flagged
+                                    </span>
+                                {/if}
+                            </span>
+                        </div>
+                    </div>
+                    <p class="muted small poll-hint">
+                        Budget &lt; 50 ms per scan. Worst-case &gt; 50 ms means
+                        the BMS slave bus is saturating; check ISO-SPI line
+                        integrity + sample-and-poll batching.
+                    </p>
+                </section>
+            {/if}
         </div>
     {/if}
 
-    <!-- Pack-spread bar (cell voltages) -->
+    <!-- Pack-spread bar -->
     {#if packStats !== null}
-        <section class="card spread-card">
-            <header>
+        <section class="card">
+            <div class="card-header">
                 <h3>Pack spread</h3>
-                <span class="spread-mv">
+                <span class="spread-mv mono">
                     {packStats.spread} mV (max − min)
                 </span>
-            </header>
+            </div>
             <div class="spread-row">
                 <span class="spread-min mono">min {packStats.min}</span>
                 <div
@@ -453,14 +570,14 @@
     {/if}
 
     <!-- Cell-V grid -->
-    <section class="card grid-card">
-        <header>
+    <section class="card">
+        <div class="card-header">
             <h3>Cell voltages</h3>
             <span class="muted small">
-                5 modules × 19 cells = 95. Color = deviation from pack mean.
+                5 modules × 19 cells = 95. Colour = deviation from pack mean.
             </span>
-        </header>
-        <div class="grid cells">
+        </div>
+        <div class="grid">
             {#each cellRows as row, m (m)}
                 <div class="grid-row" role="row">
                     <span class="row-label">M{m + 1}</span>
@@ -482,18 +599,19 @@
     </section>
 
     <!-- NTC temp heatmap -->
-    <section class="card grid-card">
-        <header>
+    <section class="card">
+        <div class="card-header">
             <h3>NTC temperatures</h3>
             <span class="muted small">
                 {#if ntcStats !== null}
-                    range {ntcStats.min}…{ntcStats.max} °C · {ntcStats.count}/{AMS_NUM_NTCS} reading
+                    range {ntcStats.min}…{ntcStats.max} °C ·
+                    {ntcStats.count}/{AMS_NUM_NTCS} reading
                 {:else}
-                    5 modules × 40 NTCs = 200. — = unwired channel.
+                    5 modules × 40 NTCs = 200.
                 {/if}
             </span>
-        </header>
-        <div class="grid ntcs">
+        </div>
+        <div class="grid">
             {#each ntcRows as row, m (m)}
                 <div class="grid-row" role="row">
                     <span class="row-label">M{m + 1}</span>
@@ -512,102 +630,25 @@
 </div>
 
 <style>
-    /* This file targets the dev branch's chrome (no design system
-       yet — that ships separately in PR #253). Once #253 merges
-       this view picks up shared utilities; until then the inline
-       styles below match the conventions of the existing views
-       (BusMonitor / LiveData) so the visual feel is consistent. */
+    /* Most chrome (.view, .card, .card-header, .banner-*, .btn,
+       .pill, .muted, .small, .mono) comes from app.css. Local
+       styles cover only the bits this view needs that aren't in
+       the design system: the toolbar layout, the FSM/poll-timing
+       diag grid + LEDs, the pack-spread bar, and the cell-V / NTC
+       tile grids. */
 
-    .view {
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-        padding: 24px 28px;
-        overflow: auto;
-        height: 100%;
-        min-height: 0;
-        box-sizing: border-box;
-    }
-    h2 {
-        margin: 0;
-        font-size: 1.3rem;
-    }
-    .muted {
-        color: var(--text-muted);
-    }
-    header > p {
-        margin: 4px 0 0;
-        font-size: 0.9rem;
-        color: var(--text-muted);
-    }
-    code {
-        font-family: var(--font-mono);
-        font-size: 0.95em;
-        padding: 0 3px;
-        border-radius: 3px;
-        background: rgba(255, 255, 255, 0.04);
-    }
-    .small {
-        font-size: 0.8rem;
-    }
-
-    .warning {
-        padding: 10px 14px;
-        border: 1px solid var(--accent);
-        background: rgba(242, 178, 51, 0.08);
-        border-radius: 6px;
-    }
-
-    /* Firmware-ID display — narrow card with the raw 0x6C6 bytes
-       front and centre. Slice 2 promotes this into a typed banner
-       (semver + git hash + node-id), but the raw-bytes form is
-       useful on its own as the safety-net signal. */
-    .fw-id {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        padding: 10px 14px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        border-radius: 6px;
-    }
-    .fw-id-label {
-        font-size: 0.78rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        color: var(--text-muted);
-    }
-    .fw-id-bytes {
-        font-family: var(--font-mono);
-        font-size: 0.9rem;
-        color: var(--text);
-    }
-
-    .error {
-        padding: 10px 14px;
-        border: 1px solid var(--error);
-        color: var(--error);
-        background: rgba(255, 115, 115, 0.08);
-        border-radius: 6px;
-        font-size: 0.85rem;
-    }
-
-    /* Toolbar — Enable button + confirm-step prompt + live stats. */
+    /* Toolbar — controls + live stats. Built on .card .card-tight. */
     .toolbar {
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 12px 14px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        border-radius: 8px;
+        gap: var(--space-3);
         flex-wrap: wrap;
     }
     .stat {
         display: inline-flex;
-        gap: 4px;
+        gap: var(--space-1);
         align-items: center;
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
         color: var(--text-muted);
         font-family: var(--font-mono);
     }
@@ -619,7 +660,7 @@
         color: var(--text-muted);
     }
     .status-dot.armed {
-        color: #06d6a0;
+        color: var(--success);
         animation: pulse 1.2s ease-in-out infinite;
     }
     @keyframes pulse {
@@ -633,137 +674,144 @@
     }
     .confirm {
         display: flex;
-        gap: 10px;
+        gap: var(--space-3);
         align-items: center;
     }
     .confirm-text {
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
         color: var(--text);
     }
 
-    button {
-        appearance: none;
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        font: inherit;
-        padding: 6px 14px;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 0.85rem;
+    /* Diag row — FSM card + poll-timing card side by side; wraps
+       to stacked when the page narrows. */
+    .diag-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: var(--space-3);
     }
-    button:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
-    }
-    button.primary {
-        background: var(--accent);
-        color: #1a1a1a;
-        border-color: var(--accent);
-    }
-    button.primary:hover:not(:disabled) {
-        filter: brightness(1.05);
-        color: #1a1a1a;
-    }
-    button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
+    @media (max-width: 900px) {
+        .diag-row {
+            grid-template-columns: 1fr;
+        }
     }
 
-    /* Card chrome shared by the spread bar + the two grids. */
-    .card {
-        padding: 14px 18px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        border-radius: 8px;
+    /* Diag grid — labelled key/value cells laid out auto-fill. The
+       .wide modifier lets the T-sweep mask span both columns. */
+    .diag-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: var(--space-3);
     }
-    .card > header {
+    .diag-cell {
         display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 10px;
-        margin-bottom: 10px;
+        flex-direction: column;
+        gap: var(--space-1);
     }
-    .card h3 {
-        margin: 0;
-        font-size: 0.85rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
+    .diag-cell.wide {
+        grid-column: 1 / -1;
+    }
+    .diag-label {
+        font-size: var(--text-xs);
         color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .diag-value {
+        font-size: var(--text-base);
+        color: var(--text);
     }
 
-    /* Spread bar — `bar` fills proportional to spread in mV,
-       clamped at 100mV. Color tightens to warn/bad past thresholds
-       so a glance tells the operator if anything's drifting. */
+    /* LED — tiny circle, muted when off, accent when on. Mirrors
+       the cockpit's binary input semantics. */
+    .led {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: var(--bg-soft);
+        border: 1px solid var(--border-strong);
+        transition: background var(--motion-fast), border-color var(--motion-fast);
+    }
+    .led.on {
+        background: var(--success);
+        border-color: var(--success);
+        box-shadow: 0 0 6px rgba(74, 222, 128, 0.55);
+    }
+
+    .poll-hint {
+        margin: var(--space-3) 0 0;
+    }
+
+    /* Pack-spread bar — fills proportional to spread in mV,
+       clamped at 100mV. Warn/bad colour breakpoints help the
+       operator glance at the pack health. */
     .spread-mv {
-        font-family: var(--font-mono);
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
         color: var(--text);
     }
     .spread-row {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: var(--space-3);
     }
     .spread-bar {
         flex: 1;
         height: 10px;
         background: var(--bg);
-        border-radius: 6px;
+        border-radius: var(--radius-md);
         border: 1px solid var(--border);
         overflow: hidden;
     }
     .spread-fill {
         height: 100%;
-        background: #2e7d32;
+        background: var(--success);
         transition:
             width 240ms ease-out,
             background 240ms ease-out;
     }
     .spread-bar.warn .spread-fill {
-        background: #f57c00;
+        background: var(--warning);
     }
     .spread-bar.bad .spread-fill {
-        background: #c2185b;
+        background: var(--danger);
     }
     .spread-min,
     .spread-max {
-        font-size: 0.78rem;
+        font-size: var(--text-xs);
         color: var(--text-muted);
     }
     .spread-hint {
-        margin: 8px 0 0;
+        margin: var(--space-2) 0 0;
     }
 
-    /* Grids — one row per module, tiles laid out horizontally.
-       The cell grid wants legible voltage numbers; the NTC grid
-       is heatmap-only so its tiles are smaller. */
+    /* Cell / NTC tile grids. The cell grid wants legible voltage
+       numbers; the NTC grid is heatmap-only so its tiles are
+       smaller + label-less. */
     .grid {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: var(--space-1);
     }
     .grid-row {
         display: flex;
-        gap: 4px;
+        gap: var(--space-1);
         align-items: center;
     }
     .row-label {
         width: 24px;
         flex: 0 0 24px;
         font-family: var(--font-mono);
-        font-size: 0.78rem;
+        font-size: var(--text-xs);
         color: var(--text-muted);
     }
     .tile {
         flex: 1;
         min-width: 0;
         height: 38px;
-        border-radius: 3px;
+        border-radius: var(--radius-sm);
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 0.7rem;
+        font-size: var(--text-xs);
         color: rgba(255, 255, 255, 0.95);
         transition: background 240ms ease-out;
         cursor: help;
