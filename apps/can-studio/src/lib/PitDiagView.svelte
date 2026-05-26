@@ -28,6 +28,8 @@
 
     import {
         AMS_CELLS_PER_MODULE,
+        AMS_EXPECTED_FRAMES_PER_SCAN,
+        AMS_FW_ID_ID,
         AMS_NUM_CELLS,
         AMS_NTC_PER_MODULE,
         AMS_NUM_MODULES,
@@ -64,12 +66,34 @@
     let cellsMv = $state<(number | null)[]>(new Array(AMS_NUM_CELLS).fill(null));
     let ntcsC = $state<(number | null)[]>(new Array(AMS_NUM_NTCS).fill(null));
 
-    // Scan-rate tracking — increments on every cell-V or NTC frame,
-    // resets on a 1Hz tick. Lets the operator see "stream is alive"
-    // even when individual cell values aren't visibly changing.
+    // Scan-rate tracking — counts EVERY pit-diag frame received in
+    // a 1Hz window, including the diag block (0x6C0..0x6C6) that
+    // slice 1 doesn't decode but still arrives on the wire. The
+    // running tally is reset on each tick; `lastScanFrames` holds
+    // the previous window's total, which the safety-net banner
+    // compares against AMS_EXPECTED_FRAMES_PER_SCAN (56). A drift
+    // here is the canary for "the AMS firmware's wire shape has
+    // changed and the hand-coded layout is stale".
     let framesThisScan = $state<number>(0);
     let lastScanFrames = $state<number>(0);
     let scanIntervalId: ReturnType<typeof setInterval> | null = null;
+
+    // Raw bytes of the most-recent firmware-ID frame (0x6C6). Slice 2
+    // decodes this into typed semver / git-hash / node-id fields;
+    // for slice 1 we just surface the raw bytes so the operator can
+    // eyeball them against the AMS firmware they bench-verified. If
+    // the bytes change unexpectedly between sessions, the wire
+    // format may have shifted.
+    let firmwareIdRawHex = $state<string | null>(null);
+
+    // Schema-drift signal — true when the observed frames/scan
+    // count is meaningfully off the expected 56. Tolerance of ±2
+    // absorbs the natural jitter at the start/end of a window
+    // (some scans may straddle a tick by one or two frames).
+    const schemaDriftSuspected = $derived(
+        lastScanFrames > 0 &&
+            Math.abs(lastScanFrames - AMS_EXPECTED_FRAMES_PER_SCAN) > 2,
+    );
 
     // Derived stats — pack mean + spread (max − min mV). Recomputed
     // whenever the cells array changes; null when not enough cells
@@ -157,11 +181,13 @@
             return;
         }
         armState = { kind: 'arming' };
-        // Reset the pack so old values don't linger.
+        // Reset the pack + safety-net signals so old values don't
+        // linger across an arm cycle.
         cellsMv = new Array(AMS_NUM_CELLS).fill(null);
         ntcsC = new Array(AMS_NUM_NTCS).fill(null);
         framesThisScan = 0;
         lastScanFrames = 0;
+        firmwareIdRawHex = null;
         try {
             await pitDiagEnable(buildRequest());
             // armState transitions to 'armed' via the Armed status
@@ -199,15 +225,31 @@
             if (event.kind === 'cellVoltage') {
                 // Mutate-then-reassign so Svelte 5 sees the change.
                 const next = cellsMv.slice();
-                framesThisScan += writeCellsInto(next, event);
+                writeCellsInto(next, event);
                 cellsMv = next;
+                framesThisScan += 1;
             } else if (event.kind === 'ntcTemp') {
                 const next = ntcsC.slice();
-                framesThisScan += writeNtcsInto(next, event);
+                writeNtcsInto(next, event);
                 ntcsC = next;
+                framesThisScan += 1;
+            } else if (event.kind === 'diag') {
+                // Slice 1 doesn't decode the 0x6C0..0x6C6 block, but
+                // we still count them toward the scan total (so the
+                // schema-drift detector sees the full 56) and pluck
+                // the firmware-ID frame's raw bytes for the header.
+                framesThisScan += 1;
+                if (event.id === AMS_FW_ID_ID) {
+                    const bytes = event.data.slice(0, event.dlc);
+                    firmwareIdRawHex = bytes
+                        .map((b: number) =>
+                            b.toString(16).toUpperCase().padStart(2, '0'),
+                        )
+                        .join(' ');
+                }
             }
-            // Ack and Diag are ignored in slice 1; the cell-V grid
-            // and temp heatmap are the only displayed surfaces.
+            // Ack events come during arm/disarm; they're handled by
+            // the status listener, not counted toward a scan window.
         });
         // 1Hz scan-rate ticker — every second, snapshot the running
         // frame count and reset for the next window.
@@ -339,6 +381,44 @@
         <div class="error">
             <strong>Arm failed:</strong>
             {armState.message}
+        </div>
+    {/if}
+
+    <!--
+        Safety-net banners. The slice 1 decoder hardcodes the AMS
+        firmware's wire shape (56 frames/scan, exact ID ranges, byte
+        layouts). Two signals catch a drift before it silently
+        mis-decodes:
+
+          1. Frame-count drift — if the AMS firmware adds or drops
+             frames from a scan, lastScanFrames will diverge from
+             AMS_EXPECTED_FRAMES_PER_SCAN.
+          2. Firmware-ID payload — the raw 0x6C6 bytes are surfaced
+             so the operator can eyeball them against the AMS build
+             they bench-verified. Slice 2 promotes this to a typed
+             semver banner.
+    -->
+    {#if schemaDriftSuspected}
+        <div class="warning">
+            <strong>Schema drift suspected.</strong>
+            Last scan carried {lastScanFrames} frames, expected
+            {AMS_EXPECTED_FRAMES_PER_SCAN}. The AMS firmware's pit-diag
+            wire shape may have changed since the tool was built —
+            the cell-V grid + NTC heatmap below may be partial or
+            mis-routed. Verify against
+            <code>src/pit_diag/mod.rs</code> and re-run.
+        </div>
+    {/if}
+
+    {#if firmwareIdRawHex !== null}
+        <div class="fw-id">
+            <span class="fw-id-label">AMS firmware ID (raw)</span>
+            <code class="fw-id-bytes mono">{firmwareIdRawHex}</code>
+            <span class="muted small">
+                Slice 2 decodes this into semver / git hash / node-id.
+                For now: eyeball the bytes against the firmware you
+                bench-verified — a change here means a new AMS build.
+            </span>
         </div>
     {/if}
 
@@ -477,6 +557,32 @@
         background: rgba(242, 178, 51, 0.08);
         border-radius: 6px;
     }
+
+    /* Firmware-ID display — narrow card with the raw 0x6C6 bytes
+       front and centre. Slice 2 promotes this into a typed banner
+       (semver + git hash + node-id), but the raw-bytes form is
+       useful on its own as the safety-net signal. */
+    .fw-id {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 10px 14px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        border-radius: 6px;
+    }
+    .fw-id-label {
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+    }
+    .fw-id-bytes {
+        font-family: var(--font-mono);
+        font-size: 0.9rem;
+        color: var(--text);
+    }
+
     .error {
         padding: 10px 14px;
         border: 1px solid var(--error);

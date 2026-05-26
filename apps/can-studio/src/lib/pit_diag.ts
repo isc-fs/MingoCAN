@@ -21,6 +21,17 @@ export const AMS_NUM_NTCS = AMS_NUM_MODULES * AMS_NTC_PER_MODULE; // 200
 export const AMS_CELLV_SENTINEL = 0xffff;
 /** Sentinel value for an unwired / shorted NTC channel (INT8_MIN). */
 export const AMS_NTC_SENTINEL = -128;
+/**
+ * Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 7.
+ * If the observed scan rate drifts from this, the wire shape has
+ * changed — the view banners a warning. Keep this in sync with the
+ * Rust `AMS_EXPECTED_FRAMES_PER_SCAN` constant.
+ */
+export const AMS_EXPECTED_FRAMES_PER_SCAN = 56;
+/** CAN ID of the firmware-ID frame. View surfaces its raw payload
+ *  so the operator can eyeball "the AMS reports semver X" against
+ *  what they bench-verified. */
+export const AMS_FW_ID_ID = 0x6c6;
 
 // ---- Request ----
 

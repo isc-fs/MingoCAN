@@ -87,6 +87,22 @@ pub const AMS_NTC_NUM_FRAMES: usize = 25;
 pub const AMS_DIAG_BASE_ID: u16 = 0x6C0;
 /// Last CAN ID in the diag block.
 pub const AMS_DIAG_LAST_ID: u16 = 0x6C6;
+/// Number of frames in the diag block (7).
+pub const AMS_DIAG_NUM_FRAMES: usize = 7;
+/// CAN ID of the firmware-ID frame inside the diag block. Slice 1
+/// doesn't decode the payload (slice 2 lands the typed semver / git
+/// hash / node-id fields); we just call it out by name so the view
+/// can pluck the raw bytes for operator-visible identification.
+pub const AMS_FW_ID_ID: u16 = 0x6C6;
+
+/// Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 7.
+/// The Studio compares this against an observed scan-rate counter
+/// and banners a warning if the wire shape has drifted — if a
+/// future firmware version adds or drops frames, this is the
+/// signal the operator sees before the brittleness of the hand-
+/// coded layout bites them.
+pub const AMS_EXPECTED_FRAMES_PER_SCAN: usize =
+    AMS_CELLV_NUM_FRAMES + AMS_NTC_NUM_FRAMES + AMS_DIAG_NUM_FRAMES;
 
 // ---- Decoded records --------------------------------------------
 
@@ -259,6 +275,12 @@ const _: () = assert!(AMS_NTC_NUM_FRAMES == (AMS_NTC_LAST_ID - AMS_NTC_BASE_ID +
 const _: () = assert!(AMS_CELLV_NUM_FRAMES * 4 > AMS_NUM_CELLS);
 // 25 frames × 8 NTCs/frame = 200 = AMS_NUM_NTCS exactly.
 const _: () = assert!(AMS_NTC_NUM_FRAMES * 8 == AMS_NUM_NTCS);
+// Total scan must equal 56 = 24 + 25 + 7. The Studio displays a
+// warning if the observed scan rate drifts from this.
+const _: () = assert!(AMS_EXPECTED_FRAMES_PER_SCAN == 56);
+const _: () = assert!(AMS_DIAG_NUM_FRAMES == (AMS_DIAG_LAST_ID - AMS_DIAG_BASE_ID + 1) as usize);
+// Firmware-ID frame must live inside the diag block.
+const _: () = assert!(AMS_FW_ID_ID >= AMS_DIAG_BASE_ID && AMS_FW_ID_ID <= AMS_DIAG_LAST_ID);
 
 #[cfg(test)]
 mod tests {
