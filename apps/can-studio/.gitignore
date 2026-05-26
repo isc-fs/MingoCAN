@@ -8,14 +8,24 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
-# Tauri icon generation outputs that aren't the source `icon.png`
+# Tauri icon generation outputs that aren't the source `icon.png`.
+# `tauri icon` rebuilds these on demand; they're keyed off icon.png
+# so committing them just creates merge conflicts.
 src-tauri/icons/icon.icns
 src-tauri/icons/icon.ico
 src-tauri/icons/Square*.png
 src-tauri/icons/StoreLogo.png
 src-tauri/icons/32x32.png
+src-tauri/icons/64x64.png
 src-tauri/icons/128x128.png
 src-tauri/icons/128x128@2x.png
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
+# Per-app npm lockfile. The workspace lockfile at the repo root is
+# the authoritative one; this one appears after `npm install` runs
+# inside the app dir.
+package-lock.json
 
 # Editor / OS noise
 .vscode/settings.json

@@ -34,10 +34,10 @@
 <aside class="sidebar">
     <div class="brand">
         <img src="/icon.png" alt="" />
-        <div>
+        <div class="brand-text">
             <h1>ISC MingoCAN</h1>
             {#if appVersion.length > 0}
-                <p class="muted">v{appVersion}</p>
+                <p class="version">v{appVersion}</p>
             {/if}
         </div>
     </div>
@@ -52,7 +52,7 @@
             >
                 <span class="label">{view.label}</span>
                 {#if view.status === 'soon'}
-                    <span class="badge">soon</span>
+                    <span class="pill soon-pill">soon</span>
                 {/if}
             </button>
         {/each}
@@ -60,40 +60,47 @@
 </aside>
 
 <style>
+    /* Fixed-width left rail. Padding deliberately uses raw px so the
+       sidebar's chrome stays compact regardless of which spacing
+       tokens the views tweak. Everything else (gaps, type, colors)
+       leans on design-system tokens so it stays in sync. */
     .sidebar {
         width: 220px;
         flex: 0 0 220px;
-        padding: 16px 12px;
+        padding: var(--space-4) var(--space-3);
         background: var(--surface);
         border-right: 1px solid var(--border);
         display: flex;
         flex-direction: column;
-        gap: 16px;
+        gap: var(--space-4);
     }
 
+    /* Brand block — icon + product name + version, separated from
+       the nav with a hairline. The version uses --text-xs because
+       it's secondary metadata; the .pill utility would be too loud. */
     .brand {
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 4px 6px 12px;
+        gap: var(--space-3);
+        padding: var(--space-1) var(--space-2) var(--space-3);
         border-bottom: 1px solid var(--border);
     }
 
     .brand img {
         width: 36px;
         height: 36px;
-        border-radius: 8px;
+        border-radius: var(--radius-lg);
     }
 
-    .brand h1 {
+    .brand-text h1 {
         margin: 0;
-        font-size: 0.95rem;
+        font-size: var(--text-base);
         font-weight: 600;
     }
 
-    .brand .muted {
+    .version {
         margin: 2px 0 0;
-        font-size: 0.7rem;
+        font-size: var(--text-xs);
         color: var(--text-muted);
     }
 
@@ -103,19 +110,28 @@
         gap: 2px;
     }
 
+    /* Nav row — bespoke button shape (not .btn) so we can use a
+       left-edge accent indicator + tighter padding than the
+       generic button. Active row swaps to accent text + a 3px
+       accent rail to the left of the label. */
     .nav-item {
         appearance: none;
         background: transparent;
         border: none;
         color: var(--text);
         text-align: left;
-        padding: 8px 10px;
-        border-radius: 6px;
+        padding: var(--space-2) var(--space-3);
+        border-radius: var(--radius-md);
         cursor: pointer;
         font: inherit;
+        font-size: var(--text-base);
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: var(--space-2);
+        transition:
+            background var(--motion-fast),
+            color var(--motion-fast);
     }
 
     .nav-item:hover {
@@ -134,22 +150,23 @@
         height: 18px;
         background: var(--accent);
         border-radius: 2px;
-        margin-right: 8px;
-        margin-left: -10px;
+        margin-right: var(--space-2);
+        margin-left: calc(var(--space-3) * -1);
     }
 
     .nav-item .label {
         flex: 1;
     }
 
-    .badge {
-        font-size: 0.65rem;
+    /* "soon" tag — leans on the .pill utility but knocks the font
+       size down a notch and drops the mono-font + letter-spacing
+       used by status pills (this is a label, not a status read). */
+    .soon-pill {
+        font-family: var(--font-sans);
+        font-size: var(--text-xs);
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        background: var(--bg);
-        border: 1px solid var(--border);
+        padding: 1px var(--space-2);
         color: var(--text-muted);
-        padding: 1px 6px;
-        border-radius: 4px;
     }
 </style>

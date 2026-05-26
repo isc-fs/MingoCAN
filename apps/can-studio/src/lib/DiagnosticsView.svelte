@@ -115,15 +115,17 @@
 
 <div class="view">
     <header>
-        <h2>Diagnostics</h2>
-        <p class="muted">
-            Session health + DTC table. One-shot calls against the configured
-            adapter; nothing streams in the background.
-        </p>
+        <div>
+            <h2>Diagnostics</h2>
+            <p class="muted">
+                Session health + DTC table. One-shot calls against the
+                configured adapter; nothing streams in the background.
+            </p>
+        </div>
     </header>
 
     {#if !adapterReady}
-        <div class="warning">
+        <div class="banner banner-warning">
             <strong>No adapter selected.</strong> Pick one in the
             <em>Adapters</em> view first.
         </div>
@@ -131,24 +133,25 @@
 
     <!-- Session health -->
     <section class="card">
-        <header>
+        <div class="card-header">
             <h3>Session health</h3>
             <button
                 type="button"
+                class="btn btn-sm"
                 onclick={refreshHealth}
                 disabled={healthLoading || !adapterReady}
             >
                 {healthLoading ? '…' : '⟳'}
                 Refresh
             </button>
-        </header>
+        </div>
 
         {#if healthError !== null}
-            <div class="error">{healthError}</div>
+            <div class="banner banner-danger">{healthError}</div>
         {/if}
 
         {#if health !== null}
-            <table>
+            <table class="kv-table">
                 <tbody>
                     <tr>
                         <th>Uptime</th>
@@ -198,11 +201,12 @@
 
     <!-- DTCs -->
     <section class="card">
-        <header>
+        <div class="card-header">
             <h3>Diagnostic Trouble Codes</h3>
-            <div class="actions">
+            <div class="card-actions">
                 <button
                     type="button"
+                    class="btn btn-sm"
                     onclick={refreshDtcs}
                     disabled={dtcsLoading || !adapterReady}
                 >
@@ -211,7 +215,7 @@
                 </button>
                 <button
                     type="button"
-                    class="danger"
+                    class="btn btn-sm btn-danger"
                     onclick={doClearDtcs}
                     disabled={clearing || !adapterReady}
                 >
@@ -219,10 +223,10 @@
                     Clear DTCs
                 </button>
             </div>
-        </header>
+        </div>
 
         {#if dtcsError !== null}
-            <div class="error">{dtcsError}</div>
+            <div class="banner banner-danger">{dtcsError}</div>
         {/if}
 
         {#if dtcsRead && dtcs.length === 0 && dtcsError === null}
@@ -263,114 +267,87 @@
 </div>
 
 <style>
-    .view {
+    /* All view chrome (.view, .card, .card-header, .banner-*, .btn,
+       .muted, .small) comes from app.css. Local styles cover the
+       two tables + the per-severity DTC pills, which are view-
+       specific shapes the design system doesn't ship. */
+
+    .card-actions {
         display: flex;
-        flex-direction: column;
-        gap: 16px;
-        padding: 24px 28px;
-        overflow: auto;
-    }
-    h2 { margin: 0; font-size: 1.3rem; }
-    .muted { color: var(--text-muted); }
-    header .muted { margin: 4px 0 0; font-size: 0.9rem; }
-    .small { font-size: 0.85rem; }
-
-    .warning {
-        padding: 10px 14px;
-        border: 1px solid var(--accent);
-        background: rgba(242, 178, 51, 0.08);
-        border-radius: 6px;
-    }
-    .card {
-        padding: 16px 18px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface);
-    }
-    .card header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 12px;
-    }
-    .card h3 { margin: 0; font-size: 1rem; }
-    .card .actions { display: flex; gap: 8px; }
-
-    button {
-        appearance: none;
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        font: inherit;
-        padding: 6px 12px;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 0.85rem;
-    }
-    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    button.danger:hover:not(:disabled) { border-color: var(--error); color: var(--error); }
-
-    .error {
-        padding: 10px 14px;
-        border: 1px solid var(--error);
-        color: var(--error);
-        border-radius: 6px;
-        background: rgba(255, 115, 115, 0.08);
-        margin-bottom: 10px;
-        font-size: 0.85rem;
+        gap: var(--space-2);
     }
 
-    table {
+    /* Key/value table for session-health card — flat two-column
+       layout, no head row. Labels in --text-muted, values in --text. */
+    .kv-table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
     }
-    th, td {
+    .kv-table th,
+    .kv-table td {
         text-align: left;
-        padding: 6px 10px;
+        padding: var(--space-2) var(--space-3);
         border-bottom: 1px solid var(--border);
     }
-    tbody tr:last-child td { border-bottom: none; }
-    th {
+    .kv-table tbody tr:last-child td,
+    .kv-table tbody tr:last-child th {
+        border-bottom: none;
+    }
+    .kv-table th {
         color: var(--text-muted);
         font-weight: 500;
-        font-size: 0.75rem;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
+        width: 40%;
     }
-    code { font-family: var(--font-mono); }
 
-    .dtc-table thead th {
+    /* DTC table — full thead. */
+    .dtc-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: var(--text-sm);
+    }
+    .dtc-table th,
+    .dtc-table td {
+        text-align: left;
+        padding: var(--space-2) var(--space-3);
         border-bottom: 1px solid var(--border);
     }
+    .dtc-table tbody tr:last-child td {
+        border-bottom: none;
+    }
+    .dtc-table thead th {
+        color: var(--text-muted);
+        font-weight: 500;
+        font-size: var(--text-xs);
+    }
 
+    code {
+        font-family: var(--font-mono);
+    }
+
+    /* Severity tag — outline-only, sized down to match table density.
+       Color encodes severity rather than a soft-background fill. */
     .sev {
-        font-size: 0.7rem;
-        padding: 1px 8px;
-        border-radius: 3px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        font-weight: 600;
-        border: 1px solid;
+        font-size: var(--text-xs);
+        padding: 1px var(--space-2);
+        border-radius: var(--radius-pill);
+        font-weight: 500;
+        border: 1px solid var(--border);
+        color: var(--text-secondary);
     }
     .sev-info {
-        color: #4cc9f0;
-        border-color: rgba(76, 201, 240, 0.4);
-        background: rgba(76, 201, 240, 0.08);
+        color: var(--info);
+        border-color: var(--info);
     }
     .sev-warn {
-        color: #ffd166;
-        border-color: rgba(255, 209, 102, 0.4);
-        background: rgba(255, 209, 102, 0.08);
+        color: var(--warning);
+        border-color: var(--warning);
     }
     .sev-error {
-        color: var(--error);
-        border-color: rgba(255, 115, 115, 0.4);
-        background: rgba(255, 115, 115, 0.08);
+        color: var(--danger);
+        border-color: var(--danger);
     }
     .sev-unknown {
         color: var(--text-muted);
-        border-color: var(--border);
     }
 </style>
