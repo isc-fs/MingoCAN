@@ -24,6 +24,7 @@ Commands:
   replay      Record or replay a CAN session (testing)
   send-raw    Send one raw CAN frame (app-level reboot-to-BL, bench probes)
   provision   Assign a board's node-id by role name (ecu / ams / udv)
+  pit-diag    AMS pit-diag observer — arm / disarm / stream the diag stream
   adapters    List detected CAN adapters on this machine
 
 Global Options:
@@ -260,6 +261,54 @@ can-flasher --interface slcan --channel /dev/ttyACM0 \
 After a successful provision (with reset), follow up with
 `can-flasher discover` — the board should reappear at the new
 node-id.
+
+---
+
+## `pit-diag` — AMS observer mode
+
+The AMS firmware can be flipped into a 1 Hz diagnostic stream by
+the host. When armed it broadcasts 51 frames per scan (every cell
+voltage, every NTC temperature, FSM state, V-poll timing) to
+whoever's listening. `pit-diag` is the terminal-side driver — it
+sends the arm command, waits for the ACK, and decodes the stream.
+
+The MingoCAN app has the same observer rendered as a live
+cell-V grid + temp heatmap; this subcommand is the headless
+equivalent for bench scripts, CI smoke checks, and `jq`-piping.
+
+```bash
+# Arm the stream — the AMS starts emitting 51 frames/sec.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag enable
+# ✓ ams pit-diag armed
+
+# Disarm — stops the stream.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag disable
+# ✓ ams pit-diag disarmed
+
+# Arm + stream + auto-disarm-on-exit. Ctrl-C cleanly disarms.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag stream
+# [+  0.143s] cell  frame= 0 cells[ 0.. 4] = 3400 3408 3413 3424 mV
+# [+  0.156s] cell  frame= 1 cells[ 4.. 8] = 3402 3411 3399 3407 mV
+# [+  0.842s] fsm   state=Run mode=Car tsms=1 dash=1 ams_ok=1 pec=0
+# [+  0.881s] poll  v_last=  12ms v_worst=  41ms tsweep_fail=0x00000000
+#  ...
+
+# Bounded run — stream for 10 seconds, then disarm + exit.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag stream --duration 10
+
+# NDJSON output for scripting. One JSON object per line; pipe
+# through jq for grepping specific fields.
+can-flasher -i slcan -c … --json pit-diag stream --duration 5 \
+    | jq -c 'select(.kind == "cellVoltage" and .firstCell == 0)'
+
+# CI smoke check — fails non-zero if any 1Hz window has wildly
+# wrong frame count (catches firmware drift before bench time).
+can-flasher -i slcan -c … pit-diag stream --duration 5 --strict-scan
+```
+
+Profile flag (`--profile ams`) is hardcoded to AMS today. The
+plugin layer for VCU / UDV streams lands in the slice 5 work on
+[#252](https://github.com/isc-fs/can-flasher/issues/252).
 
 ---
 
