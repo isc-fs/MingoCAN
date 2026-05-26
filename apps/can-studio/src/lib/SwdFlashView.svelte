@@ -265,19 +265,22 @@
         </div>
         <button
             type="button"
-            class="refresh"
+            class="icon-btn"
             onclick={refreshProbes}
             disabled={probesLoading}
             title="Re-enumerate attached probes"
+            aria-label="Refresh probes"
         >
             {probesLoading ? '…' : '⟳'}
         </button>
     </header>
 
     <section class="card">
-        <h3>Probe</h3>
+        <div class="card-header">
+            <h3>Probe</h3>
+        </div>
         {#if probesError !== null}
-            <div class="error">
+            <div class="banner banner-danger">
                 <strong>Failed to enumerate probes:</strong>
                 {probesError}
             </div>
@@ -311,11 +314,14 @@
     </section>
 
     <section class="card">
-        <h3>Firmware</h3>
+        <div class="card-header">
+            <h3>Firmware</h3>
+        </div>
         <label class="field">
             <span>Artifact</span>
-            <div class="row">
+            <div class="input-row">
                 <input
+                    class="input mono"
                     type="text"
                     bind:value={args.artifactPath}
                     placeholder="/path/to/bootloader.elf"
@@ -323,6 +329,7 @@
                 />
                 <button
                     type="button"
+                    class="btn btn-sm"
                     onclick={browseForArtifact}
                     disabled={running || fetchState.kind === 'fetching'}
                 >
@@ -336,12 +343,13 @@
             <code>.elf</code> and <code>.hex</code> carry their own addresses.
         </p>
 
-        <div class="divider"></div>
+        <hr class="divider" />
 
         <label class="field">
             <span>or — fetch from <code>isc-fs/stm32-can-bootloader</code></span>
-            <div class="row">
+            <div class="input-row">
                 <input
+                    class="input mono"
                     type="text"
                     bind:value={releaseTag}
                     placeholder="(latest)"
@@ -349,6 +357,7 @@
                 />
                 <button
                     type="button"
+                    class="btn btn-sm"
                     onclick={fetchFromReleases}
                     disabled={running || fetchState.kind === 'fetching'}
                 >
@@ -364,7 +373,7 @@
                 above.
             </p>
         {:else if fetchState.kind === 'error'}
-            <p class="fetch-error small">
+            <p class="small fetch-error">
                 <strong>Fetch failed:</strong>
                 {fetchState.message}
             </p>
@@ -377,7 +386,9 @@
     </section>
 
     <section class="card">
-        <h3>Options</h3>
+        <div class="card-header">
+            <h3>Options</h3>
+        </div>
         <label class="toggle">
             <input type="checkbox" bind:checked={args.verify} disabled={running} />
             <span>Verify after write</span>
@@ -395,7 +406,7 @@
     <div class="actions">
         <button
             type="button"
-            class="primary"
+            class="btn btn-primary"
             onclick={runFlash}
             disabled={running || erasing || args.artifactPath.trim().length === 0}
         >
@@ -407,7 +418,7 @@
         </button>
         <button
             type="button"
-            class="danger"
+            class="btn btn-danger"
             onclick={() => (eraseState = { kind: 'confirming' })}
             disabled={running || erasing}
         >
@@ -416,10 +427,10 @@
     </div>
 
     {#if flashState.kind === 'running'}
-        <div class="status running">
+        <div class="banner">
             <div class="progress-row">
                 <span class="op-label">{opLabel}</span>
-                <span class="pct">
+                <span class="pct mono small">
                     {#if pct !== null}
                         {pct}%
                     {:else}
@@ -438,10 +449,10 @@
             >
                 <div class="fill" style:width={pct !== null ? `${pct}%` : '100%'}></div>
             </div>
-            <p class="muted small">Don't unplug the probe.</p>
+            <p class="muted small no-margin">Don't unplug the probe.</p>
         </div>
     {:else if flashState.kind === 'ok'}
-        <div class="status ok">
+        <div class="banner banner-success">
             <div>
                 ✓ Bootloader burned in {flashState.durationMs} ms. The chip is
                 ready to be flashed over CAN from the <strong>Flash</strong> tab.
@@ -473,27 +484,28 @@
             </dl>
         </div>
     {:else if flashState.kind === 'error'}
-        <div class="status error">
+        <div class="banner banner-danger">
             <strong>Burn failed:</strong>
             {flashState.message}
         </div>
     {/if}
 
     {#if eraseState.kind === 'confirming'}
-        <div class="status warn">
+        <div class="banner banner-warning">
             <strong>Erase the entire chip?</strong>
             This wipes the bootloader and any application code. The chip will
             need the bootloader burned again before CAN flashing works.
             <div class="confirm-actions">
                 <button
                     type="button"
-                    class="danger"
+                    class="btn btn-danger"
                     onclick={startErase}
                 >
                     Yes, erase
                 </button>
                 <button
                     type="button"
+                    class="btn"
                     onclick={() => (eraseState = { kind: 'idle' })}
                 >
                     Cancel
@@ -501,16 +513,16 @@
             </div>
         </div>
     {:else if eraseState.kind === 'running'}
-        <div class="status running">
+        <div class="banner spinner-row">
             <span class="spinner"></span>
             Erasing chip — don't unplug the probe.
         </div>
     {:else if eraseState.kind === 'ok'}
-        <div class="status ok">
+        <div class="banner banner-success">
             ✓ Chip erased. Burn the bootloader next to make it CAN-flashable.
         </div>
     {:else if eraseState.kind === 'error'}
-        <div class="status error">
+        <div class="banner banner-danger">
             <strong>Erase failed:</strong>
             {eraseState.message}
         </div>
@@ -518,202 +530,82 @@
 </div>
 
 <style>
-    .view {
-        padding: 20px 24px 32px;
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        overflow-y: auto;
-    }
+    /* The .view, .card, .card-header, .field, .toggle, .btn (+
+       variants), .icon-btn, .banner (+ variants), .divider, .small,
+       .muted, .mono utilities all come from app.css. This file only
+       defines the bits that are genuinely view-specific:
+         - input-row: textbox + adjacent action button
+         - actions, confirm-actions: button row layout
+         - progress bar (op label + percent + animated fill)
+         - probe-fingerprint dl
+         - single-probe dot indicator
+         - inline spinner
+    */
 
-    header {
+    /* Input + right-side button row. Used by Artifact + Tag fields. */
+    .input-row {
         display: flex;
-        align-items: flex-start;
-        gap: 12px;
+        gap: var(--space-2);
     }
-
-    header > div {
+    .input-row .input {
         flex: 1;
     }
 
-    h2 {
-        margin: 0;
-        font-size: 1.2rem;
-    }
-
-    h3 {
-        margin: 0 0 10px;
-        font-size: 0.85rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--text-muted);
-    }
-
-    .muted {
-        color: var(--text-muted);
-    }
-
-    .small {
-        font-size: 0.8rem;
-        margin: 6px 0 0;
-    }
-
-    .card {
-        padding: 14px 16px;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-    }
-
-    .field {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-    }
-
-    .field > span {
-        font-size: 0.8rem;
-        color: var(--text-muted);
-    }
-
-    .field input,
-    .field select {
-        appearance: none;
-        background: var(--bg);
-        border: 1px solid var(--border);
-        color: var(--text);
-        font: inherit;
-        padding: 8px 10px;
-        border-radius: 6px;
-    }
-
-    .field input:focus,
-    .field select:focus {
-        outline: none;
-        border-color: var(--accent);
-    }
-
-    .row {
-        display: flex;
-        gap: 6px;
-    }
-
-    .row input {
-        flex: 1;
-        font-family: var(--font-mono);
-    }
-
-    .row button,
-    .actions button {
-        appearance: none;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        color: var(--text);
-        font: inherit;
-        padding: 8px 14px;
-        border-radius: 6px;
-        cursor: pointer;
-    }
-
-    .row button:hover:not(:disabled),
-    .actions button:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
-    }
-
-    button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-    }
-
-    .grid-2 {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
-    }
-
-    .toggle {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 4px 0;
-        cursor: pointer;
-    }
-
-    .toggle input {
-        accent-color: var(--accent);
-    }
-
+    /* Page-level CTA row. */
     .actions {
         display: flex;
-        gap: 8px;
+        gap: var(--space-2);
     }
 
-    .actions .primary {
-        background: var(--accent);
-        color: #1a1a1a;
-        border-color: var(--accent);
-        font-weight: 600;
+    /* Inline button row inside the confirm banner — buttons live
+       below the prompt text, so we top-margin the group. */
+    .confirm-actions {
+        display: flex;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
     }
 
-    .actions .primary:hover:not(:disabled) {
-        filter: brightness(1.05);
-        color: #1a1a1a;
+    /* Spinner banner — needs flex layout so the spinner + label
+       align on the same baseline. The .banner utility doesn't
+       imply layout, so we add it here. */
+    .spinner-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
     }
 
-    .danger {
-        appearance: none;
-        background: transparent;
-        border: 1px solid var(--error);
-        color: var(--error);
-        font: inherit;
-        padding: 8px 14px;
-        border-radius: 6px;
-        cursor: pointer;
-    }
-
-    .danger:hover:not(:disabled) {
-        background: rgba(255, 115, 115, 0.1);
-    }
-
-    .danger:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-    }
-
-    /* Progress bar */
-
+    /* Progress bar — bespoke (no .progress utility in the design
+       system yet). Header row pairs an op label with the percent
+       reading; the bar below fills with the accent or slides an
+       indeterminate gradient when probe-rs hasn't told us the byte
+       count yet. */
     .progress-row {
         display: flex;
         justify-content: space-between;
         align-items: baseline;
-        margin-bottom: 6px;
+        margin-bottom: var(--space-2);
     }
-
     .op-label {
         font-weight: 500;
     }
-
     .pct {
-        font-family: var(--font-mono);
-        font-size: 0.85rem;
-        color: var(--text-muted);
+        margin: 0;
     }
-
+    .no-margin {
+        margin: var(--space-2) 0 0;
+    }
     .bar {
         height: 8px;
         background: var(--bg);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         overflow: hidden;
         border: 1px solid var(--border);
     }
-
     .bar .fill {
         height: 100%;
         background: var(--accent);
         transition: width 120ms ease-out;
     }
-
     .bar.indeterminate .fill {
         animation: slide 1.2s ease-in-out infinite;
         background: linear-gradient(
@@ -723,7 +615,6 @@
             transparent 100%
         );
     }
-
     @keyframes slide {
         0% {
             transform: translateX(-100%);
@@ -733,81 +624,17 @@
         }
     }
 
-    .status.warn {
-        color: #ffd166;
-        border-color: rgba(255, 209, 102, 0.4);
-        background: rgba(255, 209, 102, 0.06);
-    }
-
-    .confirm-actions {
-        display: flex;
-        gap: 8px;
-        margin-top: 10px;
-    }
-
-    .confirm-actions button {
-        appearance: none;
-        font: inherit;
-        padding: 8px 14px;
-        border-radius: 6px;
-        cursor: pointer;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        color: var(--text);
-    }
-
-    .confirm-actions button:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
-    }
-
-    .status {
-        padding: 10px 14px;
-        border-radius: 6px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-    }
-
-    .status.ok {
-        color: #06d6a0;
-        border-color: rgba(6, 214, 160, 0.4);
-        background: rgba(6, 214, 160, 0.06);
-    }
-
-    .status.error {
-        color: var(--error);
-        border-color: var(--error);
-        background: rgba(255, 115, 115, 0.08);
-    }
-
-    .status.running {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-    }
-
-    .error {
-        padding: 10px 14px;
-        border-radius: 6px;
-        background: rgba(255, 115, 115, 0.1);
-        border: 1px solid var(--error);
-        color: var(--error);
-        margin-top: 4px;
-    }
-
+    /* Empty-state paragraph inside .card — strip the default
+       paragraph margin so it sits flush with the card header. */
     .empty {
         margin: 0;
     }
 
-    .divider {
-        height: 1px;
-        background: var(--border);
-        margin: 14px 0 12px;
-    }
-
+    /* Fetch-error helper text — uses --danger but lives outside a
+       .banner because it's a tail-line below the Fetch field. */
     .fetch-error {
-        margin: 6px 0 0;
-        color: var(--error);
+        margin: var(--space-2) 0 0;
+        color: var(--danger);
     }
 
     /* Post-flash fingerprint — verifiable proof of what's on the
@@ -816,64 +643,41 @@
     .fingerprint {
         display: grid;
         grid-template-columns: max-content 1fr;
-        gap: 4px 16px;
-        margin: 10px 0 0;
-        font-size: 0.85rem;
+        gap: var(--space-1) var(--space-4);
+        margin: var(--space-3) 0 0;
+        font-size: var(--text-sm);
     }
-
     .fingerprint dt {
         color: var(--text-muted);
         font-weight: 500;
     }
-
     .fingerprint dd {
         margin: 0;
         font-family: var(--font-mono);
     }
 
-    .refresh {
-        appearance: none;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        color: var(--text);
-        width: 36px;
-        height: 36px;
-        border-radius: 6px;
-        font: inherit;
-        font-size: 1rem;
-        cursor: pointer;
-    }
-
-    .refresh:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
-    }
-
-    .refresh:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-    }
-
+    /* Single-probe row — short status line shown when only one
+       probe is attached (no dropdown needed). Mono so the serial
+       number stays grep-friendly. */
     .single-probe {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: var(--space-2);
         margin: 0;
         font-family: var(--font-mono);
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
     }
-
     .dot {
         width: 8px;
         height: 8px;
         border-radius: 50%;
         background: var(--text-muted);
     }
-
     .dot.ok {
-        background: #06d6a0;
+        background: var(--success);
     }
 
+    /* Inline spinner for the chip-erase "running" banner. */
     .spinner {
         width: 14px;
         height: 14px;
@@ -883,7 +687,6 @@
         animation: spin 1s linear infinite;
         display: inline-block;
     }
-
     @keyframes spin {
         to {
             transform: rotate(360deg);
