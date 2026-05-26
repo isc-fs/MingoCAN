@@ -1,39 +1,45 @@
 //! AMS pit-diag observer protocol.
 //!
-//! When armed, the AMS emits 56 frames at 1 Hz carrying the full
+//! When armed, the AMS emits 51 frames at 1 Hz carrying the
 //! diagnostic picture: every cell voltage, every NTC temperature,
-//! plus FSM state, balance mask, boot reason, crash post-mortem,
-//! and firmware ID. This module handles the arm/disarm handshake
-//! and decodes the wire frames into typed records the rest of the
-//! crate (and the Studio app) can consume.
+//! plus FSM state + poll-timing telemetry. This module handles the
+//! arm/disarm handshake and decodes the wire frames into typed
+//! records the rest of the crate (and the Studio app) can consume.
 //!
-//! ## Wire protocol (per AMS PR #248)
+//! ## Wire protocol
+//!
+//! Source of truth: `docs/CAN_MAP.md` in the AMS repo (IFS08-CE-AMS).
+//! The #252 issue body in this repo lists more diag-block frames
+//! (balance / boot / crash / firmware-ID) — those are forward-
+//! looking; the firmware ships 2 today (`0x6C0` + `0x6C1`).
 //!
 //! - **Enable**:  emit `0x7F0` with payload `DE AD BE EF`.
 //! - **Disable**: emit `0x7F0` with payload `00 00 00 00`.
 //! - **ACK**:     AMS replies on `0x7F1` with 1 byte —
 //!   `0x01` = enabled, `0x00` = disabled.
-//! - **Stream IDs once armed**:
+//! - **Stream IDs once armed (51 frames / scan total)**:
 //!   - `0x680..=0x697` (24 frames) — cell voltages, 4 cells/frame,
 //!     big-endian `u16` millivolts. The last frame's 4th slot is a
 //!     `0xFFFF` sentinel because 95 cells don't divide evenly by 4.
 //!   - `0x6A0..=0x6B8` (25 frames) — NTC temperatures, 8 NTCs/frame,
 //!     signed `i8` °C. Exact (25 × 8 = 200).
-//!   - `0x6C0..=0x6C6` (7 frames) — FSM / balance / boot / crash /
-//!     firmware ID. Decoders for these land in slice 2.
+//!   - `0x6C0` — FSM extended status (state, mode_locked, TSMS,
+//!     DASH_CHG, AMS_OK, PEC error total).
+//!   - `0x6C1` — Poll timing (last V-poll ms, worst V-poll ms,
+//!     T-sweep failure mask).
 //!
 //! ## Scope
 //!
-//! Slice 1 (this module): handshake + cell-voltage + NTC-temp
-//! decoders. Frames `0x6C0..=0x6C6` are recognised as in-range but
-//! not decoded — `decode_frame` returns `None` for them so callers
-//! can pass them through without warnings while slice 2 fills in
-//! the typed records.
+//! Slice 1 shipped the handshake + cell-voltage + NTC-temp decoders.
+//! Slice 2 (this slice) adds typed [`FsmStatusFrame`] +
+//! [`PollTimingFrame`] decoders for the diag block, plus
+//! [`AMS_EXPECTED_FRAMES_PER_SCAN`] which the Studio uses to detect
+//! wire-shape drift before any silent miscalibration takes hold.
 //!
 //! VCU + UDV will get equivalent streams in their own ID ranges
-//! (TBD per team). The plugin/profile abstraction lands in slice 5;
-//! until then the symbol names here are AMS-prefixed (`AMS_*`) so
-//! the eventual refactor is obvious.
+//! (TBD per team). The plugin/profile abstraction lands in a later
+//! slice; until then the symbol names here are AMS-prefixed
+//! (`AMS_*`) so the eventual refactor is obvious.
 
 use crate::protocol::CanFrame;
 
@@ -81,26 +87,38 @@ pub const AMS_NTC_LAST_ID: u16 = 0x6B8;
 /// Number of frames in the NTC-temperature stream.
 pub const AMS_NTC_NUM_FRAMES: usize = 25;
 
-/// First CAN ID in the FSM / balance / boot / crash / fw-ID block
-/// (7 frames). Decoders for these arrive in slice 2; slice 1 just
-/// recognises the range so callers can pass them through.
+/// First CAN ID in the FSM / poll-timing diag block.
+///
+/// The #252 issue body lists seven frames here (`0x6C0..=0x6C6` for
+/// FSM / poll / balance / boot / crash / firmware-ID), but the AMS
+/// firmware's `docs/CAN_MAP.md` (the source of truth — see IFS08-CE-AMS)
+/// currently only documents `0x6C0` and `0x6C1`. The firmware itself
+/// confirms it: the doc's bus-cost note reads "51 frames × ~12 bytes-
+/// on-wire", which is 24 + 25 + **2** — not the issue's projected 56.
+///
+/// Slice 2 lines up the host-side decoder with the real wire shape.
+/// The remaining frames (balance / boot / crash / firmware-ID) land
+/// in future slices once the AMS team ships them. The constant +
+/// invariant pair keeps the host honest: when the AMS doc grows to
+/// list more frames, this constant moves with it and the
+/// `AMS_EXPECTED_FRAMES_PER_SCAN` math falls out automatically.
 pub const AMS_DIAG_BASE_ID: u16 = 0x6C0;
-/// Last CAN ID in the diag block.
-pub const AMS_DIAG_LAST_ID: u16 = 0x6C6;
-/// Number of frames in the diag block (7).
-pub const AMS_DIAG_NUM_FRAMES: usize = 7;
-/// CAN ID of the firmware-ID frame inside the diag block. Slice 1
-/// doesn't decode the payload (slice 2 lands the typed semver / git
-/// hash / node-id fields); we just call it out by name so the view
-/// can pluck the raw bytes for operator-visible identification.
-pub const AMS_FW_ID_ID: u16 = 0x6C6;
+/// Last CAN ID currently emitted in the diag block.
+pub const AMS_DIAG_LAST_ID: u16 = 0x6C1;
+/// Number of frames in the diag block today (2 — FSM + poll timing).
+pub const AMS_DIAG_NUM_FRAMES: usize = 2;
 
-/// Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 7.
+/// CAN ID of the FSM extended-status frame.
+pub const AMS_FSM_STATUS_ID: u16 = 0x6C0;
+/// CAN ID of the poll-timing frame.
+pub const AMS_POLL_TIMING_ID: u16 = 0x6C1;
+
+/// Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 2.
 /// The Studio compares this against an observed scan-rate counter
-/// and banners a warning if the wire shape has drifted — if a
-/// future firmware version adds or drops frames, this is the
-/// signal the operator sees before the brittleness of the hand-
-/// coded layout bites them.
+/// and banners a warning if the wire shape has drifted — if a future
+/// firmware version adds or drops frames, this is the signal the
+/// operator sees before the brittleness of the hand-coded layout
+/// bites them.
 pub const AMS_EXPECTED_FRAMES_PER_SCAN: usize =
     AMS_CELLV_NUM_FRAMES + AMS_NTC_NUM_FRAMES + AMS_DIAG_NUM_FRAMES;
 
@@ -135,11 +153,98 @@ pub struct NtcTempFrame {
     pub temps_c: [i8; 8],
 }
 
-/// A decoded pit-diag frame, dispatched by CAN ID.
+/// AMS FSM state, mirrored from `ams::fsm::State` in the firmware.
 ///
-/// The `Diag` variant carries the un-decoded payload for IDs in
-/// the FSM/balance/boot/crash/fw-ID block (`0x6C0..=0x6C6`) — slice 2
-/// fills in typed variants for each.
+/// Wire encoding: byte 0 of the `0x6C0` frame, value 0..=5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FsmState {
+    Start = 0,
+    Precharge = 1,
+    Transition = 2,
+    Run = 3,
+    Charge = 4,
+    Error = 5,
+    /// Any state byte outside 0..=5. Slice 2 didn't see it during
+    /// bring-up but firmware could in principle emit out-of-range
+    /// values; surfacing them keeps the host honest.
+    Unknown(u8),
+}
+
+impl FsmState {
+    fn from_byte(b: u8) -> Self {
+        match b {
+            0 => Self::Start,
+            1 => Self::Precharge,
+            2 => Self::Transition,
+            3 => Self::Run,
+            4 => Self::Charge,
+            5 => Self::Error,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// Mode lock — which operating mode the cockpit's been told to use.
+///
+/// Wire encoding: byte 1 of `0x6C0`, value 0..=2. (Also appears in
+/// `0x4A2`'s telemetry byte, bits 3:2.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModeLock {
+    Undecided = 0,
+    Car = 1,
+    Charger = 2,
+    Unknown(u8),
+}
+
+impl ModeLock {
+    fn from_byte(b: u8) -> Self {
+        match b {
+            0 => Self::Undecided,
+            1 => Self::Car,
+            2 => Self::Charger,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// Decoded `0x6C0` — FSM extended status. Layout per
+/// `docs/CAN_MAP.md` in IFS08-CE-AMS:
+///
+/// | byte | field |
+/// |---|---|
+/// | 0 | FSM state (`ams::fsm::State`) |
+/// | 1 | mode_locked (0=Undecided / 1=Car / 2=Charger) |
+/// | 2 | bits: bit 1 = TSMS, bit 0 = DASH_CHG |
+/// | 3 | AMS_OK GPIO (0/1) |
+/// | 4..5 | PEC error total (big-endian u16) |
+/// | 6..7 | reserved |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FsmStatusFrame {
+    pub state: FsmState,
+    pub mode_locked: ModeLock,
+    pub tsms: bool,
+    pub dash_chg: bool,
+    pub ams_ok: bool,
+    pub pec_error_total: u16,
+}
+
+/// Decoded `0x6C1` — poll timing. Layout per AMS doc:
+///
+/// | bytes | field |
+/// |---|---|
+/// | 0..1 | last V-poll latency (big-endian u16, milliseconds) |
+/// | 2..3 | worst-case V-poll latency (big-endian u16, milliseconds) |
+/// | 4..7 | last T-sweep failure mask (little-endian u32) |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PollTimingFrame {
+    pub last_v_poll_ms: u16,
+    pub worst_v_poll_ms: u16,
+    pub t_sweep_fail_mask: u32,
+}
+
+/// A decoded pit-diag frame, dispatched by CAN ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PitDiagFrame {
     /// AMS replied to an arm/disarm command.
@@ -152,16 +257,10 @@ pub enum PitDiagFrame {
     CellVoltage(CellVoltageFrame),
     /// One of the 25 NTC-temperature frames.
     NtcTemp(NtcTempFrame),
-    /// One of the 7 FSM/balance/boot/crash/fw-ID frames. Slice 2
-    /// replaces this with a typed variant per ID.
-    Diag {
-        /// CAN ID (`0x6C0..=0x6C6`).
-        id: u16,
-        /// Raw payload, copied out of the frame.
-        payload: [u8; 8],
-        /// Live payload length (0..=8).
-        len: u8,
-    },
+    /// `0x6C0` — FSM extended status.
+    FsmStatus(FsmStatusFrame),
+    /// `0x6C1` — V-poll + T-sweep timing telemetry.
+    PollTiming(PollTimingFrame),
 }
 
 // ---- Encode / decode --------------------------------------------
@@ -235,15 +334,36 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
         }));
     }
 
-    // FSM/balance/boot/crash/fw-ID block — recognised, not typed yet.
-    // Surface the raw payload so slice 1 callers can at least see the
-    // frames arriving on the wire.
-    if (AMS_DIAG_BASE_ID..=AMS_DIAG_LAST_ID).contains(&id) {
-        return Some(PitDiagFrame::Diag {
-            id,
-            payload: frame.data,
-            len: frame.len,
-        });
+    // FSM extended status — 0x6C0.
+    if id == AMS_FSM_STATUS_ID {
+        if payload.len() < 6 {
+            // Need at least bytes 0..5 (PEC u16 ends at byte 5);
+            // 6..7 are reserved, so a 6-byte payload still decodes.
+            return None;
+        }
+        let cockpit_bits = payload[2];
+        return Some(PitDiagFrame::FsmStatus(FsmStatusFrame {
+            state: FsmState::from_byte(payload[0]),
+            mode_locked: ModeLock::from_byte(payload[1]),
+            tsms: (cockpit_bits & 0b0000_0010) != 0,
+            dash_chg: (cockpit_bits & 0b0000_0001) != 0,
+            ams_ok: payload[3] != 0,
+            pec_error_total: u16::from_be_bytes([payload[4], payload[5]]),
+        }));
+    }
+
+    // Poll timing — 0x6C1.
+    if id == AMS_POLL_TIMING_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        return Some(PitDiagFrame::PollTiming(PollTimingFrame {
+            last_v_poll_ms: u16::from_be_bytes([payload[0], payload[1]]),
+            worst_v_poll_ms: u16::from_be_bytes([payload[2], payload[3]]),
+            // T-sweep mask is LE u32 on the wire (the only LE field
+            // in the pit-diag stream — the rest is BE).
+            t_sweep_fail_mask: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        }));
     }
 
     None
@@ -275,12 +395,20 @@ const _: () = assert!(AMS_NTC_NUM_FRAMES == (AMS_NTC_LAST_ID - AMS_NTC_BASE_ID +
 const _: () = assert!(AMS_CELLV_NUM_FRAMES * 4 > AMS_NUM_CELLS);
 // 25 frames × 8 NTCs/frame = 200 = AMS_NUM_NTCS exactly.
 const _: () = assert!(AMS_NTC_NUM_FRAMES * 8 == AMS_NUM_NTCS);
-// Total scan must equal 56 = 24 + 25 + 7. The Studio displays a
-// warning if the observed scan rate drifts from this.
-const _: () = assert!(AMS_EXPECTED_FRAMES_PER_SCAN == 56);
+// Diag block size matches the (base, last) range.
 const _: () = assert!(AMS_DIAG_NUM_FRAMES == (AMS_DIAG_LAST_ID - AMS_DIAG_BASE_ID + 1) as usize);
-// Firmware-ID frame must live inside the diag block.
-const _: () = assert!(AMS_FW_ID_ID >= AMS_DIAG_BASE_ID && AMS_FW_ID_ID <= AMS_DIAG_LAST_ID);
+// Total scan = 51 frames per the AMS doc's bus-cost note ("51
+// frames × ~12 bytes-on-wire"). The Studio displays a warning if
+// the observed scan rate drifts from this — that's the canary for
+// "the AMS team added or dropped frames since this constant was
+// last verified". When new diag-block frames ship, bump
+// AMS_DIAG_LAST_ID and AMS_DIAG_NUM_FRAMES together.
+const _: () = assert!(AMS_EXPECTED_FRAMES_PER_SCAN == 51);
+// Both named diag IDs must live inside the diag block range.
+const _: () =
+    assert!(AMS_FSM_STATUS_ID >= AMS_DIAG_BASE_ID && AMS_FSM_STATUS_ID <= AMS_DIAG_LAST_ID);
+const _: () =
+    assert!(AMS_POLL_TIMING_ID >= AMS_DIAG_BASE_ID && AMS_POLL_TIMING_ID <= AMS_DIAG_LAST_ID);
 
 #[cfg(test)]
 mod tests {
@@ -393,23 +521,102 @@ mod tests {
     }
 
     #[test]
-    fn diag_block_returns_raw_payload() {
-        // 0x6C2 — balance DCC mask frame (slice 2 will decode this).
-        let payload = [0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44];
-        let frame = CanFrame::new(0x6C2, &payload).unwrap();
+    fn decodes_fsm_status_run_state() {
+        // 0x6C0 — typical in-Run snapshot: state=Run(3), mode=Car(1),
+        // TSMS on + DASH_CHG on (cockpit byte 0b11 = 0x03), AMS_OK on,
+        // PEC errors = 0x0042.
+        let frame = CanFrame::new(
+            AMS_FSM_STATUS_ID,
+            &[0x03, 0x01, 0x03, 0x01, 0x00, 0x42, 0x00, 0x00],
+        )
+        .unwrap();
         let decoded = decode_frame(&frame).unwrap();
         match decoded {
-            PitDiagFrame::Diag {
-                id,
-                payload: p,
-                len,
-            } => {
-                assert_eq!(id, 0x6C2);
-                assert_eq!(&p[..], &payload[..]);
-                assert_eq!(len, 8);
+            PitDiagFrame::FsmStatus(f) => {
+                assert_eq!(f.state, FsmState::Run);
+                assert_eq!(f.mode_locked, ModeLock::Car);
+                assert!(f.tsms);
+                assert!(f.dash_chg);
+                assert!(f.ams_ok);
+                assert_eq!(f.pec_error_total, 0x0042);
             }
-            other => panic!("expected Diag, got {other:?}"),
+            other => panic!("expected FsmStatus, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decodes_fsm_status_charge_state_no_tsms() {
+        // Charger plugged in: state=Charge(4), mode=Charger(2),
+        // TSMS off (chassis disarmed), DASH_CHG on. PEC = 0.
+        let frame = CanFrame::new(
+            AMS_FSM_STATUS_ID,
+            &[0x04, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00],
+        )
+        .unwrap();
+        let decoded = decode_frame(&frame).unwrap();
+        match decoded {
+            PitDiagFrame::FsmStatus(f) => {
+                assert_eq!(f.state, FsmState::Charge);
+                assert_eq!(f.mode_locked, ModeLock::Charger);
+                assert!(!f.tsms);
+                assert!(f.dash_chg);
+                assert!(f.ams_ok);
+                assert_eq!(f.pec_error_total, 0);
+            }
+            other => panic!("expected FsmStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_fsm_status_error_state_unknown_mode_byte() {
+        // Defensive: a byte outside the documented 0..=2 mode range
+        // surfaces as ModeLock::Unknown — slice 2 isn't going to
+        // crash on a future firmware that adds a 4th mode.
+        let frame = CanFrame::new(
+            AMS_FSM_STATUS_ID,
+            &[0x05, 0xAA, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00],
+        )
+        .unwrap();
+        let decoded = decode_frame(&frame).unwrap();
+        match decoded {
+            PitDiagFrame::FsmStatus(f) => {
+                assert_eq!(f.state, FsmState::Error);
+                assert_eq!(f.mode_locked, ModeLock::Unknown(0xAA));
+                assert_eq!(f.pec_error_total, 0xFFFF);
+            }
+            other => panic!("expected FsmStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_poll_timing() {
+        // 0x6C1 — last V-poll 12ms, worst V-poll 41ms,
+        // T-sweep fail mask = 0xCAFE_BABE (LE on the wire ⇒ bytes
+        // BE BA FE CA).
+        let frame = CanFrame::new(
+            AMS_POLL_TIMING_ID,
+            &[0x00, 0x0C, 0x00, 0x29, 0xBE, 0xBA, 0xFE, 0xCA],
+        )
+        .unwrap();
+        let decoded = decode_frame(&frame).unwrap();
+        match decoded {
+            PitDiagFrame::PollTiming(p) => {
+                assert_eq!(p.last_v_poll_ms, 12);
+                assert_eq!(p.worst_v_poll_ms, 41);
+                assert_eq!(p.t_sweep_fail_mask, 0xCAFE_BABE);
+            }
+            other => panic!("expected PollTiming, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fsm_status_short_payload_rejected() {
+        // 5-byte payload is too short to reach the PEC u16 at bytes
+        // 4..5 — decoder should reject rather than index out of
+        // bounds. 6 bytes is the minimum that decodes (the reserved
+        // tail at 6..7 is don't-care).
+        let frame = CanFrame::new(AMS_FSM_STATUS_ID, &[0x00, 0x00, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(decode_frame(&frame), None);
     }
 
     #[test]

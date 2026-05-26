@@ -22,16 +22,24 @@ export const AMS_CELLV_SENTINEL = 0xffff;
 /** Sentinel value for an unwired / shorted NTC channel (INT8_MIN). */
 export const AMS_NTC_SENTINEL = -128;
 /**
- * Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 7.
- * If the observed scan rate drifts from this, the wire shape has
- * changed — the view banners a warning. Keep this in sync with the
- * Rust `AMS_EXPECTED_FRAMES_PER_SCAN` constant.
+ * Total frames the AMS emits per 1 Hz scan when armed.
+ *
+ * Source of truth: `docs/CAN_MAP.md` in IFS08-CE-AMS, which
+ * documents 24 cell-V + 25 NTC + 2 diag frames = 51, and confirms
+ * with the bus-cost note "51 frames × ~12 bytes-on-wire".
+ *
+ * The #252 issue body lists more diag frames (balance / boot /
+ * crash / firmware-ID) — those are forward-looking; this constant
+ * tracks what the firmware *currently* emits. When the AMS team
+ * ships additional diag-block frames, bump the Rust
+ * `AMS_EXPECTED_FRAMES_PER_SCAN` constant and mirror it here.
+ *
+ * The view banners a "schema drift suspected" warning if the
+ * observed scan rate diverges from this value by more than ±2 —
+ * that's the canary for "the spec has changed since this constant
+ * was last verified".
  */
-export const AMS_EXPECTED_FRAMES_PER_SCAN = 56;
-/** CAN ID of the firmware-ID frame. View surfaces its raw payload
- *  so the operator can eyeball "the AMS reports semver X" against
- *  what they bench-verified. */
-export const AMS_FW_ID_ID = 0x6c6;
+export const AMS_EXPECTED_FRAMES_PER_SCAN = 51;
 
 // ---- Request ----
 
@@ -77,10 +85,26 @@ export type PitDiagEvent =
           tempsC: [number, number, number, number, number, number, number, number];
       }
     | {
-          kind: 'diag';
-          id: number;
-          data: number[];
-          dlc: number;
+          /** 0x6C0 — FSM extended status. */
+          kind: 'fsmStatus';
+          /** Stringified FSM state from the firmware enum:
+           *  "start" | "precharge" | "transition" | "run" | "charge"
+           *  | "error" | "unknown(0xNN)". */
+          state: string;
+          /** Mode lock as a string: "undecided" | "car" | "charger"
+           *  | "unknown(0xNN)". */
+          modeLocked: string;
+          tsms: boolean;
+          dashChg: boolean;
+          amsOk: boolean;
+          pecErrorTotal: number;
+      }
+    | {
+          /** 0x6C1 — V-poll latency + T-sweep failure mask. */
+          kind: 'pollTiming';
+          lastVPollMs: number;
+          worstVPollMs: number;
+          tSweepFailMask: number;
       };
 
 // ---- Wrappers ----
