@@ -16,6 +16,7 @@ pub mod config;
 pub mod diagnose;
 pub mod discover;
 pub mod flash;
+pub mod pit_diag;
 pub mod provision;
 pub mod replay;
 pub mod send_raw;
@@ -129,6 +130,10 @@ pub enum Command {
     /// Sugar over `config nvm write node-id` + reset — operator
     /// types the role, the host fills in the number.
     Provision(provision::ProvisionArgs),
+
+    /// AMS pit-diag observer — arm / disarm the diagnostic stream,
+    /// or stream + decode it to stdout.
+    PitDiag(pit_diag::PitDiagArgs),
 
     /// List detected CAN adapters on this machine
     Adapters,
