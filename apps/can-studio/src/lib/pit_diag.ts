@@ -38,8 +38,13 @@ export const AMS_NTC_SENTINEL = -128;
  * observed scan rate diverges from this value by more than ±2 —
  * that's the canary for "the spec has changed since this constant
  * was last verified".
+ *
+ * 53 = 24 cell-V + 25 NTC + 4 diag (FSM 0x6C0, poll 0x6C1, and the
+ * two per-IC PEC frames 0x6C7/0x6C8 added by AMS #258).
  */
-export const AMS_EXPECTED_FRAMES_PER_SCAN = 51;
+export const AMS_EXPECTED_FRAMES_PER_SCAN = 53;
+/** Monitor ICs in the pack — 2 per module × 5 modules. */
+export const AMS_NUM_ICS = 10;
 
 // ---- Request ----
 
@@ -98,6 +103,13 @@ export type PitDiagEvent =
           dashChg: boolean;
           amsOk: boolean;
           pecErrorTotal: number;
+          /** Latched-ERROR predicate branch (#276): "none" when
+           *  healthy, else "bmsStale" / "cellOverVoltage" / … /
+           *  "fsmError" / "unknown(0xNN)". */
+          faultReason: string;
+          /** Context for faultReason: module index (bmsStale),
+           *  module_online_mask (bmsModuleOffline), or 0. */
+          faultDetail: number;
       }
     | {
           /** 0x6C1 — V-poll latency + T-sweep failure mask. */
@@ -105,6 +117,15 @@ export type PitDiagEvent =
           lastVPollMs: number;
           worstVPollMs: number;
           tSweepFailMask: number;
+      }
+    | {
+          /** 0x6C7 / 0x6C8 — per-IC PEC error counts. `firstIc` is 0
+           *  for 0x6C7 (ICs 0..7) or 8 for 0x6C8 (ICs 8..9). Only the
+           *  first `valid` entries of `counts` are real ICs. */
+          kind: 'perIcPec';
+          firstIc: number;
+          valid: number;
+          counts: number[];
       };
 
 // ---- Wrappers ----

@@ -267,17 +267,18 @@ node-id.
 ## `pit-diag` — AMS observer mode
 
 The AMS firmware can be flipped into a 1 Hz diagnostic stream by
-the host. When armed it broadcasts 51 frames per scan (every cell
-voltage, every NTC temperature, FSM state, V-poll timing) to
-whoever's listening. `pit-diag` is the terminal-side driver — it
-sends the arm command, waits for the ACK, and decodes the stream.
+the host. When armed it broadcasts 53 frames per scan (every cell
+voltage, every NTC temperature, FSM state, V-poll timing, and
+per-IC PEC counts) to whoever's listening. `pit-diag` is the
+terminal-side driver — it sends the arm command, waits for the
+ACK, and decodes the stream.
 
 The MingoCAN app has the same observer rendered as a live
 cell-V grid + temp heatmap; this subcommand is the headless
 equivalent for bench scripts, CI smoke checks, and `jq`-piping.
 
 ```bash
-# Arm the stream — the AMS starts emitting 51 frames/sec.
+# Arm the stream — the AMS starts emitting 53 frames/sec.
 can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag enable
 # ✓ ams pit-diag armed
 

@@ -1,40 +1,47 @@
 //! AMS pit-diag observer protocol.
 //!
-//! When armed, the AMS emits 51 frames at 1 Hz carrying the
+//! When armed, the AMS emits 53 frames at 1 Hz carrying the
 //! diagnostic picture: every cell voltage, every NTC temperature,
-//! plus FSM state + poll-timing telemetry. This module handles the
-//! arm/disarm handshake and decodes the wire frames into typed
-//! records the rest of the crate (and the Studio app) can consume.
+//! FSM state, poll-timing telemetry, and per-IC PEC error counts.
+//! This module handles the arm/disarm handshake and decodes the
+//! wire frames into typed records the rest of the crate (and the
+//! Studio app) can consume.
 //!
 //! ## Wire protocol
 //!
 //! Source of truth: `docs/CAN_MAP.md` in the AMS repo (IFS08-CE-AMS).
-//! The #252 issue body in this repo lists more diag-block frames
-//! (balance / boot / crash / firmware-ID) — those are forward-
-//! looking; the firmware ships 2 today (`0x6C0` + `0x6C1`).
+//! The #252 issue body in this repo also reserves `0x6C2..=0x6C6`
+//! for balance / boot / crash / firmware-ID frames — those are
+//! forward-looking; the firmware hasn't shipped them yet.
 //!
 //! - **Enable**:  emit `0x7F0` with payload `DE AD BE EF`.
 //! - **Disable**: emit `0x7F0` with payload `00 00 00 00`.
 //! - **ACK**:     AMS replies on `0x7F1` with 1 byte —
 //!   `0x01` = enabled, `0x00` = disabled.
-//! - **Stream IDs once armed (51 frames / scan total)**:
+//! - **Stream IDs once armed (53 frames / scan total)**:
 //!   - `0x680..=0x697` (24 frames) — cell voltages, 4 cells/frame,
 //!     big-endian `u16` millivolts. The last frame's 4th slot is a
 //!     `0xFFFF` sentinel because 95 cells don't divide evenly by 4.
 //!   - `0x6A0..=0x6B8` (25 frames) — NTC temperatures, 8 NTCs/frame,
 //!     signed `i8` °C. Exact (25 × 8 = 200).
 //!   - `0x6C0` — FSM extended status (state, mode_locked, TSMS,
-//!     DASH_CHG, AMS_OK, PEC error total).
+//!     DASH_CHG, AMS_OK, PEC error total, plus the #276 fault-reason
+//!     / fault-detail bytes).
 //!   - `0x6C1` — Poll timing (last V-poll ms, worst V-poll ms,
 //!     T-sweep failure mask).
+//!   - `0x6C7` / `0x6C8` — per-IC PEC error counts (#258), one
+//!     saturating `u8` per monitor IC (10 ICs = 2 × 5 modules).
 //!
 //! ## Scope
 //!
-//! Slice 1 shipped the handshake + cell-voltage + NTC-temp decoders.
-//! Slice 2 (this slice) adds typed [`FsmStatusFrame`] +
-//! [`PollTimingFrame`] decoders for the diag block, plus
-//! [`AMS_EXPECTED_FRAMES_PER_SCAN`] which the Studio uses to detect
-//! wire-shape drift before any silent miscalibration takes hold.
+//! Decoders are hand-coded against the AMS doc; the slice 6 plan in
+//! #252 swaps them for DBC consumption. [`AMS_EXPECTED_FRAMES_PER_SCAN`]
+//! lets the Studio + CLI flag a *frame-count* drift before silent
+//! miscalibration — but note it can't catch an in-frame byte
+//! repurposing (e.g. #276 moving `0x6C0[6..7]` from reserved to
+//! fault-reason); those are caught by tracking the AMS CAN_MAP
+//! per-frame, which is why the host carries an explicit per-frame
+//! layout here.
 //!
 //! VCU + UDV will get equivalent streams in their own ID ranges
 //! (TBD per team). The plugin/profile abstraction lands in a later
@@ -87,38 +94,46 @@ pub const AMS_NTC_LAST_ID: u16 = 0x6B8;
 /// Number of frames in the NTC-temperature stream.
 pub const AMS_NTC_NUM_FRAMES: usize = 25;
 
-/// First CAN ID in the FSM / poll-timing diag block.
+/// The diag block — FSM status, poll timing, and per-IC PEC counts.
 ///
-/// The #252 issue body lists seven frames here (`0x6C0..=0x6C6` for
-/// FSM / poll / balance / boot / crash / firmware-ID), but the AMS
-/// firmware's `docs/CAN_MAP.md` (the source of truth — see IFS08-CE-AMS)
-/// currently only documents `0x6C0` and `0x6C1`. The firmware itself
-/// confirms it: the doc's bus-cost note reads "51 frames × ~12 bytes-
-/// on-wire", which is 24 + 25 + **2** — not the issue's projected 56.
+/// This block is **non-contiguous**. The #252 issue body reserved
+/// `0x6C2..=0x6C6` for balance / boot / crash / firmware-ID frames
+/// the firmware hasn't shipped, so the AMS team's per-IC PEC frames
+/// (#258) landed at `0x6C7` / `0x6C8` instead, leaving a gap:
 ///
-/// Slice 2 lines up the host-side decoder with the real wire shape.
-/// The remaining frames (balance / boot / crash / firmware-ID) land
-/// in future slices once the AMS team ships them. The constant +
-/// invariant pair keeps the host honest: when the AMS doc grows to
-/// list more frames, this constant moves with it and the
-/// `AMS_EXPECTED_FRAMES_PER_SCAN` math falls out automatically.
-pub const AMS_DIAG_BASE_ID: u16 = 0x6C0;
-/// Last CAN ID currently emitted in the diag block.
-pub const AMS_DIAG_LAST_ID: u16 = 0x6C1;
-/// Number of frames in the diag block today (2 — FSM + poll timing).
-pub const AMS_DIAG_NUM_FRAMES: usize = 2;
+/// | ID       | frame                              | source |
+/// |----------|------------------------------------|--------|
+/// | `0x6C0`  | FSM extended status                | #248   |
+/// | `0x6C1`  | poll timing                        | #248   |
+/// | `0x6C7`  | per-IC PEC count, ICs 0..7         | #258   |
+/// | `0x6C8`  | per-IC PEC count, ICs 8..9 + rsvd  | #258   |
+///
+/// Source of truth: `docs/CAN_MAP.md` in IFS08-CE-AMS. (Note: that
+/// doc's bus-cost prose still reads "51 frames" — stale since #258
+/// added the two PEC frames; flagged back to the AMS team. The
+/// table itself is correct, hence the 4 here.)
+pub const AMS_DIAG_NUM_FRAMES: usize = 4;
 
 /// CAN ID of the FSM extended-status frame.
 pub const AMS_FSM_STATUS_ID: u16 = 0x6C0;
 /// CAN ID of the poll-timing frame.
 pub const AMS_POLL_TIMING_ID: u16 = 0x6C1;
+/// CAN ID of the per-IC PEC frame covering ICs 0..=7.
+pub const AMS_PER_IC_PEC_LO_ID: u16 = 0x6C7;
+/// CAN ID of the per-IC PEC frame covering ICs 8..=9 (+ reserved).
+pub const AMS_PER_IC_PEC_HI_ID: u16 = 0x6C8;
 
-/// Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 2.
-/// The Studio compares this against an observed scan-rate counter
-/// and banners a warning if the wire shape has drifted — if a future
-/// firmware version adds or drops frames, this is the signal the
-/// operator sees before the brittleness of the hand-coded layout
-/// bites them.
+/// Number of monitor ICs in the pack: 2 per module × 5 modules.
+/// Chain index → module: IC `2m` = upper, IC `2m+1` = lower of
+/// module `m`.
+pub const AMS_NUM_ICS: usize = 2 * AMS_NUM_MODULES;
+
+/// Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 4.
+/// The Studio + CLI compare this against an observed scan-rate
+/// counter and warn if the wire shape has drifted — the canary for
+/// "the AMS firmware added or dropped frames since this constant was
+/// last verified". When new diag-block frames ship, bump
+/// `AMS_DIAG_NUM_FRAMES` and the math falls out automatically.
 pub const AMS_EXPECTED_FRAMES_PER_SCAN: usize =
     AMS_CELLV_NUM_FRAMES + AMS_NTC_NUM_FRAMES + AMS_DIAG_NUM_FRAMES;
 
@@ -209,6 +224,56 @@ impl ModeLock {
     }
 }
 
+/// Which safety predicate latched the AMS into ERROR.
+///
+/// Wire encoding: byte 6 of `0x6C0` (#276). Latched once at the
+/// transition into ERROR and held until the latch clears. `None`
+/// (0) when not in an error state — which is also what a pre-#276
+/// firmware sends, since byte 6 was reserved-zero before. So this
+/// decodes correctly against both old and new firmware.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FaultReason {
+    None = 0,
+    ForceError = 1,
+    BmsModuleOffline = 2,
+    BmsStale = 3,
+    CellUnderVoltage = 4,
+    CellOverVoltage = 5,
+    CellUnderTemp = 6,
+    CellOverTemp = 7,
+    CurrentSensorFault = 8,
+    CurrentStale = 9,
+    CurrentOverLimit = 10,
+    VcuStale = 11,
+    /// FSM-driven Error path — precharge timeout / TSMS / DASH_CHG drop.
+    FsmError = 12,
+    /// Any reason byte the firmware emits that this host build
+    /// doesn't recognise — a forward-compat catch-all.
+    Unknown(u8),
+}
+
+impl FaultReason {
+    fn from_byte(b: u8) -> Self {
+        match b {
+            0 => Self::None,
+            1 => Self::ForceError,
+            2 => Self::BmsModuleOffline,
+            3 => Self::BmsStale,
+            4 => Self::CellUnderVoltage,
+            5 => Self::CellOverVoltage,
+            6 => Self::CellUnderTemp,
+            7 => Self::CellOverTemp,
+            8 => Self::CurrentSensorFault,
+            9 => Self::CurrentStale,
+            10 => Self::CurrentOverLimit,
+            11 => Self::VcuStale,
+            12 => Self::FsmError,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
 /// Decoded `0x6C0` — FSM extended status. Layout per
 /// `docs/CAN_MAP.md` in IFS08-CE-AMS:
 ///
@@ -219,7 +284,9 @@ impl ModeLock {
 /// | 2 | bits: bit 1 = TSMS, bit 0 = DASH_CHG |
 /// | 3 | AMS_OK GPIO (0/1) |
 /// | 4..5 | PEC error total (big-endian u16) |
-/// | 6..7 | reserved |
+/// | 6 | fault_reason — latched-ERROR predicate branch (#276) |
+/// | 7 | fault_detail — module index (BmsStale) / online mask |
+/// |   | (BmsModuleOffline) / 0 otherwise |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FsmStatusFrame {
     pub state: FsmState,
@@ -228,6 +295,34 @@ pub struct FsmStatusFrame {
     pub dash_chg: bool,
     pub ams_ok: bool,
     pub pec_error_total: u16,
+    /// Why the AMS latched ERROR (byte 6). `None` when healthy or
+    /// when talking to a pre-#276 firmware (reserved-zero byte).
+    pub fault_reason: FaultReason,
+    /// Context for `fault_reason` (byte 7): module index for
+    /// `BmsStale`, `module_online_mask` for `BmsModuleOffline`,
+    /// 0 otherwise.
+    pub fault_detail: u8,
+}
+
+/// Decoded `0x6C7` / `0x6C8` — per-IC PEC error counts.
+///
+/// Each monitor IC reports a saturating `u8` count of PEC (CRC)
+/// errors on its slave-bus link. `0x6C7` carries ICs 0..=7 (8 bytes,
+/// one per IC); `0x6C8` carries ICs 8..=9 in bytes 0..1 with bytes
+/// 2..7 reserved-zero. Chain index → module: IC `2m` = upper,
+/// IC `2m+1` = lower of module `m`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerIcPecFrame {
+    /// Index of the first IC this frame covers (0 for `0x6C7`,
+    /// 8 for `0x6C8`).
+    pub first_ic: u8,
+    /// Saturating per-IC PEC counts. For `0x6C8` only the first
+    /// `valid` entries are real ICs; the rest mirror the reserved
+    /// zero bytes.
+    pub counts: [u8; 8],
+    /// How many entries in `counts` map to real ICs (8 for `0x6C7`,
+    /// 2 for `0x6C8`).
+    pub valid: u8,
 }
 
 /// Decoded `0x6C1` — poll timing. Layout per AMS doc:
@@ -261,6 +356,8 @@ pub enum PitDiagFrame {
     FsmStatus(FsmStatusFrame),
     /// `0x6C1` — V-poll + T-sweep timing telemetry.
     PollTiming(PollTimingFrame),
+    /// `0x6C7` / `0x6C8` — per-IC PEC error counts.
+    PerIcPec(PerIcPecFrame),
 }
 
 // ---- Encode / decode --------------------------------------------
@@ -337,8 +434,7 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
     // FSM extended status — 0x6C0.
     if id == AMS_FSM_STATUS_ID {
         if payload.len() < 6 {
-            // Need at least bytes 0..5 (PEC u16 ends at byte 5);
-            // 6..7 are reserved, so a 6-byte payload still decodes.
+            // Need at least bytes 0..5 (PEC u16 ends at byte 5).
             return None;
         }
         let cockpit_bits = payload[2];
@@ -349,6 +445,17 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
             dash_chg: (cockpit_bits & 0b0000_0001) != 0,
             ams_ok: payload[3] != 0,
             pec_error_total: u16::from_be_bytes([payload[4], payload[5]]),
+            // Bytes 6/7 are the #276 fault-reason/detail. A pre-#276
+            // firmware leaves them reserved-zero ⇒ reason decodes to
+            // `None`, detail to 0 — so this is correct against both
+            // old and new firmware. `.get()` keeps the 6-byte-minimum
+            // contract: a short frame falls back to None/0 instead of
+            // panicking.
+            fault_reason: payload
+                .get(6)
+                .map(|b| FaultReason::from_byte(*b))
+                .unwrap_or(FaultReason::None),
+            fault_detail: payload.get(7).copied().unwrap_or(0),
         }));
     }
 
@@ -363,6 +470,28 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
             // T-sweep mask is LE u32 on the wire (the only LE field
             // in the pit-diag stream — the rest is BE).
             t_sweep_fail_mask: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        }));
+    }
+
+    // Per-IC PEC counts — 0x6C7 (ICs 0..7) and 0x6C8 (ICs 8..9).
+    if id == AMS_PER_IC_PEC_LO_ID || id == AMS_PER_IC_PEC_HI_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        let mut counts = [0u8; 8];
+        counts.copy_from_slice(&payload[..8]);
+        let (first_ic, valid) = if id == AMS_PER_IC_PEC_LO_ID {
+            (0u8, 8u8)
+        } else {
+            // 0x6C8: ICs 8..9 live in bytes 0..1; bytes 2..7 are
+            // reserved-zero. `valid` tells the consumer to ignore the
+            // reserved tail rather than render six phantom ICs.
+            (8u8, (AMS_NUM_ICS as u8).saturating_sub(8))
+        };
+        return Some(PitDiagFrame::PerIcPec(PerIcPecFrame {
+            first_ic,
+            counts,
+            valid,
         }));
     }
 
@@ -395,20 +524,24 @@ const _: () = assert!(AMS_NTC_NUM_FRAMES == (AMS_NTC_LAST_ID - AMS_NTC_BASE_ID +
 const _: () = assert!(AMS_CELLV_NUM_FRAMES * 4 > AMS_NUM_CELLS);
 // 25 frames × 8 NTCs/frame = 200 = AMS_NUM_NTCS exactly.
 const _: () = assert!(AMS_NTC_NUM_FRAMES * 8 == AMS_NUM_NTCS);
-// Diag block size matches the (base, last) range.
-const _: () = assert!(AMS_DIAG_NUM_FRAMES == (AMS_DIAG_LAST_ID - AMS_DIAG_BASE_ID + 1) as usize);
-// Total scan = 51 frames per the AMS doc's bus-cost note ("51
-// frames × ~12 bytes-on-wire"). The Studio displays a warning if
-// the observed scan rate drifts from this — that's the canary for
-// "the AMS team added or dropped frames since this constant was
-// last verified". When new diag-block frames ship, bump
-// AMS_DIAG_LAST_ID and AMS_DIAG_NUM_FRAMES together.
-const _: () = assert!(AMS_EXPECTED_FRAMES_PER_SCAN == 51);
-// Both named diag IDs must live inside the diag block range.
-const _: () =
-    assert!(AMS_FSM_STATUS_ID >= AMS_DIAG_BASE_ID && AMS_FSM_STATUS_ID <= AMS_DIAG_LAST_ID);
-const _: () =
-    assert!(AMS_POLL_TIMING_ID >= AMS_DIAG_BASE_ID && AMS_POLL_TIMING_ID <= AMS_DIAG_LAST_ID);
+// Total scan = 53 frames: 24 cell-V + 25 NTC + 4 diag (FSM, poll,
+// 2× per-IC PEC). The Studio + CLI display a warning if the observed
+// scan rate drifts from this — the canary for "the AMS team added or
+// dropped frames since this constant was last verified". When new
+// diag-block frames ship, bump AMS_DIAG_NUM_FRAMES and the math falls
+// out automatically.
+const _: () = assert!(AMS_EXPECTED_FRAMES_PER_SCAN == 53);
+// The diag block is non-contiguous (gap at 0x6C2..=0x6C6), so we
+// can't assert a single base..=last range. Instead: pin the count
+// and confirm the per-IC PEC pair is contiguous + sits above the
+// FSM/poll pair.
+const _: () = assert!(AMS_DIAG_NUM_FRAMES == 4);
+const _: () = assert!(AMS_POLL_TIMING_ID == AMS_FSM_STATUS_ID + 1);
+const _: () = assert!(AMS_PER_IC_PEC_HI_ID == AMS_PER_IC_PEC_LO_ID + 1);
+const _: () = assert!(AMS_PER_IC_PEC_LO_ID > AMS_POLL_TIMING_ID);
+// Two ICs per module; 0x6C8 carries the ICs past the 8 in 0x6C7.
+const _: () = assert!(AMS_NUM_ICS == 10);
+const _: () = assert!(AMS_NUM_ICS > 8);
 
 #[cfg(test)]
 mod tests {
@@ -539,6 +672,9 @@ mod tests {
                 assert!(f.dash_chg);
                 assert!(f.ams_ok);
                 assert_eq!(f.pec_error_total, 0x0042);
+                // Healthy run: bytes 6/7 reserved-zero ⇒ no fault.
+                assert_eq!(f.fault_reason, FaultReason::None);
+                assert_eq!(f.fault_detail, 0);
             }
             other => panic!("expected FsmStatus, got {other:?}"),
         }
@@ -616,6 +752,95 @@ mod tests {
         // bounds. 6 bytes is the minimum that decodes (the reserved
         // tail at 6..7 is don't-care).
         let frame = CanFrame::new(AMS_FSM_STATUS_ID, &[0x00, 0x00, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(decode_frame(&frame), None);
+    }
+
+    #[test]
+    fn decodes_fsm_status_fault_reason_and_detail() {
+        // 0x6C0 with the #276 fault bytes populated: latched ERROR
+        // on BmsStale (reason=3), offending module index 4 in byte 7.
+        let frame = CanFrame::new(
+            AMS_FSM_STATUS_ID,
+            &[0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x04],
+        )
+        .unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::FsmStatus(f) => {
+                assert_eq!(f.state, FsmState::Error);
+                assert_eq!(f.fault_reason, FaultReason::BmsStale);
+                assert_eq!(f.fault_detail, 4);
+            }
+            other => panic!("expected FsmStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fsm_status_unknown_fault_reason_byte() {
+        // A reason byte past the documented 0..=12 range surfaces as
+        // Unknown rather than silently mapping to None — forward-compat
+        // with a firmware that adds a 13th predicate.
+        let frame = CanFrame::new(
+            AMS_FSM_STATUS_ID,
+            &[0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00],
+        )
+        .unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::FsmStatus(f) => {
+                assert_eq!(f.fault_reason, FaultReason::Unknown(0x63));
+            }
+            other => panic!("expected FsmStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn six_byte_fsm_frame_decodes_with_no_fault() {
+        // A 6-byte FSM frame (no bytes 6/7) still decodes — fault
+        // fields fall back to None/0 rather than rejecting the frame.
+        let frame =
+            CanFrame::new(AMS_FSM_STATUS_ID, &[0x03, 0x01, 0x03, 0x01, 0x00, 0x00]).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::FsmStatus(f) => {
+                assert_eq!(f.state, FsmState::Run);
+                assert_eq!(f.fault_reason, FaultReason::None);
+                assert_eq!(f.fault_detail, 0);
+            }
+            other => panic!("expected FsmStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_per_ic_pec_low_frame() {
+        // 0x6C7 — ICs 0..7, one saturating count each.
+        let frame = CanFrame::new(AMS_PER_IC_PEC_LO_ID, &[0, 1, 0, 0, 5, 0, 255, 2]).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::PerIcPec(p) => {
+                assert_eq!(p.first_ic, 0);
+                assert_eq!(p.valid, 8);
+                assert_eq!(p.counts, [0, 1, 0, 0, 5, 0, 255, 2]);
+            }
+            other => panic!("expected PerIcPec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_per_ic_pec_high_frame() {
+        // 0x6C8 — ICs 8..9 in bytes 0..1, bytes 2..7 reserved-zero.
+        let frame = CanFrame::new(AMS_PER_IC_PEC_HI_ID, &[7, 3, 0, 0, 0, 0, 0, 0]).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::PerIcPec(p) => {
+                assert_eq!(p.first_ic, 8);
+                // 10 ICs total − 8 in the low frame = 2 real here.
+                assert_eq!(p.valid, 2);
+                assert_eq!(p.counts[0], 7);
+                assert_eq!(p.counts[1], 3);
+            }
+            other => panic!("expected PerIcPec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn per_ic_pec_short_payload_rejected() {
+        let frame = CanFrame::new(AMS_PER_IC_PEC_LO_ID, &[0, 1, 2]).unwrap();
         assert_eq!(decode_frame(&frame), None);
     }
 

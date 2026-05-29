@@ -32,7 +32,8 @@ use clap::{Args, Subcommand};
 
 use crate::cli::{GlobalFlags, InterfaceType};
 use crate::pit_diag::{
-    build_arm_frame, decode_frame, PitDiagFrame, AMS_ACK_ID, AMS_EXPECTED_FRAMES_PER_SCAN,
+    build_arm_frame, decode_frame, FaultReason, PitDiagFrame, AMS_ACK_ID,
+    AMS_EXPECTED_FRAMES_PER_SCAN,
 };
 use crate::transport::{open_backend, CanBackend, TransportError};
 
@@ -76,7 +77,7 @@ pub enum PitDiagCommand {
     ///   - Ctrl-C (SIGINT)              → exit 0, with disarm
     ///   - Bus error                    → exit non-zero
     ///   - Schema drift (frames/scan
-    ///     diverges from expected 51)   → exit non-zero
+    ///     diverges from expected 53)   → exit non-zero
     Stream(StreamArgs),
 }
 
@@ -296,8 +297,15 @@ fn print_record_human(ts_ms: u64, record: &PitDiagFrame) {
             );
         }
         PitDiagFrame::FsmStatus(f) => {
+            // Only print the fault columns when something's latched —
+            // keeps the happy-path line short.
+            let fault = if matches!(f.fault_reason, FaultReason::None) {
+                String::new()
+            } else {
+                format!(" fault={:?} detail={}", f.fault_reason, f.fault_detail)
+            };
             println!(
-                "{prefix} fsm   state={:?} mode={:?} tsms={} dash={} ams_ok={} pec={}",
+                "{prefix} fsm   state={:?} mode={:?} tsms={} dash={} ams_ok={} pec={}{fault}",
                 f.state,
                 f.mode_locked,
                 f.tsms as u8,
@@ -310,6 +318,20 @@ fn print_record_human(ts_ms: u64, record: &PitDiagFrame) {
             println!(
                 "{prefix} poll  v_last={:>4}ms v_worst={:>4}ms tsweep_fail=0x{:08X}",
                 p.last_v_poll_ms, p.worst_v_poll_ms, p.t_sweep_fail_mask,
+            );
+        }
+        PitDiagFrame::PerIcPec(p) => {
+            let counts = p
+                .counts
+                .iter()
+                .take(p.valid as usize)
+                .map(|c| format!("{c:>3}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!(
+                "{prefix} pec   ICs[{:>2}..{:>2}] = {counts}",
+                p.first_ic,
+                p.first_ic + p.valid,
             );
         }
     }
@@ -350,18 +372,39 @@ fn print_record_json(ts_ms: u64, record: &PitDiagFrame) {
             );
         }
         PitDiagFrame::FsmStatus(f) => {
-            // FSM state / mode_locked are typed enums on this side;
-            // mirror the Studio's stringified shape so consumers can
-            // switch on the value without a translation table.
+            // FSM state / mode_locked / fault_reason are typed enums
+            // on this side; mirror the Studio's stringified shape so
+            // consumers can switch on the value without a translation
+            // table.
             println!(
-                r#"{{"tsMs":{ts_ms},"kind":"fsmStatus","state":"{:?}","modeLocked":"{:?}","tsms":{},"dashChg":{},"amsOk":{},"pecErrorTotal":{}}}"#,
-                f.state, f.mode_locked, f.tsms, f.dash_chg, f.ams_ok, f.pec_error_total,
+                r#"{{"tsMs":{ts_ms},"kind":"fsmStatus","state":"{:?}","modeLocked":"{:?}","tsms":{},"dashChg":{},"amsOk":{},"pecErrorTotal":{},"faultReason":"{:?}","faultDetail":{}}}"#,
+                f.state,
+                f.mode_locked,
+                f.tsms,
+                f.dash_chg,
+                f.ams_ok,
+                f.pec_error_total,
+                f.fault_reason,
+                f.fault_detail,
             );
         }
         PitDiagFrame::PollTiming(p) => {
             println!(
                 r#"{{"tsMs":{ts_ms},"kind":"pollTiming","lastVPollMs":{},"worstVPollMs":{},"tSweepFailMask":{}}}"#,
                 p.last_v_poll_ms, p.worst_v_poll_ms, p.t_sweep_fail_mask,
+            );
+        }
+        PitDiagFrame::PerIcPec(p) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"perIcPec","firstIc":{},"valid":{},"counts":[{}]}}"#,
+                p.first_ic,
+                p.valid,
+                p.counts
+                    .iter()
+                    .take(p.valid as usize)
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
             );
         }
     }
