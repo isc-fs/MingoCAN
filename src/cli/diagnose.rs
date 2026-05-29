@@ -195,6 +195,8 @@ struct HealthJson {
     flash_write_count: u32,
     dtc_count: u32,
     last_dtc_code: u32,
+    fdcan_recovery_count: u32,
+    max_flash_op_ms: u32,
     session_active: bool,
     valid_app_present: bool,
     wrp_protected: bool,
@@ -213,6 +215,8 @@ impl HealthJson {
             flash_write_count: r.flash_write_count,
             dtc_count: r.dtc_count,
             last_dtc_code: r.last_dtc_code,
+            fdcan_recovery_count: r.fdcan_recovery_count,
+            max_flash_op_ms: r.max_flash_op_ms,
             session_active: r.session_active(),
             valid_app_present: r.valid_app_present(),
             wrp_protected: r.wrp_protected(),
@@ -263,6 +267,8 @@ fn render_health(record: &HealthRecord, json: bool) -> Result<()> {
     writeln!(out, "  Flash writes   : {}", snapshot.flash_write_count)?;
     writeln!(out, "  DTC count      : {}", snapshot.dtc_count)?;
     writeln!(out, "  Last DTC code  : 0x{:04X}", snapshot.last_dtc_code)?;
+    writeln!(out, "  FDCAN recovery : {}", snapshot.fdcan_recovery_count)?;
+    writeln!(out, "  Max flash op   : {} ms", snapshot.max_flash_op_ms)?;
     writeln!(out, "  Raw flags      : 0x{:08X}", snapshot.raw_flags)?;
     Ok(())
 }
@@ -723,7 +729,8 @@ mod tests {
             flash_write_count: 17,
             dtc_count: 2,
             last_dtc_code: 0x0010,
-            reserved: [0, 0],
+            fdcan_recovery_count: 3,
+            max_flash_op_ms: 1200,
         }
     }
 
@@ -746,6 +753,8 @@ mod tests {
             "\"session_active\":",
             "\"valid_app_present\":",
             "\"wrp_protected\":",
+            "\"fdcan_recovery_count\":",
+            "\"max_flash_op_ms\":",
             "\"raw_flags\":",
         ] {
             assert!(json.contains(key), "missing {key}: {json}");

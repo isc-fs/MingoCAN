@@ -148,7 +148,12 @@ pub struct HealthRecord {
     pub flash_write_count: u32,
     pub dtc_count: u32,
     pub last_dtc_code: u32,
-    pub reserved: [u32; 2],
+    /// offset 24 — FDCAN bus-off Stop/Start recoveries this boot (#125 C1).
+    /// Formerly reserved[0].
+    pub fdcan_recovery_count: u32,
+    /// offset 28 — longest blocking flash op (erase) observed this boot, ms
+    /// (#125 H6 probe — sizes the IWDG period). Formerly reserved[1].
+    pub max_flash_op_ms: u32,
 }
 
 impl HealthRecord {
@@ -163,7 +168,8 @@ impl HealthRecord {
             flash_write_count: read_u32_le(bytes, 12),
             dtc_count: read_u32_le(bytes, 16),
             last_dtc_code: read_u32_le(bytes, 20),
-            reserved: [read_u32_le(bytes, 24), read_u32_le(bytes, 28)],
+            fdcan_recovery_count: read_u32_le(bytes, 24),
+            max_flash_op_ms: read_u32_le(bytes, 28),
         })
     }
 
