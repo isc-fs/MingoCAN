@@ -35,6 +35,7 @@
         AMS_CELLS_PER_MODULE,
         AMS_EXPECTED_FRAMES_PER_SCAN,
         AMS_NUM_CELLS,
+        AMS_NUM_ICS,
         AMS_NTC_PER_MODULE,
         AMS_NUM_MODULES,
         AMS_NUM_NTCS,
@@ -62,6 +63,8 @@
         dashChg: boolean;
         amsOk: boolean;
         pecErrorTotal: number;
+        faultReason: string;
+        faultDetail: number;
     }
 
     interface PollSnapshot {
@@ -89,6 +92,11 @@
     // could add a trend line for the V-poll latency).
     let fsm = $state<FsmSnapshot | null>(null);
     let poll = $state<PollSnapshot | null>(null);
+
+    // Per-IC PEC error counts — 10 ICs (2 per module). Arrives as
+    // two frames (0x6C7 ICs 0..7, 0x6C8 ICs 8..9); we splice each
+    // into the pack-wide array as it lands. `null` = not yet seen.
+    let icPec = $state<(number | null)[]>(new Array(AMS_NUM_ICS).fill(null));
 
     // Scan-rate tracking — counts EVERY pit-diag frame received in
     // a 1 Hz window. Compared against AMS_EXPECTED_FRAMES_PER_SCAN
@@ -214,6 +222,7 @@
         // arm cycle.
         cellsMv = new Array(AMS_NUM_CELLS).fill(null);
         ntcsC = new Array(AMS_NUM_NTCS).fill(null);
+        icPec = new Array(AMS_NUM_ICS).fill(null);
         fsm = null;
         poll = null;
         framesThisScan = 0;
@@ -266,6 +275,8 @@
                     dashChg: event.dashChg,
                     amsOk: event.amsOk,
                     pecErrorTotal: event.pecErrorTotal,
+                    faultReason: event.faultReason,
+                    faultDetail: event.faultDetail,
                 };
                 framesThisScan += 1;
             } else if (event.kind === 'pollTiming') {
@@ -274,6 +285,15 @@
                     worstVPollMs: event.worstVPollMs,
                     tSweepFailMask: event.tSweepFailMask,
                 };
+                framesThisScan += 1;
+            } else if (event.kind === 'perIcPec') {
+                // Splice this frame's ICs into the pack-wide array.
+                const next = icPec.slice();
+                for (let i = 0; i < event.valid; i++) {
+                    const idx = event.firstIc + i;
+                    if (idx < AMS_NUM_ICS) next[idx] = event.counts[i];
+                }
+                icPec = next;
                 framesThisScan += 1;
             }
             // Ack events come during arm/disarm; they're handled by
@@ -367,7 +387,7 @@
                 AMS observer mode. Arming emits <code>0x7F0#DEADBEEF</code>;
                 the AMS replies on <code>0x7F1</code> and starts streaming
                 the diagnostic stream at 1 Hz ({AMS_EXPECTED_FRAMES_PER_SCAN}
-                frames/scan today). Disarm sends the zero-payload frame;
+                frames/scan). Disarm sends the zero-payload frame;
                 firmware also clears the flag on reboot.
             </p>
         </div>
@@ -436,9 +456,12 @@
 
     <!--
         Safety net: when the observed frames/scan count drifts from
-        the expected 51 by more than ±2, banner a warning. This
+        the expected total by more than ±2, banner a warning. This
         catches the AMS team adding or removing frames before silent
-        miscalibration bites the operator.
+        miscalibration bites the operator. (Note: it can't catch an
+        in-frame byte repurposing like #276's fault-reason bytes —
+        the count stays the same. Those are caught by tracking the
+        AMS CAN_MAP per frame, not by this counter.)
     -->
     {#if schemaDriftSuspected}
         <div class="banner banner-warning">
@@ -492,6 +515,16 @@
                             </span>
                         </div>
                     </div>
+                    {#if fsm.faultReason !== 'none'}
+                        <div class="fault-line">
+                            <span class="pill pill-danger">latched</span>
+                            <span class="fault-reason mono">{fsm.faultReason}</span>
+                            <span class="muted small">detail 0x{fsm.faultDetail
+                                    .toString(16)
+                                    .toUpperCase()
+                                    .padStart(2, '0')}</span>
+                        </div>
+                    {/if}
                 </section>
             {/if}
 
@@ -537,6 +570,36 @@
                 </section>
             {/if}
         </div>
+    {/if}
+
+    <!-- Per-IC PEC counts (0x6C7 / 0x6C8) -->
+    {#if icPec.some((c) => c !== null)}
+        <section class="card">
+            <div class="card-header">
+                <h3>Per-IC PEC errors</h3>
+                <span class="muted small mono">0x6C7 / 0x6C8</span>
+            </div>
+            <div class="ic-row">
+                {#each icPec as count, ic (ic)}
+                    <div
+                        class="ic-cell"
+                        class:flagged={count !== null && count > 0}
+                        title="IC {ic} (module {Math.floor(ic / 2) + 1} {ic % 2 === 0
+                            ? 'upper'
+                            : 'lower'}) — {count ?? '—'} PEC errors"
+                    >
+                        <span class="ic-idx">IC{ic}</span>
+                        <span class="ic-count mono">{count ?? '—'}</span>
+                    </div>
+                {/each}
+            </div>
+            <p class="muted small ic-hint">
+                Saturating per-IC CRC-error counter on the slave-bus link.
+                IC <code>2m</code>/<code>2m+1</code> = upper/lower of module
+                <code>m</code>. Any non-zero count points at ISO-SPI integrity
+                on that chain.
+            </p>
+        </section>
     {/if}
 
     <!-- Pack-spread bar -->
@@ -738,6 +801,59 @@
     }
 
     .poll-hint {
+        margin: var(--space-3) 0 0;
+    }
+
+    /* Fault line — only rendered when the FSM latched ERROR. Sits
+       below the diag grid inside the FSM card. */
+    .fault-line {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        padding-top: var(--space-3);
+        border-top: 1px solid var(--border);
+    }
+    .fault-reason {
+        color: var(--danger);
+        font-weight: 600;
+    }
+
+    /* Per-IC PEC grid — 10 compact tiles, one per monitor IC. Tile
+       turns danger-toned when its count is non-zero. */
+    .ic-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
+        gap: var(--space-2);
+    }
+    .ic-cell {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        padding: var(--space-2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        background: var(--surface);
+        cursor: help;
+    }
+    .ic-cell.flagged {
+        border-color: var(--danger);
+        background: var(--danger-soft);
+    }
+    .ic-idx {
+        font-size: var(--text-xs);
+        color: var(--text-muted);
+    }
+    .ic-count {
+        font-size: var(--text-base);
+        color: var(--text);
+    }
+    .ic-cell.flagged .ic-count {
+        color: var(--danger);
+        font-weight: 600;
+    }
+    .ic-hint {
         margin: var(--space-3) 0 0;
     }
 

@@ -36,8 +36,8 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use can_flasher::pit_diag::{
-    build_arm_frame, decode_frame, CellVoltageFrame, FsmState, FsmStatusFrame, ModeLock,
-    NtcTempFrame, PitDiagFrame, PollTimingFrame, AMS_ACK_ID,
+    build_arm_frame, decode_frame, CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame,
+    ModeLock, NtcTempFrame, PerIcPecFrame, PitDiagFrame, PollTimingFrame, AMS_ACK_ID,
 };
 use can_flasher::transport::open_backend;
 
@@ -131,6 +131,28 @@ fn mode_lock_name(m: ModeLock) -> String {
     }
 }
 
+/// String form of the latched-ERROR fault reason. camelCase so the
+/// frontend can switch on the value; mirrors the firmware's
+/// `FaultReason` enum names (#276).
+fn fault_reason_name(r: FaultReason) -> String {
+    match r {
+        FaultReason::None => "none".into(),
+        FaultReason::ForceError => "forceError".into(),
+        FaultReason::BmsModuleOffline => "bmsModuleOffline".into(),
+        FaultReason::BmsStale => "bmsStale".into(),
+        FaultReason::CellUnderVoltage => "cellUnderVoltage".into(),
+        FaultReason::CellOverVoltage => "cellOverVoltage".into(),
+        FaultReason::CellUnderTemp => "cellUnderTemp".into(),
+        FaultReason::CellOverTemp => "cellOverTemp".into(),
+        FaultReason::CurrentSensorFault => "currentSensorFault".into(),
+        FaultReason::CurrentStale => "currentStale".into(),
+        FaultReason::CurrentOverLimit => "currentOverLimit".into(),
+        FaultReason::VcuStale => "vcuStale".into(),
+        FaultReason::FsmError => "fsmError".into(),
+        FaultReason::Unknown(b) => format!("unknown(0x{b:02X})"),
+    }
+}
+
 /// Per-frame event. Discriminated union — the `kind` tag tells the
 /// frontend which variant payload to expect. Mirrors the library's
 /// `PitDiagFrame` enum but with camelCase field names + a stable
@@ -157,9 +179,9 @@ pub enum PitDiagEvent {
         first_ntc: u16,
         temps_c: [i8; 8],
     },
-    /// `0x6C0` — FSM extended status. Stringified state + mode for
-    /// the frontend's convenience; cockpit flags as bools; PEC count
-    /// as a raw u16.
+    /// `0x6C0` — FSM extended status. Stringified state + mode +
+    /// fault-reason for the frontend's convenience; cockpit flags
+    /// as bools; PEC count + fault detail as raw integers.
     FsmStatus {
         state: String,
         mode_locked: String,
@@ -167,12 +189,20 @@ pub enum PitDiagEvent {
         dash_chg: bool,
         ams_ok: bool,
         pec_error_total: u16,
+        fault_reason: String,
+        fault_detail: u8,
     },
     /// `0x6C1` — V-poll + T-sweep timing telemetry.
     PollTiming {
         last_v_poll_ms: u16,
         worst_v_poll_ms: u16,
         t_sweep_fail_mask: u32,
+    },
+    /// `0x6C7` / `0x6C8` — per-IC PEC error counts.
+    PerIcPec {
+        first_ic: u8,
+        valid: u8,
+        counts: [u8; 8],
     },
 }
 
@@ -205,6 +235,8 @@ impl PitDiagEvent {
                 dash_chg,
                 ams_ok,
                 pec_error_total,
+                fault_reason,
+                fault_detail,
             }) => Self::FsmStatus {
                 state: fsm_state_name(state),
                 mode_locked: mode_lock_name(mode_locked),
@@ -212,6 +244,8 @@ impl PitDiagEvent {
                 dash_chg,
                 ams_ok,
                 pec_error_total,
+                fault_reason: fault_reason_name(fault_reason),
+                fault_detail,
             },
             PitDiagFrame::PollTiming(PollTimingFrame {
                 last_v_poll_ms,
@@ -221,6 +255,15 @@ impl PitDiagEvent {
                 last_v_poll_ms,
                 worst_v_poll_ms,
                 t_sweep_fail_mask,
+            },
+            PitDiagFrame::PerIcPec(PerIcPecFrame {
+                first_ic,
+                counts,
+                valid,
+            }) => Self::PerIcPec {
+                first_ic,
+                valid,
+                counts,
             },
         }
     }
