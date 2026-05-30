@@ -1,47 +1,55 @@
 //! AMS pit-diag observer protocol.
 //!
-//! When armed, the AMS emits 53 frames at 1 Hz carrying the
+//! When armed, the AMS emits 58 frames at 1 Hz carrying the full
 //! diagnostic picture: every cell voltage, every NTC temperature,
-//! FSM state, poll-timing telemetry, and per-IC PEC error counts.
-//! This module handles the arm/disarm handshake and decodes the
-//! wire frames into typed records the rest of the crate (and the
+//! plus a 9-frame diag block (FSM state, poll timing, cell
+//! balancing, boot diag, crash post-mortem, firmware ID, per-IC PEC
+//! counts). This module handles the arm/disarm handshake and decodes
+//! the wire frames into typed records the rest of the crate (and the
 //! Studio app) can consume.
 //!
 //! ## Wire protocol
 //!
-//! Source of truth: `docs/CAN_MAP.md` in the AMS repo (IFS08-CE-AMS).
-//! The #252 issue body in this repo also reserves `0x6C2..=0x6C6`
-//! for balance / boot / crash / firmware-ID frames — those are
-//! forward-looking; the firmware hasn't shipped them yet.
+//! Source of truth: `docs/dbc/ams.dbc` in the AMS repo (IFS08-CE-AMS).
+//! (`CAN_MAP.md` is the human-readable companion — but its table once
+//! omitted `0x6C2..=0x6C6`, which is what misled catch-up PR #263
+//! into a 53-frame undercount. Trust the DBC.)
 //!
 //! - **Enable**:  emit `0x7F0` with payload `DE AD BE EF`.
 //! - **Disable**: emit `0x7F0` with payload `00 00 00 00`.
 //! - **ACK**:     AMS replies on `0x7F1` with 1 byte —
 //!   `0x01` = enabled, `0x00` = disabled.
-//! - **Stream IDs once armed (53 frames / scan total)**:
+//! - **Stream IDs once armed (58 frames / scan total)**:
 //!   - `0x680..=0x697` (24 frames) — cell voltages, 4 cells/frame,
 //!     big-endian `u16` millivolts. The last frame's 4th slot is a
 //!     `0xFFFF` sentinel because 95 cells don't divide evenly by 4.
 //!   - `0x6A0..=0x6B8` (25 frames) — NTC temperatures, 8 NTCs/frame,
 //!     signed `i8` °C. Exact (25 × 8 = 200).
 //!   - `0x6C0` — FSM extended status (state, mode_locked, TSMS,
-//!     DASH_CHG, AMS_OK, PEC error total, plus the #276 fault-reason
-//!     / fault-detail bytes).
-//!   - `0x6C1` — Poll timing (last V-poll ms, worst V-poll ms,
-//!     T-sweep failure mask).
+//!     DASH_CHG, AMS_OK, PEC error total, #276 fault-reason/detail).
+//!   - `0x6C1` — poll timing (V-poll ms last/worst, T-sweep mask).
+//!   - `0x6C2` / `0x6C3` — balance DCC mask (95 bits) + cycle counts.
+//!   - `0x6C4` — boot diag (jump reason, init progress, FDCAN start).
+//!   - `0x6C5` — crash post-mortem from the previous boot.
+//!   - `0x6C6` — firmware ID (semver + git hash + BL node-id).
 //!   - `0x6C7` / `0x6C8` — per-IC PEC error counts (#258), one
 //!     saturating `u8` per monitor IC (10 ICs = 2 × 5 modules).
 //!
+//! Endianness: cell-V are big-endian and the poll-timing V-poll
+//! latencies are big-endian; everything else in the diag block
+//! (T-sweep mask, balance, boot, crash) is little-endian, per the
+//! DBC `@1+` markers.
+//!
 //! ## Scope
 //!
-//! Decoders are hand-coded against the AMS doc; the slice 6 plan in
-//! #252 swaps them for DBC consumption. [`AMS_EXPECTED_FRAMES_PER_SCAN`]
-//! lets the Studio + CLI flag a *frame-count* drift before silent
+//! Decoders are hand-coded against the AMS DBC; the slice 6 plan in
+//! #252 swaps them for DBC consumption (the file now ships `VAL_`
+//! tables for the enums). [`AMS_EXPECTED_FRAMES_PER_SCAN`] lets the
+//! Studio + CLI flag a *frame-count* drift before silent
 //! miscalibration — but note it can't catch an in-frame byte
 //! repurposing (e.g. #276 moving `0x6C0[6..7]` from reserved to
-//! fault-reason); those are caught by tracking the AMS CAN_MAP
-//! per-frame, which is why the host carries an explicit per-frame
-//! layout here.
+//! fault-reason); those are caught by tracking the AMS DBC per-frame,
+//! which is why the host carries an explicit per-frame layout here.
 //!
 //! VCU + UDV will get equivalent streams in their own ID ranges
 //! (TBD per team). The plugin/profile abstraction lands in a later
@@ -94,30 +102,50 @@ pub const AMS_NTC_LAST_ID: u16 = 0x6B8;
 /// Number of frames in the NTC-temperature stream.
 pub const AMS_NTC_NUM_FRAMES: usize = 25;
 
-/// The diag block — FSM status, poll timing, and per-IC PEC counts.
+/// The diag block — `0x6C0..=0x6C8`, 9 contiguous frames.
 ///
-/// This block is **non-contiguous**. The #252 issue body reserved
-/// `0x6C2..=0x6C6` for balance / boot / crash / firmware-ID frames
-/// the firmware hasn't shipped, so the AMS team's per-IC PEC frames
-/// (#258) landed at `0x6C7` / `0x6C8` instead, leaving a gap:
+/// History: this block looked non-contiguous from `CAN_MAP.md` for
+/// a while because that doc's table skipped straight from `0x6C1`
+/// to `0x6C7`, hiding the `0x6C2..=0x6C6` block. But the firmware
+/// emitted those frames all along and `ams.dbc` modelled them — the
+/// host (mistakenly built off the prose table in catch-up PR #263)
+/// under-counted at 53. AMS #293 filled in the doc table; the real
+/// stream is 9 diag frames, 58 total.
 ///
 /// | ID       | frame                              | source |
 /// |----------|------------------------------------|--------|
 /// | `0x6C0`  | FSM extended status                | #248   |
 /// | `0x6C1`  | poll timing                        | #248   |
+/// | `0x6C2`  | balance DCC mask, cells 0..63      | —      |
+/// | `0x6C3`  | balance DCC mask hi + cycle counts | —      |
+/// | `0x6C4`  | boot diag (jump reason / progress) | —      |
+/// | `0x6C5`  | crash post-mortem                  | —      |
+/// | `0x6C6`  | firmware ID (semver + git + node)  | —      |
 /// | `0x6C7`  | per-IC PEC count, ICs 0..7         | #258   |
 /// | `0x6C8`  | per-IC PEC count, ICs 8..9 + rsvd  | #258   |
 ///
-/// Source of truth: `docs/CAN_MAP.md` in IFS08-CE-AMS. (Note: that
-/// doc's bus-cost prose still reads "51 frames" — stale since #258
-/// added the two PEC frames; flagged back to the AMS team. The
-/// table itself is correct, hence the 4 here.)
-pub const AMS_DIAG_NUM_FRAMES: usize = 4;
+/// Source of truth: `docs/dbc/ams.dbc` in IFS08-CE-AMS (the human
+/// `CAN_MAP.md` table is secondary — it's what misled #263).
+pub const AMS_DIAG_BASE_ID: u16 = 0x6C0;
+/// Last CAN ID in the diag block.
+pub const AMS_DIAG_LAST_ID: u16 = 0x6C8;
+/// Number of frames in the diag block (9 — contiguous 0x6C0..=0x6C8).
+pub const AMS_DIAG_NUM_FRAMES: usize = 9;
 
 /// CAN ID of the FSM extended-status frame.
 pub const AMS_FSM_STATUS_ID: u16 = 0x6C0;
 /// CAN ID of the poll-timing frame.
 pub const AMS_POLL_TIMING_ID: u16 = 0x6C1;
+/// CAN ID of the balance DCC mask frame A (cells 0..=63).
+pub const AMS_BALANCE_MASK_A_ID: u16 = 0x6C2;
+/// CAN ID of the balance DCC mask frame B (cells 64..=94 + cycle counts).
+pub const AMS_BALANCE_MASK_B_ID: u16 = 0x6C3;
+/// CAN ID of the boot-diag frame.
+pub const AMS_BOOT_DIAG_ID: u16 = 0x6C4;
+/// CAN ID of the crash post-mortem frame.
+pub const AMS_POST_MORTEM_ID: u16 = 0x6C5;
+/// CAN ID of the firmware-ID frame.
+pub const AMS_FW_ID_ID: u16 = 0x6C6;
 /// CAN ID of the per-IC PEC frame covering ICs 0..=7.
 pub const AMS_PER_IC_PEC_LO_ID: u16 = 0x6C7;
 /// CAN ID of the per-IC PEC frame covering ICs 8..=9 (+ reserved).
@@ -128,8 +156,8 @@ pub const AMS_PER_IC_PEC_HI_ID: u16 = 0x6C8;
 /// module `m`.
 pub const AMS_NUM_ICS: usize = 2 * AMS_NUM_MODULES;
 
-/// Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 4.
-/// The Studio + CLI compare this against an observed scan-rate
+/// Total frames the AMS emits per 1 Hz scan when armed: 24 + 25 + 9
+/// = 58. The Studio + CLI compare this against an observed scan-rate
 /// counter and warn if the wire shape has drifted — the canary for
 /// "the AMS firmware added or dropped frames since this constant was
 /// last verified". When new diag-block frames ship, bump
@@ -339,6 +367,140 @@ pub struct PollTimingFrame {
     pub t_sweep_fail_mask: u32,
 }
 
+/// Decoded balance (cell-discharge) state, reassembled from the two
+/// `0x6C2` / `0x6C3` frames.
+///
+/// The DCC (discharge-cell) mask is 95 bits — one per cell. `0x6C2`
+/// carries cells 0..=63 (`dcc_bits_lo64`, LE u64); `0x6C3` carries
+/// cells 64..=94 in the low 31 bits of `dcc_bits_hi32` (bit 31
+/// reserved) plus two cycle counters. Because the two halves arrive
+/// in separate frames, the library decodes each into its own
+/// [`PitDiagFrame`] variant and the consumer reassembles the
+/// 95-bit picture; [`BalanceState::is_discharging`] does the bit
+/// math so callers don't repeat it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct BalanceState {
+    /// Cells 0..=63 discharge mask (`0x6C2`).
+    pub dcc_lo: u64,
+    /// Cells 64..=94 discharge mask in the low 31 bits (`0x6C3`).
+    pub dcc_hi: u32,
+    /// Total balance cycles since boot, mod 65536 (`0x6C3`).
+    pub cycles_total: u16,
+    /// Cycles where at least one DCC bit was set (`0x6C3`).
+    pub cycles_active: u16,
+}
+
+impl BalanceState {
+    /// Is `cell_idx` (0..[`AMS_NUM_CELLS`]) currently discharging?
+    /// Returns `false` for out-of-range indices.
+    #[must_use]
+    pub fn is_discharging(&self, cell_idx: usize) -> bool {
+        if cell_idx < 64 {
+            (self.dcc_lo >> cell_idx) & 1 == 1
+        } else if cell_idx < AMS_NUM_CELLS {
+            (self.dcc_hi >> (cell_idx - 64)) & 1 == 1
+        } else {
+            false
+        }
+    }
+}
+
+/// `0x6C2` — balance DCC mask frame A: cells 0..=63 as an LE u64.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BalanceMaskAFrame {
+    pub dcc_lo: u64,
+}
+
+/// `0x6C3` — balance DCC mask frame B: cells 64..=94 (low 31 bits)
+/// plus the two cycle counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BalanceMaskBFrame {
+    pub dcc_hi: u32,
+    pub cycles_total: u16,
+    pub cycles_active: u16,
+}
+
+/// Why the firmware (re)booted. Wire: `0x6C4[0..4]` LE u32. The two
+/// non-zero values are ASCII tags written by the bootloader / app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JumpReason {
+    /// Cold boot / power-on reset (value 0).
+    PowerOn,
+    /// `'JUMP'` (0x4A554D50) — jumped from the BL via a CAN trigger.
+    CanTrigger,
+    /// `'MANU'` (0x4D414E55) — manual jump request.
+    Manual,
+    /// Any other value — surfaced raw for forward-compat.
+    Unknown(u32),
+}
+
+impl JumpReason {
+    fn from_u32(v: u32) -> Self {
+        match v {
+            0 => Self::PowerOn,
+            0x4A55_4D50 => Self::CanTrigger,
+            0x4D41_4E55 => Self::Manual,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// Decoded `0x6C4` — boot diagnostics. Layout (all LE):
+///
+/// | bytes | field |
+/// |---|---|
+/// | 0..4 | jump_reason (u32, ASCII-tag enum) |
+/// | 4    | app_init_progress (0..7 milestone; 7 = clean self-exit) |
+/// | 5..8 | fdcan1_start_result (24-bit; 0 = HAL_OK) |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootDiagFrame {
+    pub jump_reason: JumpReason,
+    /// Last init milestone reached (0..=7). 7 means the app booted
+    /// cleanly through every milestone.
+    pub app_init_progress: u8,
+    /// Low 24 bits of the `HAL_FDCAN_Start` return — 0 is `HAL_OK`.
+    pub fdcan1_start_result: u32,
+}
+
+/// Decoded `0x6C5` — crash post-mortem from the *previous* boot.
+/// Layout (all LE):
+///
+/// | bytes | field |
+/// |---|---|
+/// | 0    | stack_overflow_seen (bool) |
+/// | 1    | watermark_low_byte (saturates 0xFF) |
+/// | 2..6 | task_addr_lo (u32 — low 32 bits of failing xTaskHandle) |
+/// | 6..8 | malloc_failed_count (u16, saturates 0xFFFF) |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PostMortemFrame {
+    pub stack_overflow_seen: bool,
+    pub watermark_low_byte: u8,
+    pub task_addr_lo: u32,
+    pub malloc_failed_count: u16,
+}
+
+impl PostMortemFrame {
+    /// Did the previous boot record any fault worth surfacing?
+    /// Drives whether the Studio shows the post-mortem banner.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        !self.stack_overflow_seen && self.task_addr_lo == 0 && self.malloc_failed_count == 0
+    }
+}
+
+/// Decoded `0x6C6` — firmware identity. Bytes 0..3 semver, 3..7 the
+/// first four bytes of the git hash, byte 7 the BL node-id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FwIdFrame {
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub version_patch: u8,
+    /// First four bytes of the firmware git hash.
+    pub git_hash: [u8; 4],
+    /// Bootloader node-id (`firmware_info.reserved[0]`).
+    pub bl_node_id: u8,
+}
+
 /// A decoded pit-diag frame, dispatched by CAN ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PitDiagFrame {
@@ -356,6 +518,16 @@ pub enum PitDiagFrame {
     FsmStatus(FsmStatusFrame),
     /// `0x6C1` — V-poll + T-sweep timing telemetry.
     PollTiming(PollTimingFrame),
+    /// `0x6C2` — balance DCC mask, cells 0..=63.
+    BalanceMaskA(BalanceMaskAFrame),
+    /// `0x6C3` — balance DCC mask hi + cycle counters.
+    BalanceMaskB(BalanceMaskBFrame),
+    /// `0x6C4` — boot diagnostics.
+    BootDiag(BootDiagFrame),
+    /// `0x6C5` — crash post-mortem from the previous boot.
+    PostMortem(PostMortemFrame),
+    /// `0x6C6` — firmware identity (semver + git hash + node-id).
+    FwId(FwIdFrame),
     /// `0x6C7` / `0x6C8` — per-IC PEC error counts.
     PerIcPec(PerIcPecFrame),
 }
@@ -465,11 +637,79 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
             return None;
         }
         return Some(PitDiagFrame::PollTiming(PollTimingFrame {
+            // The V-poll latencies are the only big-endian fields in
+            // the diag block; the T-sweep mask and everything in the
+            // 0x6C2..=0x6C6 frames below are little-endian.
             last_v_poll_ms: u16::from_be_bytes([payload[0], payload[1]]),
             worst_v_poll_ms: u16::from_be_bytes([payload[2], payload[3]]),
-            // T-sweep mask is LE u32 on the wire (the only LE field
-            // in the pit-diag stream — the rest is BE).
             t_sweep_fail_mask: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        }));
+    }
+
+    // Balance DCC mask A — 0x6C2: cells 0..=63 as an LE u64.
+    if id == AMS_BALANCE_MASK_A_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        return Some(PitDiagFrame::BalanceMaskA(BalanceMaskAFrame {
+            dcc_lo: u64::from_le_bytes([
+                payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+                payload[7],
+            ]),
+        }));
+    }
+
+    // Balance DCC mask B — 0x6C3: cells 64..=94 (low 31 bits) + cycles.
+    if id == AMS_BALANCE_MASK_B_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        return Some(PitDiagFrame::BalanceMaskB(BalanceMaskBFrame {
+            dcc_hi: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+            cycles_total: u16::from_le_bytes([payload[4], payload[5]]),
+            cycles_active: u16::from_le_bytes([payload[6], payload[7]]),
+        }));
+    }
+
+    // Boot diag — 0x6C4.
+    if id == AMS_BOOT_DIAG_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        return Some(PitDiagFrame::BootDiag(BootDiagFrame {
+            jump_reason: JumpReason::from_u32(u32::from_le_bytes([
+                payload[0], payload[1], payload[2], payload[3],
+            ])),
+            app_init_progress: payload[4],
+            // 24-bit field, bytes 5..=7 LE; pad the high byte with 0.
+            fdcan1_start_result: u32::from_le_bytes([payload[5], payload[6], payload[7], 0]),
+        }));
+    }
+
+    // Crash post-mortem — 0x6C5.
+    if id == AMS_POST_MORTEM_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        return Some(PitDiagFrame::PostMortem(PostMortemFrame {
+            stack_overflow_seen: payload[0] != 0,
+            watermark_low_byte: payload[1],
+            task_addr_lo: u32::from_le_bytes([payload[2], payload[3], payload[4], payload[5]]),
+            malloc_failed_count: u16::from_le_bytes([payload[6], payload[7]]),
+        }));
+    }
+
+    // Firmware ID — 0x6C6.
+    if id == AMS_FW_ID_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        return Some(PitDiagFrame::FwId(FwIdFrame {
+            version_major: payload[0],
+            version_minor: payload[1],
+            version_patch: payload[2],
+            git_hash: [payload[3], payload[4], payload[5], payload[6]],
+            bl_node_id: payload[7],
         }));
     }
 
@@ -524,21 +764,20 @@ const _: () = assert!(AMS_NTC_NUM_FRAMES == (AMS_NTC_LAST_ID - AMS_NTC_BASE_ID +
 const _: () = assert!(AMS_CELLV_NUM_FRAMES * 4 > AMS_NUM_CELLS);
 // 25 frames × 8 NTCs/frame = 200 = AMS_NUM_NTCS exactly.
 const _: () = assert!(AMS_NTC_NUM_FRAMES * 8 == AMS_NUM_NTCS);
-// Total scan = 53 frames: 24 cell-V + 25 NTC + 4 diag (FSM, poll,
-// 2× per-IC PEC). The Studio + CLI display a warning if the observed
-// scan rate drifts from this — the canary for "the AMS team added or
-// dropped frames since this constant was last verified". When new
-// diag-block frames ship, bump AMS_DIAG_NUM_FRAMES and the math falls
-// out automatically.
-const _: () = assert!(AMS_EXPECTED_FRAMES_PER_SCAN == 53);
-// The diag block is non-contiguous (gap at 0x6C2..=0x6C6), so we
-// can't assert a single base..=last range. Instead: pin the count
-// and confirm the per-IC PEC pair is contiguous + sits above the
-// FSM/poll pair.
-const _: () = assert!(AMS_DIAG_NUM_FRAMES == 4);
-const _: () = assert!(AMS_POLL_TIMING_ID == AMS_FSM_STATUS_ID + 1);
-const _: () = assert!(AMS_PER_IC_PEC_HI_ID == AMS_PER_IC_PEC_LO_ID + 1);
-const _: () = assert!(AMS_PER_IC_PEC_LO_ID > AMS_POLL_TIMING_ID);
+// Total scan = 58 frames: 24 cell-V + 25 NTC + 9 diag (0x6C0..=0x6C8).
+// The Studio + CLI display a warning if the observed scan rate drifts
+// from this — the canary for "the AMS team added or dropped frames
+// since this constant was last verified". When new diag-block frames
+// ship, bump AMS_DIAG_NUM_FRAMES and the math falls out automatically.
+const _: () = assert!(AMS_EXPECTED_FRAMES_PER_SCAN == 58);
+// The diag block is contiguous (0x6C0..=0x6C8) now that 0x6C2..=0x6C6
+// are filled in, so a single range invariant holds again.
+const _: () = assert!(AMS_DIAG_NUM_FRAMES == (AMS_DIAG_LAST_ID - AMS_DIAG_BASE_ID + 1) as usize);
+const _: () = assert!(AMS_FSM_STATUS_ID == AMS_DIAG_BASE_ID);
+const _: () = assert!(AMS_PER_IC_PEC_HI_ID == AMS_DIAG_LAST_ID);
+// The balance mask spans 95 bits: 64 in frame A + 31 in frame B's
+// low bits = one per cell.
+const _: () = assert!(64 + 31 == AMS_NUM_CELLS);
 // Two ICs per module; 0x6C8 carries the ICs past the 8 in 0x6C7.
 const _: () = assert!(AMS_NUM_ICS == 10);
 const _: () = assert!(AMS_NUM_ICS > 8);
@@ -842,6 +1081,140 @@ mod tests {
     fn per_ic_pec_short_payload_rejected() {
         let frame = CanFrame::new(AMS_PER_IC_PEC_LO_ID, &[0, 1, 2]).unwrap();
         assert_eq!(decode_frame(&frame), None);
+    }
+
+    #[test]
+    fn decodes_balance_mask_a_and_b_reassemble() {
+        // Frame A: cells 0, 5, 63 discharging.
+        let lo: u64 = (1 << 0) | (1 << 5) | (1 << 63);
+        let frame_a = CanFrame::new(AMS_BALANCE_MASK_A_ID, &lo.to_le_bytes()).unwrap();
+        // Frame B: cell 64 (hi bit 0) + cell 94 (hi bit 30) discharging;
+        // 1234 total cycles, 56 active.
+        let hi: u32 = (1 << 0) | (1 << 30);
+        let mut b = [0u8; 8];
+        b[0..4].copy_from_slice(&hi.to_le_bytes());
+        b[4..6].copy_from_slice(&1234u16.to_le_bytes());
+        b[6..8].copy_from_slice(&56u16.to_le_bytes());
+        let frame_b = CanFrame::new(AMS_BALANCE_MASK_B_ID, &b).unwrap();
+
+        let a = match decode_frame(&frame_a).unwrap() {
+            PitDiagFrame::BalanceMaskA(a) => a,
+            other => panic!("expected BalanceMaskA, got {other:?}"),
+        };
+        let bb = match decode_frame(&frame_b).unwrap() {
+            PitDiagFrame::BalanceMaskB(b) => b,
+            other => panic!("expected BalanceMaskB, got {other:?}"),
+        };
+        assert_eq!(bb.cycles_total, 1234);
+        assert_eq!(bb.cycles_active, 56);
+
+        // Reassemble + check the bit math, including the 64-boundary.
+        let state = BalanceState {
+            dcc_lo: a.dcc_lo,
+            dcc_hi: bb.dcc_hi,
+            cycles_total: bb.cycles_total,
+            cycles_active: bb.cycles_active,
+        };
+        assert!(state.is_discharging(0));
+        assert!(state.is_discharging(5));
+        assert!(!state.is_discharging(6));
+        assert!(state.is_discharging(63));
+        assert!(state.is_discharging(64)); // first bit of frame B
+        assert!(state.is_discharging(94)); // last real cell
+        assert!(!state.is_discharging(93));
+        assert!(!state.is_discharging(95)); // out of range
+    }
+
+    #[test]
+    fn decodes_boot_diag_jump_reasons() {
+        // 'JUMP' = 0x4A554D50, progress 7 (clean), fdcan OK (0).
+        let mut p = [0u8; 8];
+        p[0..4].copy_from_slice(&0x4A55_4D50u32.to_le_bytes());
+        p[4] = 7;
+        // bytes 5..7 = 0 ⇒ fdcan1_start_result 0
+        let frame = CanFrame::new(AMS_BOOT_DIAG_ID, &p).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::BootDiag(b) => {
+                assert_eq!(b.jump_reason, JumpReason::CanTrigger);
+                assert_eq!(b.app_init_progress, 7);
+                assert_eq!(b.fdcan1_start_result, 0);
+            }
+            other => panic!("expected BootDiag, got {other:?}"),
+        }
+
+        // Cold boot (0) + a non-zero 24-bit HAL status.
+        let mut p2 = [0u8; 8];
+        p2[4] = 3;
+        p2[5] = 0x01; // fdcan result low byte
+        let frame2 = CanFrame::new(AMS_BOOT_DIAG_ID, &p2).unwrap();
+        match decode_frame(&frame2).unwrap() {
+            PitDiagFrame::BootDiag(b) => {
+                assert_eq!(b.jump_reason, JumpReason::PowerOn);
+                assert_eq!(b.app_init_progress, 3);
+                assert_eq!(b.fdcan1_start_result, 1);
+            }
+            other => panic!("expected BootDiag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_post_mortem_clean_and_crashed() {
+        // Clean: all zero ⇒ is_clean().
+        let clean = CanFrame::new(AMS_POST_MORTEM_ID, &[0; 8]).unwrap();
+        match decode_frame(&clean).unwrap() {
+            PitDiagFrame::PostMortem(p) => assert!(p.is_clean()),
+            other => panic!("expected PostMortem, got {other:?}"),
+        }
+
+        // Crashed: stack overflow on a task at 0x2000_1234, watermark
+        // 8 words, 2 malloc failures.
+        let mut p = [0u8; 8];
+        p[0] = 1; // stack_overflow_seen
+        p[1] = 8; // watermark
+        p[2..6].copy_from_slice(&0x2000_1234u32.to_le_bytes());
+        p[6..8].copy_from_slice(&2u16.to_le_bytes());
+        let frame = CanFrame::new(AMS_POST_MORTEM_ID, &p).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::PostMortem(p) => {
+                assert!(!p.is_clean());
+                assert!(p.stack_overflow_seen);
+                assert_eq!(p.watermark_low_byte, 8);
+                assert_eq!(p.task_addr_lo, 0x2000_1234);
+                assert_eq!(p.malloc_failed_count, 2);
+            }
+            other => panic!("expected PostMortem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_fw_id() {
+        // AMS v1.6.0, git AB CD EF 01, BL node-id 2.
+        let frame = CanFrame::new(AMS_FW_ID_ID, &[1, 6, 0, 0xAB, 0xCD, 0xEF, 0x01, 0x02]).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::FwId(f) => {
+                assert_eq!(
+                    (f.version_major, f.version_minor, f.version_patch),
+                    (1, 6, 0)
+                );
+                assert_eq!(f.git_hash, [0xAB, 0xCD, 0xEF, 0x01]);
+                assert_eq!(f.bl_node_id, 2);
+            }
+            other => panic!("expected FwId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_diag_frames_reject_short_payloads() {
+        for id in [
+            AMS_BALANCE_MASK_A_ID,
+            AMS_BALANCE_MASK_B_ID,
+            AMS_BOOT_DIAG_ID,
+            AMS_POST_MORTEM_ID,
+            AMS_FW_ID_ID,
+        ] {
+            let frame = CanFrame::new(id, &[0, 1, 2, 3]).unwrap();
+            assert_eq!(decode_frame(&frame), None, "id {id:#X} should reject short");
+        }
     }
 
     #[test]

@@ -267,8 +267,9 @@ node-id.
 ## `pit-diag` — AMS observer mode
 
 The AMS firmware can be flipped into a 1 Hz diagnostic stream by
-the host. When armed it broadcasts 53 frames per scan (every cell
-voltage, every NTC temperature, FSM state, V-poll timing, and
+the host. When armed it broadcasts 58 frames per scan (every cell
+voltage, every NTC temperature, FSM state, V-poll timing, cell
+balancing, boot diagnostics, crash post-mortem, firmware ID, and
 per-IC PEC counts) to whoever's listening. `pit-diag` is the
 terminal-side driver — it sends the arm command, waits for the
 ACK, and decodes the stream.
@@ -278,7 +279,7 @@ cell-V grid + temp heatmap; this subcommand is the headless
 equivalent for bench scripts, CI smoke checks, and `jq`-piping.
 
 ```bash
-# Arm the stream — the AMS starts emitting 53 frames/sec.
+# Arm the stream — the AMS starts emitting 58 frames/sec.
 can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag enable
 # ✓ ams pit-diag armed
 

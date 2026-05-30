@@ -36,8 +36,9 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use can_flasher::pit_diag::{
-    build_arm_frame, decode_frame, CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame,
-    ModeLock, NtcTempFrame, PerIcPecFrame, PitDiagFrame, PollTimingFrame, AMS_ACK_ID,
+    build_arm_frame, decode_frame, BalanceMaskAFrame, BalanceMaskBFrame, BootDiagFrame,
+    CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame, FwIdFrame, JumpReason, ModeLock,
+    NtcTempFrame, PerIcPecFrame, PitDiagFrame, PollTimingFrame, AMS_ACK_ID,
 };
 use can_flasher::transport::open_backend;
 
@@ -153,6 +154,17 @@ fn fault_reason_name(r: FaultReason) -> String {
     }
 }
 
+/// String form of the boot jump-reason (`0x6C4`). camelCase, mirrors
+/// the library `JumpReason` enum.
+fn jump_reason_name(j: JumpReason) -> String {
+    match j {
+        JumpReason::PowerOn => "powerOn".into(),
+        JumpReason::CanTrigger => "canTrigger".into(),
+        JumpReason::Manual => "manual".into(),
+        JumpReason::Unknown(v) => format!("unknown(0x{v:08X})"),
+    }
+}
+
 /// Per-frame event. Discriminated union — the `kind` tag tells the
 /// frontend which variant payload to expect. Mirrors the library's
 /// `PitDiagFrame` enum but with camelCase field names + a stable
@@ -197,6 +209,40 @@ pub enum PitDiagEvent {
         last_v_poll_ms: u16,
         worst_v_poll_ms: u16,
         t_sweep_fail_mask: u32,
+    },
+    /// `0x6C2` — balance DCC mask, cells 0..=63 (LE u64, sent as a
+    /// decimal string since JSON numbers can't safely hold a full
+    /// u64 in JS).
+    BalanceMaskA { dcc_lo: String },
+    /// `0x6C3` — balance DCC mask hi (cells 64..=94) + cycle counters.
+    BalanceMaskB {
+        dcc_hi: u32,
+        cycles_total: u16,
+        cycles_active: u16,
+    },
+    /// `0x6C4` — boot diagnostics.
+    BootDiag {
+        jump_reason: String,
+        app_init_progress: u8,
+        fdcan1_start_result: u32,
+    },
+    /// `0x6C5` — crash post-mortem from the previous boot.
+    PostMortem {
+        stack_overflow_seen: bool,
+        watermark_low_byte: u8,
+        task_addr_lo: u32,
+        malloc_failed_count: u16,
+        /// `true` when nothing crashed — lets the UI suppress the
+        /// banner without re-deriving the predicate.
+        clean: bool,
+    },
+    /// `0x6C6` — firmware identity.
+    FwId {
+        version_major: u8,
+        version_minor: u8,
+        version_patch: u8,
+        git_hash: [u8; 4],
+        bl_node_id: u8,
     },
     /// `0x6C7` / `0x6C8` — per-IC PEC error counts.
     PerIcPec {
@@ -255,6 +301,49 @@ impl PitDiagEvent {
                 last_v_poll_ms,
                 worst_v_poll_ms,
                 t_sweep_fail_mask,
+            },
+            PitDiagFrame::BalanceMaskA(BalanceMaskAFrame { dcc_lo }) => Self::BalanceMaskA {
+                // u64 as a decimal string — JS numbers lose precision
+                // above 2^53, and the discharge mask uses the full 64.
+                dcc_lo: dcc_lo.to_string(),
+            },
+            PitDiagFrame::BalanceMaskB(BalanceMaskBFrame {
+                dcc_hi,
+                cycles_total,
+                cycles_active,
+            }) => Self::BalanceMaskB {
+                dcc_hi,
+                cycles_total,
+                cycles_active,
+            },
+            PitDiagFrame::BootDiag(BootDiagFrame {
+                jump_reason,
+                app_init_progress,
+                fdcan1_start_result,
+            }) => Self::BootDiag {
+                jump_reason: jump_reason_name(jump_reason),
+                app_init_progress,
+                fdcan1_start_result,
+            },
+            PitDiagFrame::PostMortem(pm) => Self::PostMortem {
+                stack_overflow_seen: pm.stack_overflow_seen,
+                watermark_low_byte: pm.watermark_low_byte,
+                task_addr_lo: pm.task_addr_lo,
+                malloc_failed_count: pm.malloc_failed_count,
+                clean: pm.is_clean(),
+            },
+            PitDiagFrame::FwId(FwIdFrame {
+                version_major,
+                version_minor,
+                version_patch,
+                git_hash,
+                bl_node_id,
+            }) => Self::FwId {
+                version_major,
+                version_minor,
+                version_patch,
+                git_hash,
+                bl_node_id,
             },
             PitDiagFrame::PerIcPec(PerIcPecFrame {
                 first_ic,

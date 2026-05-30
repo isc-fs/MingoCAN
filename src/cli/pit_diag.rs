@@ -77,7 +77,7 @@ pub enum PitDiagCommand {
     ///   - Ctrl-C (SIGINT)              → exit 0, with disarm
     ///   - Bus error                    → exit non-zero
     ///   - Schema drift (frames/scan
-    ///     diverges from expected 53)   → exit non-zero
+    ///     diverges from expected 58)   → exit non-zero
     Stream(StreamArgs),
 }
 
@@ -100,7 +100,7 @@ pub struct StreamArgs {
     pub duration: Option<u64>,
 
     /// Fail the run if any 1-second window's frame count drifts from
-    /// the expected per-profile total (51 for AMS today) by more
+    /// the expected per-profile total (58 for AMS today) by more
     /// than ±2. Off by default because operators inspecting a
     /// known-broken bus want to *see* the wrong count, not have the
     /// tool bail. Enable in CI / scripted bench checks.
@@ -320,6 +320,47 @@ fn print_record_human(ts_ms: u64, record: &PitDiagFrame) {
                 p.last_v_poll_ms, p.worst_v_poll_ms, p.t_sweep_fail_mask,
             );
         }
+        PitDiagFrame::BalanceMaskA(b) => {
+            println!("{prefix} bal-a cells[ 0..63] dcc=0x{:016X}", b.dcc_lo);
+        }
+        PitDiagFrame::BalanceMaskB(b) => {
+            println!(
+                "{prefix} bal-b cells[64..94] dcc=0x{:08X} cycles total={} active={}",
+                b.dcc_hi, b.cycles_total, b.cycles_active,
+            );
+        }
+        PitDiagFrame::BootDiag(b) => {
+            println!(
+                "{prefix} boot  jump={:?} init_progress={}/7 fdcan_start=0x{:06X}",
+                b.jump_reason, b.app_init_progress, b.fdcan1_start_result,
+            );
+        }
+        PitDiagFrame::PostMortem(p) => {
+            if p.is_clean() {
+                println!("{prefix} crash (clean — no fault on previous boot)");
+            } else {
+                println!(
+                    "{prefix} crash stack_overflow={} watermark={} task_addr=0x{:08X} malloc_fails={}",
+                    p.stack_overflow_seen as u8,
+                    p.watermark_low_byte,
+                    p.task_addr_lo,
+                    p.malloc_failed_count,
+                );
+            }
+        }
+        PitDiagFrame::FwId(f) => {
+            println!(
+                "{prefix} fw    v{}.{}.{} git={:02X}{:02X}{:02X}{:02X} bl_node=0x{:02X}",
+                f.version_major,
+                f.version_minor,
+                f.version_patch,
+                f.git_hash[0],
+                f.git_hash[1],
+                f.git_hash[2],
+                f.git_hash[3],
+                f.bl_node_id,
+            );
+        }
         PitDiagFrame::PerIcPec(p) => {
             let counts = p
                 .counts
@@ -392,6 +433,43 @@ fn print_record_json(ts_ms: u64, record: &PitDiagFrame) {
             println!(
                 r#"{{"tsMs":{ts_ms},"kind":"pollTiming","lastVPollMs":{},"worstVPollMs":{},"tSweepFailMask":{}}}"#,
                 p.last_v_poll_ms, p.worst_v_poll_ms, p.t_sweep_fail_mask,
+            );
+        }
+        PitDiagFrame::BalanceMaskA(b) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"balanceMaskA","dccLo":{}}}"#,
+                b.dcc_lo,
+            );
+        }
+        PitDiagFrame::BalanceMaskB(b) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"balanceMaskB","dccHi":{},"cyclesTotal":{},"cyclesActive":{}}}"#,
+                b.dcc_hi, b.cycles_total, b.cycles_active,
+            );
+        }
+        PitDiagFrame::BootDiag(b) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"bootDiag","jumpReason":"{:?}","appInitProgress":{},"fdcan1StartResult":{}}}"#,
+                b.jump_reason, b.app_init_progress, b.fdcan1_start_result,
+            );
+        }
+        PitDiagFrame::PostMortem(p) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"postMortem","stackOverflowSeen":{},"watermarkLowByte":{},"taskAddrLo":{},"mallocFailedCount":{}}}"#,
+                p.stack_overflow_seen, p.watermark_low_byte, p.task_addr_lo, p.malloc_failed_count,
+            );
+        }
+        PitDiagFrame::FwId(f) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"fwId","versionMajor":{},"versionMinor":{},"versionPatch":{},"gitHash":[{},{},{},{}],"blNodeId":{}}}"#,
+                f.version_major,
+                f.version_minor,
+                f.version_patch,
+                f.git_hash[0],
+                f.git_hash[1],
+                f.git_hash[2],
+                f.git_hash[3],
+                f.bl_node_id,
             );
         }
         PitDiagFrame::PerIcPec(p) => {

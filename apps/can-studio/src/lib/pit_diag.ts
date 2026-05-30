@@ -24,25 +24,22 @@ export const AMS_NTC_SENTINEL = -128;
 /**
  * Total frames the AMS emits per 1 Hz scan when armed.
  *
- * Source of truth: `docs/CAN_MAP.md` in IFS08-CE-AMS, which
- * documents 24 cell-V + 25 NTC + 2 diag frames = 51, and confirms
- * with the bus-cost note "51 frames × ~12 bytes-on-wire".
+ * Source of truth: `docs/dbc/ams.dbc` in IFS08-CE-AMS. The diag
+ * block is the contiguous `0x6C0..=0x6C8` (9 frames):
  *
- * The #252 issue body lists more diag frames (balance / boot /
- * crash / firmware-ID) — those are forward-looking; this constant
- * tracks what the firmware *currently* emits. When the AMS team
- * ships additional diag-block frames, bump the Rust
- * `AMS_EXPECTED_FRAMES_PER_SCAN` constant and mirror it here.
+ *   58 = 24 cell-V + 25 NTC + 9 diag
+ *      = FSM(0x6C0) + poll(0x6C1) + balance×2(0x6C2/0x6C3)
+ *        + boot(0x6C4) + crash(0x6C5) + fw-id(0x6C6)
+ *        + per-IC PEC×2(0x6C7/0x6C8)
+ *
+ * (Historical note: the host briefly used 53 in PR #263 — built off
+ * the `CAN_MAP.md` prose table, which had skipped `0x6C2..=0x6C6`.
+ * The DBC modelled them all along; AMS #293 fixed the doc table.)
  *
  * The view banners a "schema drift suspected" warning if the
- * observed scan rate diverges from this value by more than ±2 —
- * that's the canary for "the spec has changed since this constant
- * was last verified".
- *
- * 53 = 24 cell-V + 25 NTC + 4 diag (FSM 0x6C0, poll 0x6C1, and the
- * two per-IC PEC frames 0x6C7/0x6C8 added by AMS #258).
+ * observed scan rate diverges from this value by more than ±2.
  */
-export const AMS_EXPECTED_FRAMES_PER_SCAN = 53;
+export const AMS_EXPECTED_FRAMES_PER_SCAN = 58;
 /** Monitor ICs in the pack — 2 per module × 5 modules. */
 export const AMS_NUM_ICS = 10;
 
@@ -117,6 +114,49 @@ export type PitDiagEvent =
           lastVPollMs: number;
           worstVPollMs: number;
           tSweepFailMask: number;
+      }
+    | {
+          /** 0x6C2 — balance DCC mask, cells 0..=63. Decimal string
+           *  (full u64 exceeds JS safe-integer range). */
+          kind: 'balanceMaskA';
+          dccLo: string;
+      }
+    | {
+          /** 0x6C3 — balance DCC mask hi (cells 64..=94, low 31 bits)
+           *  + cycle counters. */
+          kind: 'balanceMaskB';
+          dccHi: number;
+          cyclesTotal: number;
+          cyclesActive: number;
+      }
+    | {
+          /** 0x6C4 — boot diagnostics. */
+          kind: 'bootDiag';
+          /** "powerOn" | "canTrigger" | "manual" | "unknown(0x…)". */
+          jumpReason: string;
+          /** 0..7 init milestone; 7 = clean self-exit. */
+          appInitProgress: number;
+          /** Low 24 bits of HAL_FDCAN_Start; 0 = HAL_OK. */
+          fdcan1StartResult: number;
+      }
+    | {
+          /** 0x6C5 — crash post-mortem from the previous boot. */
+          kind: 'postMortem';
+          stackOverflowSeen: boolean;
+          watermarkLowByte: number;
+          taskAddrLo: number;
+          mallocFailedCount: number;
+          /** true when nothing crashed — suppress the banner. */
+          clean: boolean;
+      }
+    | {
+          /** 0x6C6 — firmware identity. */
+          kind: 'fwId';
+          versionMajor: number;
+          versionMinor: number;
+          versionPatch: number;
+          gitHash: number[];
+          blNodeId: number;
       }
     | {
           /** 0x6C7 / 0x6C8 — per-IC PEC error counts. `firstIc` is 0
