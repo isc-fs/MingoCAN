@@ -8,7 +8,7 @@ name: Release
 #     only, not raw binary tarballs).
 #   - VS Code extension (.vsix)
 #   - ISC CAN Studio (Tauri desktop installers — .dmg / .deb / .rpm /
-#     .msi / .exe; AppImage intentionally excluded)
+#     .exe (NSIS); AppImage + .msi intentionally excluded)
 #
 # A single `v*` tag (e.g. `v2.0.0`) triggers all three surfaces to
 # build in parallel and attach their artefacts to one GitHub
@@ -128,7 +128,7 @@ jobs:
             **ISC CAN Studio** — pick the installer for your OS:
             - macOS: `.dmg` (ad-hoc signed; first launch needs **right-click → Open → confirm**)
             - Linux: `.deb` or `.rpm`
-            - Windows: `.msi` (preferred) or `.exe` installer
+            - Windows: `.exe` installer (NSIS)
 
             See [docs/INSTALL.md](https://github.com/isc-fs/can-flasher/blob/${{ github.ref_name }}/docs/INSTALL.md) for per-OS adapter setup (SLCAN / SocketCAN / PCAN / Vector).
 
