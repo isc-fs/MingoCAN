@@ -111,30 +111,44 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            **Unified release** — `can-flasher` CLI + ISC STM32 CAN Flasher (VS Code extension) + ISC CAN Studio (desktop app) all ship together at the same version from a single tag.
+            # 🏁 ISC MingoCAN ${{ github.ref_name }}
 
-            ### Install / upgrade per surface
+            Flash, monitor, and debug CAN messages on the team's STM32 ECUs — a desktop app plus optional editor and command-line tools, all at version ${{ github.ref_name }}.
 
-            **CLI (`can-flasher`)** — install from source at this tag (no pre-built binary on this page):
-            ```bash
-            cargo install --git https://github.com/isc-fs/can-flasher.git --tag ${{ github.ref_name }}
-            ```
+            New here? You almost certainly want the **desktop app** below. 👇
 
-            **VS Code extension** — download `vscode-stm32-can-*.vsix` from the assets below, then in VS Code: **Extensions panel → ⋯ menu → Install from VSIX…**
+            ## 💻 Desktop app — download & install
+
+            Scroll to **Assets** at the bottom of this page and grab the file for your computer:
+
+            | Your computer | Download the file ending in | How to install |
+            |---|---|---|
+            | **Windows 10 / 11** | `-setup.exe` | Double-click it. If a blue *"Windows protected your PC"* box appears → **More info → Run anyway**. |
+            | **Mac** (Apple Silicon / M1–M4) | `.dmg` | Open it, drag the app to **Applications**. **First launch only:** right-click the app → **Open** → **Open**. |
+            | **Ubuntu / Debian** | `.deb` | In a terminal from your Downloads folder: `sudo apt install ./*.deb` |
+            | **Fedora / RHEL** | `.rpm` | `sudo dnf install ./*.rpm` |
+
+            > ℹ️ **Why the warning?** The app isn't code-signed yet, so Windows and macOS show a one-time *"unidentified developer"* prompt. It's expected and safe — the steps above clear it. You only do this the first time you open the app.
+
+            📖 First time setting up a CAN adapter (SLCAN / SocketCAN / PCAN / Vector)? See the **[setup guide](https://github.com/isc-fs/can-flasher/blob/${{ github.ref_name }}/docs/INSTALL.md)**.
+
+            ## 🧩 VS Code extension (optional)
+
+            Flash and discover devices without leaving your editor. Download the `.vsix` from **Assets**, then in VS Code: **Extensions panel → ⋯ menu → Install from VSIX…** — or run:
             ```bash
             code --install-extension vscode-stm32-can-*.vsix
             ```
 
-            **ISC CAN Studio** — pick the installer for your OS:
-            - macOS: `.dmg` (ad-hoc signed; first launch needs **right-click → Open → confirm**)
-            - Linux: `.deb` or `.rpm`
-            - Windows: `.exe` installer (NSIS)
+            ## 🛠️ Command-line tool (advanced)
 
-            See [docs/INSTALL.md](https://github.com/isc-fs/can-flasher/blob/${{ github.ref_name }}/docs/INSTALL.md) for per-OS adapter setup (SLCAN / SocketCAN / PCAN / Vector).
+            `can-flasher` is the scriptable CLI. Install it from source at this version:
+            ```bash
+            cargo install --git https://github.com/isc-fs/can-flasher.git --tag ${{ github.ref_name }}
+            ```
 
             ---
 
-            **Full commit log**: https://github.com/isc-fs/can-flasher/commits/${{ github.ref_name }}
+            <sub>Everything here ships together from one release. Full list of changes: [commit log for ${{ github.ref_name }}](https://github.com/isc-fs/can-flasher/commits/${{ github.ref_name }}).</sub>
 
   # ---- CLI binaries -------------------------------------------
   #
