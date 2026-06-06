@@ -32,7 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "rpm", "dmg", "nsis"],
     "category": "DeveloperTool",
     "copyright": "Copyright © 2026 ISC Racing Team",
     "shortDescription": "Flash, monitor, and debug CAN messages on STM32 ECUs.",

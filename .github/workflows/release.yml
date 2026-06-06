@@ -2,9 +2,13 @@ name: Release
 
 # Unified release pipeline for **all three** product surfaces:
 #
-#   - `can-flasher` CLI (Rust binaries — Linux / macOS / Windows)
+#   - `can-flasher` CLI — built on all four targets as a compile
+#     gate, but NOT attached to the Release (install via `cargo
+#     install --git … --tag …`; operators wanted installer packages
+#     only, not raw binary tarballs).
 #   - VS Code extension (.vsix)
-#   - ISC CAN Studio (Tauri desktop bundles — .dmg / .deb / .AppImage / .rpm / .msi / .exe)
+#   - ISC CAN Studio (Tauri desktop installers — .dmg / .deb / .rpm /
+#     .exe (NSIS); AppImage + .msi intentionally excluded)
 #
 # A single `v*` tag (e.g. `v2.0.0`) triggers all three surfaces to
 # build in parallel and attach their artefacts to one GitHub
@@ -111,7 +115,7 @@ jobs:
 
             ### Install / upgrade per surface
 
-            **CLI (`can-flasher`)** — pre-built binaries below for Linux x86_64 / aarch64, macOS aarch64, Windows x86_64.
+            **CLI (`can-flasher`)** — install from source at this tag (no pre-built binary on this page):
             ```bash
             cargo install --git https://github.com/isc-fs/can-flasher.git --tag ${{ github.ref_name }}
             ```
@@ -121,10 +125,10 @@ jobs:
             code --install-extension vscode-stm32-can-*.vsix
             ```
 
-            **ISC CAN Studio** — pick the bundle for your OS:
+            **ISC CAN Studio** — pick the installer for your OS:
             - macOS: `.dmg` (ad-hoc signed; first launch needs **right-click → Open → confirm**)
-            - Linux: `.deb`, `.AppImage`, or `.rpm`
-            - Windows: `.msi` (preferred) or `.exe` installer
+            - Linux: `.deb` or `.rpm`
+            - Windows: `.exe` installer (NSIS)
 
             See [docs/INSTALL.md](https://github.com/isc-fs/can-flasher/blob/${{ github.ref_name }}/docs/INSTALL.md) for per-OS adapter setup (SLCAN / SocketCAN / PCAN / Vector).
 
@@ -218,19 +222,20 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
           echo "archive=$stage.zip" >> $env:GITHUB_ENV
 
+      # The CLI is distributed via `cargo install --git … --tag …`,
+      # NOT as a pre-built binary on the Release page (operators
+      # asked for installer packages only — .deb / .rpm / .dmg /
+      # .exe / .msi — not raw binary tarballs). We still build all
+      # four targets every release as a cross-platform compile gate
+      # and keep the archives as 7-day workflow artifacts for
+      # debugging, but they are deliberately NOT attached to the
+      # GitHub Release.
       - name: Upload as workflow artifact (always)
         uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.target }}
           path: ${{ env.archive }}
           retention-days: 7
-
-      - name: Attach to GitHub Release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.archive }}
-          fail_on_unmatched_files: true
 
   # ---- VS Code extension --------------------------------------
 
