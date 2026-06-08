@@ -149,6 +149,26 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         ));
     }
 
+    // FMEA #271 G8: the bootloader stamps each version component into
+    // a single metadata byte; `pack_version` would silently clamp a
+    // value > 255, so the version we *display* (raw) and the version
+    // we *stamp* (clamped) would disagree — e.g. "1.300.0" shown,
+    // "1.255.0" stamped — and version-gated field tooling would
+    // mis-gate. Reject out-of-range components up front instead.
+    if let Some(fw) = image.fw_info.as_ref() {
+        let (major, minor, patch) = fw.version();
+        if major > 255 || minor > 255 || patch > 255 {
+            return Err(exit_err(
+                ExitCodeHint::InputFileError,
+                format!(
+                    "firmware version {major}.{minor}.{patch} has a component > 255; the \
+                     bootloader metadata stores each as one byte — fix the embedded version \
+                     so every component fits 0..=255",
+                ),
+            ));
+        }
+    }
+
     let wall_start = SystemTime::now();
 
     // ---- 2. Open session + CONNECT ----
