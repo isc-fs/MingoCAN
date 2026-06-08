@@ -31,7 +31,7 @@ Global Options:
   -i, --interface <TYPE>    CAN backend: slcan | socketcan | pcan | vector | virtual
   -c, --channel <CHANNEL>   Adapter channel (format depends on OS and backend)
   -b, --bitrate <BPS>       Nominal CAN bitrate [default: 500000]
-      --node-id <ID>        Target node ID hex or decimal [default: broadcast]
+      --node-id <ID>        Target node ID hex or decimal (required by `flash`; per-command default otherwise)
       --timeout <MS>        Per-frame timeout in ms [default: 500]
       --json                Machine-readable JSON output on stdout
       --verbose             Trace-level logging

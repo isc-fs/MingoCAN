@@ -66,7 +66,15 @@ fn flash_cli_writes_and_jumps_on_virtual_interface() {
     write_two_sector_bin(&path);
 
     let out = Command::new(bin())
-        .args(["--interface", "virtual", "flash", "--address", "0x08020000"])
+        .args([
+            "--interface",
+            "virtual",
+            "--node-id",
+            "0x3",
+            "flash",
+            "--address",
+            "0x08020000",
+        ])
         .arg(&path)
         .output()
         .expect("spawn can-flasher");
@@ -102,6 +110,8 @@ fn flash_cli_json_output_matches_requirements_schema() {
         .args([
             "--interface",
             "virtual",
+            "--node-id",
+            "0x3",
             "--json",
             "flash",
             "--address",
@@ -186,6 +196,8 @@ fn flash_cli_dry_run_lists_plan_without_jumping() {
         .args([
             "--interface",
             "virtual",
+            "--node-id",
+            "0x3",
             "flash",
             "--address",
             "0x08020000",
@@ -313,6 +325,8 @@ fn flash_cli_require_wrp_exits_7_when_not_protected() {
         .args([
             "--interface",
             "virtual",
+            "--node-id",
+            "0x3",
             "flash",
             "--address",
             "0x08020000",
@@ -348,6 +362,8 @@ fn flash_cli_negative_flags_parse_and_succeed() {
         .args([
             "--interface",
             "virtual",
+            "--node-id",
+            "0x3",
             "flash",
             "--address",
             "0x08020000",

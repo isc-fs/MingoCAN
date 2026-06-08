@@ -873,7 +873,33 @@ fn build_flash_config(args: &FlashArgs) -> FlashConfig {
     }
 }
 
+/// Per-command timeout floor for a flash session (FMEA #271 G4 /
+/// issue #266). A 128 KB STM32H7 sector erase blocks ~2-4 s before
+/// the bootloader ACKs (see `docs/PERFORMANCE.md`), but `--timeout`
+/// defaults to 500 ms — so every default-config flash aborted at the
+/// first `FLASH_ERASE` with a spurious "device not found". Floor the
+/// flash session's per-command timeout to cover one sector's erase;
+/// a larger operator-supplied `--timeout` still wins via `.max`.
+const FLASH_ERASE_FLOOR_MS: u32 = 6_000;
+// Must cover a worst-case ~2-4 s H7 128 KB sector erase. Compile-time
+// so a careless edit downward fails the build, not a flash on the bench.
+const _: () = assert!(FLASH_ERASE_FLOOR_MS >= 4_000);
+
 fn open_session(global: &GlobalFlags, keepalive_ms: u32) -> Result<Session> {
+    // FMEA #271 G2: never silently guess which physical board to
+    // overwrite. A missing `--node-id` used to resolve to `0x3` (the
+    // uDV role) — a real board — so on a shared bus a default flash
+    // hit the wrong ECU. Require an explicit target. Validated before
+    // opening the adapter so the error is hardware-independent.
+    let target_node = global.node_id.ok_or_else(|| {
+        exit_err(
+            ExitCodeHint::DeviceNotFound,
+            "flash requires an explicit --node-id (which board to flash): \
+             0x1 = ECU, 0x2 = AMS, 0x3 = uDV. Refusing to guess a target \
+             on a shared bus.",
+        )
+    })?;
+
     let backend = open_backend(global.interface, global.channel.as_deref(), global.bitrate)
         .map_err(|e| {
             exit_err(
@@ -881,11 +907,11 @@ fn open_session(global: &GlobalFlags, keepalive_ms: u32) -> Result<Session> {
                 format!("opening CAN backend: {e}"),
             )
         })?;
-    let target_node = global.node_id.unwrap_or(0x3);
+    let command_timeout_ms = global.timeout_ms.max(FLASH_ERASE_FLOOR_MS);
     let config = SessionConfig {
         target_node,
         keepalive_interval: Duration::from_millis(u64::from(keepalive_ms)),
-        command_timeout: Duration::from_millis(u64::from(global.timeout_ms)),
+        command_timeout: Duration::from_millis(u64::from(command_timeout_ms)),
         ..SessionConfig::default()
     };
     Ok(Session::attach(backend, config))
@@ -957,6 +983,33 @@ fn parse_hex_u32(raw: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // FMEA #271 G2 — `flash` must refuse to run without an explicit
+    // --node-id rather than silently targeting 0x3 (uDV). The check
+    // is hardware-independent (runs before the adapter opens), so this
+    // needs no backend.
+    #[test]
+    fn flash_requires_explicit_node_id() {
+        let global = GlobalFlags {
+            interface: crate::cli::InterfaceType::Virtual,
+            channel: None,
+            bitrate: 500_000,
+            node_id: None,
+            timeout_ms: 500,
+            json: false,
+            log_path: None,
+            verbose: false,
+            operator: None,
+        };
+        let err = match open_session(&global, 5_000) {
+            Ok(_) => panic!("missing --node-id must error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("--node-id"),
+            "error should name the missing flag, got: {err}"
+        );
+    }
 
     #[test]
     fn build_flash_config_honours_negative_flags() {

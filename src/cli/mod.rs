@@ -166,7 +166,9 @@ pub struct GlobalFlags {
     )]
     pub bitrate: u32,
 
-    /// Target node ID (hex `0x0A` or decimal `10`). Defaults to broadcast (0xF).
+    /// Target node ID (hex `0x0A` or decimal `10`). Required by `flash`
+    /// (no default — it won't guess which board to overwrite); other
+    /// commands fall back to their own per-subcommand default.
     #[arg(long = "node-id", global = true, value_parser = parse_node_id)]
     pub node_id: Option<u8>,
 
