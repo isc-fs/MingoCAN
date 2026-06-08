@@ -36,7 +36,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use super::{exit_err, ExitCodeHint, GlobalFlags};
+use super::{confirm_prompt, exit_err, ExitCodeHint, GlobalFlags};
 use crate::firmware::{self, loader};
 use crate::flash::{FlashConfig, FlashEvent, FlashManager, FlashReport, SectorRole};
 use crate::protocol::commands::{cmd_jump, cmd_ob_apply_wrp, cmd_ob_read};
@@ -109,6 +109,12 @@ pub struct FlashArgs {
     /// on the flash itself — pure instrumentation.
     #[arg(long = "profile", default_value_t = false)]
     pub profile: bool,
+
+    /// Skip the pre-flight confirmation prompt. Required for
+    /// non-interactive / scripted / CI flashing (a piped stdin
+    /// otherwise auto-declines the prompt and aborts).
+    #[arg(long = "yes", default_value_t = false)]
+    pub yes: bool,
 }
 
 // ---- Entry point ----
@@ -178,6 +184,47 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         .connect()
         .await
         .map_err(|e| exit_err(ExitCodeHint::DeviceNotFound, format!("CONNECT failed: {e}")))?;
+
+    // ---- 2b. Pre-flight confirmation (FMEA #271 G3) ----
+    //
+    // The most destructive op in the tool had no gate: it went
+    // load → connect → erase/write/jump with nothing echoed about
+    // *what* it was about to overwrite or *which* board. Echo the
+    // target + image + connected BL version and require an explicit
+    // y/N (mirrors `config`'s OB-write prompt). Skipped for
+    // `--dry-run` (non-destructive) and `--yes` (scripted/CI);
+    // `confirm_prompt` auto-declines on a non-TTY stdin, so a piped
+    // flash without `--yes` fails closed rather than hanging.
+    if !args.dry_run && !args.yes {
+        let product = image
+            .fw_info
+            .as_ref()
+            .map(|fw| fw.product_name().to_string())
+            .unwrap_or_else(|| "(no fw-info)".to_string());
+        let (vmaj, vmin, vpat) = image
+            .fw_info
+            .as_ref()
+            .map(|fw| fw.version())
+            .unwrap_or((0, 0, 0));
+        eprintln!(
+            "About to flash node 0x{:X} on {:?} [{}]:",
+            global.node_id.unwrap_or(0),
+            global.interface,
+            global.channel.as_deref().unwrap_or("default channel"),
+        );
+        eprintln!(
+            "  image      : {product} v{vmaj}.{vmin}.{vpat}  ({} bytes @ 0x{:08X})",
+            image.data.len(),
+            image.base_addr,
+        );
+        eprintln!("  bootloader : v{proto_major}.{proto_minor}");
+        if !confirm_prompt("This erases + overwrites the app region. Continue?") {
+            return Err(exit_err(
+                ExitCodeHint::Interrupted,
+                "flash cancelled at the pre-flight prompt (pass --yes to skip)",
+            ));
+        }
+    }
 
     // ---- 3-5. Main pipeline under Ctrl-C watch ----
     //
@@ -1047,6 +1094,7 @@ mod tests {
             no_jump: false,
             keepalive_ms: 5000,
             profile: false,
+            yes: true,
         };
         let cfg = build_flash_config(&args);
         assert!(!cfg.diff, "--no-diff should win");
@@ -1070,6 +1118,7 @@ mod tests {
             no_jump: false,
             keepalive_ms: 5000,
             profile: false,
+            yes: true,
         };
         let cfg = build_flash_config(&args);
         assert!(cfg.dry_run);

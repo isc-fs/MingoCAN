@@ -25,7 +25,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use tracing::debug;
 
-use super::GlobalFlags;
+use super::{confirm_prompt, GlobalFlags};
 use crate::protocol::commands::{
     cmd_nvm_format, cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read, cmd_reset,
 };
@@ -170,16 +170,6 @@ fn open_session(global: &GlobalFlags) -> Result<Session> {
         ..SessionConfig::default()
     };
     Ok(Session::attach(backend, config))
-}
-
-fn confirm_prompt(question: &str) -> bool {
-    eprint!("{question} [y/N]: ");
-    std::io::stderr().flush().ok();
-    let mut input = String::new();
-    if std::io::stdin().read_line(&mut input).is_err() {
-        return false;
-    }
-    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
 // ---- ob read ----
