@@ -85,6 +85,22 @@ pub fn exit_err(hint: ExitCodeHint, message: impl std::fmt::Display) -> anyhow::
     anyhow::Error::new(hint).context(message.to_string())
 }
 
+/// Interactive y/N confirmation on stderr. Returns `true` only on an
+/// explicit "y"/"yes". A closed/non-TTY stdin (EOF) returns `false` —
+/// i.e. destructive ops fail closed under piping / CI unless the
+/// caller passed an explicit `--yes`. Shared by `config` (OB writes)
+/// and `flash` (pre-flight gate, FMEA #271 G3).
+pub(crate) fn confirm_prompt(question: &str) -> bool {
+    use std::io::Write;
+    eprint!("{question} [y/N]: ");
+    std::io::stderr().flush().ok();
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
 // ---- Top-level ----
 
 #[derive(Debug, Parser)]
