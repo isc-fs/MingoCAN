@@ -32,6 +32,8 @@
         type SwdFlashReport,
         type SwdOp,
     } from './swd';
+    import { settings } from './settings.svelte';
+    import { provisionNodeId } from './provision';
 
     type FlashState =
         | { kind: 'idle' }
@@ -52,6 +54,37 @@
     let probesError = $state<string | null>(null);
     let flashState = $state<FlashState>({ kind: 'idle' });
     let eraseState = $state<EraseState>({ kind: 'idle' });
+
+    // ---- Provision-after-burn (commissioning step 2) -------------
+    // Unlike the CAN Flash tab, the SWD burn writes the *bootloader*
+    // — the same binary on every board — so we can't infer the role
+    // from the artifact name. The operator picks which board this is
+    // (None / ECU / AMS / uDV); on a successful burn-with-reset we
+    // chain a `provision_node_id` over CAN so a fresh board is
+    // commissioned in one click instead of burn-then-provision by
+    // hand. The provision step talks CAN, so it needs an adapter
+    // selected in the Adapters view and "Reset target after flash"
+    // on (the board must boot the bootloader to be provisioned).
+    const PROVISION_ROLES: ReadonlyArray<{ name: 'ecu' | 'ams' | 'udv'; label: string }> = [
+        { name: 'ecu', label: 'ECU — node 0x1' },
+        { name: 'ams', label: 'AMS — node 0x2' },
+        { name: 'udv', label: 'uDV — node 0x3' },
+    ];
+    let provisionRole = $state<'ecu' | 'ams' | 'udv' | null>(null);
+    let provisionState = $state<
+        | { kind: 'idle' }
+        | { kind: 'running' }
+        | { kind: 'ok'; role: string }
+        | { kind: 'error'; message: string }
+    >({ kind: 'idle' });
+
+    // A CAN adapter must be picked (and have a channel, unless it's
+    // the virtual bus) for the provision step to reach the board.
+    const adapterReady = $derived(
+        settings.adapter.interface !== null &&
+            (settings.adapter.interface === 'virtual' ||
+                settings.adapter.channel.length > 0),
+    );
 
     // ---- Live progress, fed by `swd-flash:event` Tauri events ----
     // `currentOp` is the operation probe-rs is in the middle of
@@ -170,6 +203,7 @@
         currentOp = null;
         opDone = 0;
         opTotal = null;
+        provisionState = { kind: 'idle' };
         const startedAt = performance.now();
         flashState = { kind: 'running', startedAt };
         try {
@@ -189,6 +223,38 @@
                 durationMs: Math.round(performance.now() - startedAt),
                 report,
             };
+
+            // Provision-after-burn hook (commissioning step 2). Only
+            // when the operator picked a role, the burn reset the board
+            // (so it's running the bootloader), and a CAN adapter is
+            // ready. A failure here doesn't undo the burn — surface it
+            // and let the operator re-run `provision` standalone.
+            const role = provisionRole;
+            if (role !== null && submitted.resetAfter && adapterReady) {
+                provisionState = { kind: 'running' };
+                try {
+                    await provisionNodeId({
+                        role,
+                        interface: settings.adapter.interface!, // adapterReady guard
+                        channel:
+                            settings.adapter.channel.length > 0
+                                ? settings.adapter.channel
+                                : null,
+                        bitrate: settings.adapter.bitrate,
+                        nodeId: settings.adapter.nodeId,
+                        timeoutMs: settings.adapter.timeoutMs,
+                    });
+                    provisionState = { kind: 'ok', role };
+                } catch (provErr) {
+                    provisionState = {
+                        kind: 'error',
+                        message:
+                            provErr instanceof Error
+                                ? provErr.message
+                                : String(provErr),
+                    };
+                }
+            }
         } catch (err) {
             flashState = {
                 kind: 'error',
@@ -401,6 +467,43 @@
             />
             <span>Reset target after flash</span>
         </label>
+
+        <hr class="divider" />
+
+        <label class="field">
+            <span>Provision node-id after burn</span>
+            <select bind:value={provisionRole} disabled={running}>
+                <option value={null}>Don't provision</option>
+                {#each PROVISION_ROLES as r (r.name)}
+                    <option value={r.name}>{r.label}</option>
+                {/each}
+            </select>
+        </label>
+        {#if provisionRole === null}
+            <p class="muted small">
+                The SWD burn writes the bootloader (same binary on every
+                board), so it can't tell which board this is. Pick the role to
+                also write the matching node-id over CAN once the bootloader
+                boots — commissioning in one click.
+            </p>
+        {:else if !args.resetAfter}
+            <p class="small fetch-error">
+                Provisioning needs <strong>Reset target after flash</strong>:
+                the board must boot the bootloader to accept the node-id over
+                CAN.
+            </p>
+        {:else if !adapterReady}
+            <p class="small fetch-error">
+                Pick a CAN adapter in the <strong>Adapters</strong> view first —
+                the node-id is written over CAN, not SWD.
+            </p>
+        {:else}
+            <p class="muted small">
+                After a successful burn, this board will be provisioned as
+                <strong>{provisionRole}</strong> over
+                <code>{settings.adapter.interface}</code> and reset.
+            </p>
+        {/if}
     </section>
 
     <div class="actions">
@@ -487,6 +590,27 @@
         <div class="banner banner-danger">
             <strong>Burn failed:</strong>
             {flashState.message}
+        </div>
+    {/if}
+
+    {#if provisionState.kind === 'running'}
+        <div class="banner spinner-row">
+            <span class="spinner"></span>
+            Provisioning node-id over CAN…
+        </div>
+    {:else if provisionState.kind === 'ok'}
+        <div class="banner banner-success">
+            ✓ Provisioned as <strong>{provisionState.role}</strong>. The board
+            rebooted with its new node-id — verify from the
+            <strong>Adapters</strong> view's discovery.
+        </div>
+    {:else if provisionState.kind === 'error'}
+        <div class="banner banner-danger">
+            <strong>Burn succeeded, but provisioning failed:</strong>
+            {provisionState.message}
+            <br />
+            Re-run it standalone with
+            <code>cf provision {provisionRole ?? '<role>'}</code>.
         </div>
     {/if}
 
