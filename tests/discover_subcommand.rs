@@ -39,8 +39,13 @@ async fn spawn_session_and_stub() -> (Session, oneshot::Sender<()>, tokio::task:
         let _ = stub.run(cancel_rx).await;
     });
 
+    // These tests exercise the discover / broadcast-enrichment path
+    // (broadcast() + per-node send_command_to). That's a broadcast
+    // session — target_node = BROADCAST_NODE_ID — which is also what
+    // tells the rx task's per-target reply filter (FMEA #271 G7) to
+    // accept replies from every responder, not just one node.
     let config = SessionConfig {
-        target_node: 0x0,
+        target_node: can_flasher::protocol::BROADCAST_NODE_ID,
         keepalive_interval: Duration::from_millis(5_000),
         command_timeout: Duration::from_millis(200),
         ..SessionConfig::default()
