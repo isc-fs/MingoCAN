@@ -278,6 +278,35 @@ pub fn validate_segments(segments: &[(u32, Vec<u8>)]) -> Result<(), ImageError> 
             });
         }
     }
+
+    // Pairwise overlap (FMEA #271 G6): `compose_image` resolves
+    // overlapping segments last-writer-wins with NO diagnostic, so a
+    // wrong-but-self-consistent image would pass host CRC, BL CRC,
+    // and post-flash verify — all run over the same composed buffer —
+    // then get committed + jumped as "verified". The HEX path is the
+    // live exposure (ihex emits Data records verbatim, no merging).
+    // Sort the non-empty [addr, end) ranges by start, reject any that
+    // begins before the previous one ends.
+    let mut ranges: Vec<(u32, u32, usize)> = segments
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, data))| !data.is_empty())
+        .map(|(idx, (addr, data))| (*addr, addr.saturating_add(data.len() as u32), idx))
+        .collect();
+    ranges.sort_by_key(|(start, _, _)| *start);
+    for pair in ranges.windows(2) {
+        let (a_addr, a_end, a_idx) = pair[0];
+        let (b_addr, _b_end, b_idx) = pair[1];
+        if b_addr < a_end {
+            return Err(ImageError::OverlappingSegments {
+                first_index: a_idx,
+                first_addr: a_addr,
+                first_end: a_end,
+                second_index: b_idx,
+                second_addr: b_addr,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -460,6 +489,32 @@ mod tests {
         let segs = vec![
             (0x0802_0000u32, vec![0u8; 64]),
             (0x0802_1000u32, vec![0u8; 64]),
+        ];
+        assert!(validate_segments(&segs).is_ok());
+    }
+
+    // FMEA #271 G6 — overlapping segments must be rejected, not
+    // silently last-writer-wins composed.
+    #[test]
+    fn validate_segments_rejects_overlapping_segments() {
+        // Second segment starts 32 bytes into the first's 64-byte range.
+        let segs = vec![
+            (0x0802_0000u32, vec![0u8; 64]),
+            (0x0802_0020u32, vec![1u8; 64]),
+        ];
+        let err = validate_segments(&segs).expect_err("overlap must be rejected");
+        assert!(
+            matches!(err, ImageError::OverlappingSegments { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_segments_accepts_touching_but_not_overlapping() {
+        // [0..64) then [64..128) — adjacent, no overlap.
+        let segs = vec![
+            (0x0802_0000u32, vec![0u8; 64]),
+            (0x0802_0040u32, vec![1u8; 64]),
         ];
         assert!(validate_segments(&segs).is_ok());
     }

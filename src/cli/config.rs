@@ -29,7 +29,7 @@ use super::GlobalFlags;
 use crate::protocol::commands::{
     cmd_nvm_format, cmd_nvm_read, cmd_nvm_write, cmd_ob_apply_wrp, cmd_ob_read, cmd_reset,
 };
-use crate::protocol::opcodes::ResetMode;
+use crate::protocol::opcodes::{CommandOpcode, ResetMode};
 use crate::protocol::records::ObStatus;
 use crate::protocol::Response;
 use crate::session::{Session, SessionConfig};
@@ -71,6 +71,14 @@ pub enum ObAction {
         /// Skip the interactive confirmation prompt
         #[arg(long = "yes", default_value_t = false)]
         yes: bool,
+
+        /// Allow a sector mask that protects sectors OTHER than sector 0
+        /// (the bootloader). Required to set any bit beyond 0x01 — on
+        /// recent H7 silicon WRP is clearable only via a full chip erase
+        /// over an external debugger, so write-protecting an app sector
+        /// renders the unit unflashable over CAN. (FMEA #271 G1.)
+        #[arg(long = "allow-app-sectors", default_value_t = false)]
+        allow_app_sectors: bool,
 
         /// Milliseconds to wait for the device to come back after reset
         #[arg(long = "reset-wait-ms", default_value_t = 2_000)]
@@ -134,8 +142,9 @@ pub async fn run(args: ConfigArgs, global: &GlobalFlags) -> Result<()> {
             ObAction::ApplyWrp {
                 sector_mask,
                 yes,
+                allow_app_sectors,
                 reset_wait_ms,
-            } => run_ob_apply_wrp(sector_mask, yes, reset_wait_ms, global).await,
+            } => run_ob_apply_wrp(sector_mask, yes, allow_app_sectors, reset_wait_ms, global).await,
         },
         ConfigAction::Nvm { action } => match action {
             NvmAction::Read { key } => run_nvm_read(key, global).await,
@@ -214,7 +223,20 @@ async fn run_ob_read(global: &GlobalFlags) -> Result<()> {
     disconnect.ok();
 
     match resp {
-        Response::Ack { payload, .. } => {
+        Response::Ack { opcode, payload } => {
+            // FMEA #271 G15: verify the ACK is actually for OB_READ
+            // before treating its payload as an OB snapshot. Without
+            // this, a stale or cross-contaminated ACK (any opcode,
+            // payload >= 16 bytes) would render as a benign option-byte
+            // state and feed an operator's apply-wrp decision. The
+            // sibling flash.rs path already guards this; match it.
+            if opcode != CommandOpcode::ObRead.as_byte() {
+                bail!(
+                    "OB_READ returned the wrong opcode 0x{opcode:02X} \
+                     (expected 0x{:02X}) — refusing to read it as an OB snapshot",
+                    CommandOpcode::ObRead.as_byte()
+                );
+            }
             if payload.len() < ObStatus::SIZE {
                 bail!(
                     "OB_READ ACK too short: got {} bytes, need {}",
@@ -266,21 +288,58 @@ fn render_ob_read(status: &ObStatus, json: bool) -> Result<()> {
 
 // ---- ob apply-wrp ----
 
+/// FMEA #271 G1 (brick): bit 0 protects sector 0 (the bootloader) —
+/// the intended use. Any higher bit write-protects an app sector, and
+/// on recent H7 silicon WRP is clearable only via a full chip erase
+/// over an external debugger, leaving the unit unflashable over CAN.
+/// Refuse a mask beyond `0x01` unless the operator explicitly opts in.
+/// Pure so it's unit-testable without a session.
+fn check_wrp_mask(sector_mask: u32, allow_app_sectors: bool) -> Result<()> {
+    if sector_mask & !0x01 != 0 && !allow_app_sectors {
+        let extra: Vec<String> = (1..32)
+            .filter(|b| (sector_mask >> b) & 1 == 1)
+            .map(|b| format!("#{b}"))
+            .collect();
+        bail!(
+            "refusing sector mask 0x{sector_mask:08X}: it write-protects non-bootloader \
+             sector(s) {} as well as sector 0. On H7 silicon that's only clearable via a \
+             full chip erase over SWD — the board would be unflashable over CAN. Re-run \
+             with --allow-app-sectors if you truly intend this.",
+            extra.join(", ")
+        );
+    }
+    Ok(())
+}
+
 async fn run_ob_apply_wrp(
     sector_mask: u32,
     yes: bool,
+    allow_app_sectors: bool,
     reset_wait_ms: u32,
     global: &GlobalFlags,
 ) -> Result<()> {
+    check_wrp_mask(sector_mask, allow_app_sectors)?;
+
     if !yes {
+        // Decode which sectors the mask latches so the prompt isn't a
+        // bare hex value the operator has to mentally expand.
+        let sectors: Vec<String> = (0..32)
+            .filter(|b| (sector_mask >> b) & 1 == 1)
+            .map(|b| format!("#{b}"))
+            .collect();
         eprintln!(
             "WARNING: OB_APPLY_WRP latches write-protection in flash option bytes.\n\
              On recent H7 silicon WRP can only be cleared via a full chip erase\n\
              through an external debugger. The device will reset after ACK."
         );
         let prompt = format!(
-            "About to apply WRP with sector mask 0x{sector_mask:02X} to node \
+            "About to apply WRP with sector mask 0x{sector_mask:08X} (sectors {}) to node \
              0x{:X}. Continue?",
+            if sectors.is_empty() {
+                "none".to_string()
+            } else {
+                sectors.join(", ")
+            },
             global.node_id.unwrap_or(0x3)
         );
         if !confirm_prompt(&prompt) {
@@ -701,6 +760,28 @@ fn parse_hex_u32(raw: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
     use crate::protocol::records::{ObStatus, OB_APPLY_TOKEN};
+
+    // FMEA #271 G1 — WRP mask guard.
+    #[test]
+    fn check_wrp_mask_allows_bootloader_sector() {
+        assert!(check_wrp_mask(0x01, false).is_ok());
+        assert!(check_wrp_mask(0x00, false).is_ok());
+    }
+
+    #[test]
+    fn check_wrp_mask_rejects_app_sectors_by_default() {
+        // bit 1 = sector 1 (an app sector) → brick risk.
+        let err = check_wrp_mask(0b11, false).expect_err("app-sector mask must be rejected");
+        assert!(
+            err.to_string().contains("--allow-app-sectors"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_wrp_mask_allows_app_sectors_with_optin() {
+        assert!(check_wrp_mask(0xFF, true).is_ok());
+    }
 
     #[test]
     fn parse_nvm_key_resolves_node_id_alias() {
