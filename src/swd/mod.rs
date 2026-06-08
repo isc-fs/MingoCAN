@@ -48,8 +48,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use probe_rs::flashing::{
-    download_file_with_options, erase_all, DownloadOptions, FlashProgress, Format, ProgressEvent,
-    ProgressOperation,
+    download_file_with_options, erase_all, BinOptions, DownloadOptions, FlashProgress, Format,
+    ProgressEvent, ProgressOperation,
 };
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::DebugProbeInfo;
@@ -303,9 +303,20 @@ where
     // CRC'd the raw file bytes, which for `.elf` includes the
     // ELF headers / debug info and has nothing to do with what
     // gets flashed. #247.)
-    let image = crate::firmware::loader::load(&request.artifact_path, None).map_err(|e| {
-        SwdError::ProbeRs(format!("parse artifact {:?}: {e}", request.artifact_path))
-    })?;
+    // FMEA #271 G9 + G10:
+    //  - `load_unchecked` (not `load`): the bootloader image is based
+    //    at sector 0 (0x08000000), which the CAN-flash sector-0 guard
+    //    rejects. SWD's whole purpose is to write that sector, so we
+    //    skip the CAN-only validation here. (G9 — this used to abort
+    //    every bootloader burn before any probe I/O.)
+    //  - pass the `--base` hint: a raw `.bin` carries no address, so
+    //    without it the load aborts with BinaryNeedsAddress and the
+    //    documented `--base` flag was silently ignored. (G10.)
+    let image = crate::firmware::loader::load_unchecked(
+        &request.artifact_path,
+        Some(request.base_addr as u32),
+    )
+    .map_err(|e| SwdError::ProbeRs(format!("parse artifact {:?}: {e}", request.artifact_path)))?;
     let source_crc32 = crate::firmware::crc32(&image.data);
     let image_base = u64::from(image.base_addr);
     let image_size = image.data.len();
@@ -324,15 +335,19 @@ where
         );
     }
 
-    // probe-rs's `Format` variants take per-format options. We pass
-    // `Default::default()` everywhere — the defaults match what
-    // operators expect (no skipped ELF sections, raw `.bin` carries
-    // no embedded base address, etc.). Power-users who need to
-    // tweak those can drop down to the underlying probe-rs API.
+    // probe-rs's `Format` variants take per-format options. ELF/HEX
+    // carry their own addresses, so `Default::default()` is right. A
+    // raw `.bin` does NOT — it needs the base address explicitly, or
+    // probe-rs flashes it at 0x0 (FMEA #271 G10). Thread the same
+    // `--base` the loader used so the CRC fingerprint and what
+    // probe-rs writes agree.
     let format = match ext.as_str() {
         "elf" => Format::Elf(Default::default()),
         "hex" => Format::Hex,
-        "bin" => Format::Bin(Default::default()),
+        "bin" => Format::Bin(BinOptions {
+            base_address: Some(request.base_addr),
+            skip: 0,
+        }),
         _ => return Err(SwdError::ArtifactBadExtension { ext }),
     };
 
