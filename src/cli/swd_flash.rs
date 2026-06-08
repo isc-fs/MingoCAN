@@ -91,9 +91,39 @@ pub struct SwdFlashArgs {
     /// the issue.
     #[arg(long, default_value_t = false)]
     pub sector_erase: bool,
+
+    /// After the SWD burn, assign the board's CAN node-id by role,
+    /// over CAN — the second commissioning step that otherwise needs
+    /// a separate `cf provision <role>`. Accepts a role name (`ecu`,
+    /// `ams`, `udv`) or a firmware path whose basename matches
+    /// (e.g. `build/ams.elf`). Requires the global CAN flags
+    /// (`--interface`, `--channel`) since the provision step talks to
+    /// the freshly-booted bootloader over CAN; for a fresh board
+    /// address it with `--node-id 0xF` (broadcast) when it's the only
+    /// node on the bus. Incompatible with `--no-reset` (the board
+    /// must boot the bootloader to be provisioned).
+    #[arg(long)]
+    pub provision: Option<String>,
 }
 
-pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
+/// Auto-provision (`--provision`) needs the board running the new
+/// bootloader, which the post-flash reset provides — so it's
+/// incompatible with `--no-reset`. Pure so it's unit-testable.
+fn check_provision_reset_combo(provision: bool, no_reset: bool) -> Result<()> {
+    if provision && no_reset {
+        return Err(exit_err(
+            ExitCodeHint::InputFileError,
+            "--provision can't be combined with --no-reset: the board must boot the \
+             bootloader to be provisioned over CAN",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
+    // Catch the contradiction before we burn anything.
+    check_provision_reset_combo(args.provision.is_some(), args.no_reset)?;
+
     let base_addr = parse_hex_u64(&args.base).ok_or_else(|| {
         exit_err(
             ExitCodeHint::InputFileError,
@@ -157,6 +187,27 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
              Re-run without --no-verify before declaring the chip good."
         );
     }
+
+    // ---- Optional auto-provision over CAN (commissioning step 2) ----
+    //
+    // The SWD burn writes only the bootloader; the CAN node-id lives
+    // in NVM and is written over CAN by the running bootloader. With
+    // `--provision`, chain that second step here so a fresh board is
+    // commissioned in one command instead of burn-then-provision by
+    // hand. The post-flash reset (guaranteed: we reject `--no-reset`
+    // above) has just rebooted the chip into the new bootloader.
+    if let Some(role) = args.provision {
+        println!("\nBootloader is up; provisioning node-id over CAN…");
+        // Give the freshly-reset bootloader a moment to initialise its
+        // CAN peripheral before we open a session against it.
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        let prov = super::provision::ProvisionArgs {
+            role,
+            no_reset: false,
+        };
+        super::provision::run(prov, global).await?;
+    }
+
     Ok(())
 }
 
@@ -322,6 +373,17 @@ fn parse_hex_u64(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provision_requires_post_flash_reset() {
+        // --provision + --no-reset is contradictory: the board can't
+        // be provisioned over CAN if it isn't booted into the BL.
+        assert!(check_provision_reset_combo(true, true).is_err());
+        // Every other combination is fine.
+        assert!(check_provision_reset_combo(true, false).is_ok());
+        assert!(check_provision_reset_combo(false, true).is_ok());
+        assert!(check_provision_reset_combo(false, false).is_ok());
+    }
 
     #[test]
     fn parses_hex_and_decimal_addresses() {

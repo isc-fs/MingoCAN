@@ -414,7 +414,35 @@ can-flasher swd-flash bootloader.elf --no-verify
 
 # Leave the chip halted after the write (e.g. for a debugger attach)
 can-flasher swd-flash bootloader.elf --no-reset
+
+# One-shot commissioning: burn the bootloader over SWD, then assign
+# the CAN node-id over CAN — no separate `provision` step. Needs the
+# global CAN flags (the provision half talks over the bus), and for a
+# fresh board address it on broadcast (--node-id 0xF) when it's the
+# only node connected. Role can be a name or a firmware path.
+can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0xF \
+  swd-flash bootloader.elf --provision ams
 ```
+
+### Two-step commissioning (and why `--provision` folds them into one)
+
+The SWD burn writes **only the bootloader** to the bare chip over
+ST-LINK. The CAN **node-id lives in NVM** and is written *over CAN*
+by the now-running bootloader — a separate transport. So a fresh
+board normally takes two commands:
+
+```bash
+can-flasher swd-flash bootloader.elf                       # 1. burn (SWD)
+can-flasher --interface slcan --channel /dev/ttyACM0 \     # 2. assign id (CAN)
+  --node-id 0xF provision ams
+```
+
+`swd-flash --provision <role>` chains step 2 automatically after a
+successful burn (it waits for the post-flash reset to boot the BL,
+then runs the same node-id write). It's therefore **incompatible with
+`--no-reset`** — the board has to be running the bootloader to be
+provisioned. See [`provision`](#provision--assign-a-node-id-by-role-name)
+for the role→id table and the broadcast-addressing rules.
 
 Platform prerequisites (libusb stack for the ST-LINK USB endpoint)
 are listed in [INSTALL.md § ST-LINK + SWD](INSTALL.md#st-link--swd-optional-feature-swd).
