@@ -78,6 +78,7 @@
 //! indistinguishable from a long-running operation), so the bar at
 //! review time is higher than "does it compile."
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -380,6 +381,14 @@ impl Session {
     /// The broader session state (keepalive, reconnect-on-BAD_SESSION,
     /// notification routing) is unaffected — this is purely a
     /// per-call destination override.
+    ///
+    /// NOTE (FMEA #271 G7): the rx task only forwards command replies
+    /// whose source matches the session's `target_node`, *unless* the
+    /// session targets `BROADCAST_NODE_ID`. So `send_command_to` is
+    /// meant for **broadcast-target sessions** (which is exactly how
+    /// `discover` uses it). Calling it on a session pinned to a single
+    /// node, with a `dst` other than that node, would see the reply
+    /// filtered out.
     pub async fn send_command_to(&self, dst: u8, payload: &[u8]) -> Result<Response, SessionError> {
         let _guard = self.inner.command_lock.lock().await;
         let errors_before = self.inner.backend.adapter_error_count();
@@ -704,6 +713,23 @@ async fn keepalive_tick(
     }
 }
 
+/// Should a command reply (ACK / NACK / DISCOVER) from source node
+/// `src` be accepted by a session whose configured target is
+/// `target`? (FMEA #271 G7.)
+///
+/// - point-to-point session (target = a specific node): only that
+///   node's replies — a foreign node's same-opcode ACK must not be
+///   allowed to satisfy our in-flight command.
+/// - broadcast session (target = `BROADCAST_NODE_ID`, used by
+///   `discover` + its per-node follow-up pings): accept every
+///   responder.
+///
+/// Notifications are NOT gated by this — they're forwarded regardless
+/// of source (consumers filter).
+fn reply_source_accepted(src: u8, target: u8) -> bool {
+    target == BROADCAST_NODE_ID || src == target
+}
+
 /// Background RX task. Owns the only read path into the backend,
 /// decodes ISO-TP frames, routes completed `Response`s onto the
 /// appropriate channel.
@@ -711,10 +737,16 @@ async fn rx_task(
     backend: Arc<dyn CanBackend>,
     reply_tx: mpsc::Sender<Response>,
     notification_tx: broadcast::Sender<Response>,
-    _node_id: u8,
+    node_id: u8,
     shutdown: Arc<AtomicBool>,
 ) {
-    let mut reasm = Reassembler::new();
+    // FMEA #271 G7: one reassembler PER SOURCE NODE, not one shared.
+    // The old single reassembler fed every NodeToHost frame, so a
+    // foreign node's FF/CF on a multi-BL bus could splice into the
+    // target's in-flight multi-frame reply (GET_FW_INFO / OB_READ /
+    // CRC). Keyed by source node, each responder reassembles
+    // independently. Bounded — at most one entry per 4-bit node id.
+    let mut reassemblers: HashMap<u8, Reassembler> = HashMap::new();
     let mut tick_start = Instant::now();
     let tick_ms = move || tick_start.elapsed().as_millis() as u64;
     // Re-borrow because closures that capture mutable state can't
@@ -758,8 +790,11 @@ async fn rx_task(
             continue;
         }
 
+        // For NodeToHost, `id.node` is the responder (source).
+        let src = id.node;
         let payload = frame.payload();
 
+        let reasm = reassemblers.entry(src).or_default();
         match reasm.feed(payload, tick_ms()) {
             Ok(ReassembleOutcome::Ongoing) => continue,
             Ok(ReassembleOutcome::Complete(bytes)) => {
@@ -786,12 +821,31 @@ async fn rx_task(
                 match Response::parse(msg_type, inner_bytes) {
                     Ok(Response::Notify { .. }) => {
                         let response = Response::parse(msg_type, inner_bytes).unwrap();
-                        // Lagged subscribers get RecvError::Lagged on
-                        // their next recv; we don't treat overflow as
-                        // an error here.
+                        // Notifications (log / live-data telemetry) are
+                        // forwarded regardless of source — consumers
+                        // filter — but lagged subscribers get
+                        // RecvError::Lagged on their next recv; we
+                        // don't treat overflow as an error here.
                         let _ = notification_tx.send(response);
                     }
                     Ok(other) => {
+                        // FMEA #271 G7: a command reply (ACK / NACK /
+                        // DISCOVER) only counts if it came from the node
+                        // we're addressing. A foreign node's same-opcode
+                        // ACK must NOT satisfy our in-flight command —
+                        // that's how a wrong board's reply could be read
+                        // as ours. EXCEPTION: a broadcast session
+                        // (target = 0xF, used by `discover` + its
+                        // per-node follow-up pings) legitimately collects
+                        // replies from every node, so don't filter then.
+                        if !reply_source_accepted(src, node_id) {
+                            trace!(
+                                src,
+                                target = node_id,
+                                "session rx: dropping command reply from non-target node"
+                            );
+                            continue;
+                        }
                         if reply_tx.send(other).await.is_err() {
                             // No one is listening — command holder
                             // has dropped. Not fatal; keep running
@@ -816,6 +870,19 @@ mod tests {
     use crate::transport::{StubDevice, VirtualBus};
 
     const STUB_NODE: u8 = 0x3;
+
+    // FMEA #271 G7 — reply source filter.
+    #[test]
+    fn reply_source_filter_accepts_only_target_or_broadcast() {
+        // Point-to-point: only the addressed node's replies count.
+        assert!(reply_source_accepted(0x3, 0x3));
+        assert!(!reply_source_accepted(0x5, 0x3));
+        assert!(!reply_source_accepted(0x0, 0x3));
+        // Broadcast session (discover): every responder is accepted.
+        assert!(reply_source_accepted(0x1, BROADCAST_NODE_ID));
+        assert!(reply_source_accepted(0x5, BROADCAST_NODE_ID));
+        assert!(reply_source_accepted(0xE, BROADCAST_NODE_ID));
+    }
 
     fn test_config() -> SessionConfig {
         SessionConfig {

@@ -94,12 +94,14 @@ pub async fn run(args: DiscoverArgs, global: &GlobalFlags) -> Result<()> {
     let backend = open_backend(global.interface, global.channel.as_deref(), global.bitrate)
         .context("opening CAN backend for discover")?;
 
-    // Session config: discover is broadcast + session-less follow-ups;
-    // target_node is only used for the broadcast itself (which goes
-    // to dst=0xF anyway) and the keepalive (which we won't hit since
-    // we never connect). Pick 0x0 as a no-op default.
+    // Session config: discover is broadcast + session-less follow-ups.
+    // target_node = BROADCAST_NODE_ID (0xF) is the honest value — the
+    // broadcast goes to 0xF and the per-node follow-up pings collect
+    // replies from *every* responder. It also tells the rx task this
+    // is a broadcast session so its per-target reply filter (FMEA #271
+    // G7) doesn't drop those multi-node replies.
     let config = SessionConfig {
-        target_node: 0x0,
+        target_node: BROADCAST_NODE_ID,
         keepalive_interval: Duration::from_millis(5_000),
         command_timeout: Duration::from_millis(u64::from(global.timeout_ms)),
         ..SessionConfig::default()
