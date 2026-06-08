@@ -97,6 +97,12 @@ use crate::protocol::opcodes::{CommandOpcode, NackCode};
 use crate::protocol::{CanFrame, Response, BROADCAST_NODE_ID};
 use crate::transport::{CanBackend, TransportError};
 
+/// Linear-backoff base between retries in [`Session::send_command_retrying`]
+/// (FMEA #271 G11). Attempt N waits `N * this` before re-sending —
+/// short enough not to stall a healthy flash, long enough to ride out
+/// a transient adapter TX-buffer hiccup.
+const COMMAND_RETRY_BACKOFF_MS: u64 = 50;
+
 /// Everything this layer can fail with. Wraps the lower-level
 /// `TransportError` / `ParseError` variants and adds session-specific
 /// conditions (NACK, protocol-version mismatch, not-connected, …).
@@ -446,6 +452,61 @@ impl Session {
             }
             _ => Ok(first),
         }
+    }
+
+    /// Like [`Session::send_command`], but retries on **transient**
+    /// failures — `CommandTimeout` and transport errors — up to
+    /// `max_attempts` total, with linear backoff between tries.
+    ///
+    /// For the flash pipeline (FMEA #271 G11): before this, a single
+    /// dropped frame, a transient adapter hiccup, or a slow erase that
+    /// just missed the timeout would `?`-propagate and abort the whole
+    /// flash mid-stream, leaving an erased-but-unwritten sector. Every
+    /// command this is used for is **idempotent** — re-erasing a
+    /// sector, re-reading a CRC, or re-writing the same bytes to
+    /// already-erased flash is a no-op — so retrying is safe even when
+    /// the timeout was actually a dropped *ACK* (the command did run).
+    ///
+    /// A `NACK` is a definitive answer, not a transient failure, so it
+    /// is returned immediately (the caller decides what a NACK means).
+    /// `RxClosed` / `Protocol` are fatal and also returned at once.
+    /// The whole try→retry sequence holds `command_lock` so another
+    /// caller can't interleave between attempts. `max_attempts` is
+    /// clamped to at least 1.
+    pub async fn send_command_retrying(
+        &self,
+        payload: &[u8],
+        max_attempts: u32,
+    ) -> Result<Response, SessionError> {
+        let _guard = self.inner.command_lock.lock().await;
+        let attempts = max_attempts.max(1);
+        for attempt in 1..=attempts {
+            match self.send_raw(payload, MessageType::Cmd).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    let transient = matches!(
+                        e,
+                        SessionError::CommandTimeout { .. } | SessionError::Transport(_)
+                    );
+                    if !transient || attempt == attempts {
+                        return Err(e);
+                    }
+                    warn!(
+                        attempt,
+                        max_attempts = attempts,
+                        error = %e,
+                        "flash command failed transiently — backing off + retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(
+                        u64::from(attempt) * COMMAND_RETRY_BACKOFF_MS,
+                    ))
+                    .await;
+                }
+            }
+        }
+        // Unreachable: the loop either returns Ok, returns the error on
+        // the final attempt, or returns a non-transient error early.
+        unreachable!("send_command_retrying loop must return")
     }
 
     /// Broadcast a command (dst = `BROADCAST_NODE_ID`) and collect
@@ -867,7 +928,7 @@ async fn rx_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{StubDevice, VirtualBus};
+    use crate::transport::{StubDevice, VirtualBackend, VirtualBus};
 
     const STUB_NODE: u8 = 0x3;
 
@@ -908,6 +969,136 @@ mod tests {
         });
         let session = Session::attach(Box::new(host), test_config());
         (session, cancel_tx, handle)
+    }
+
+    // ---- FMEA #271 G11: bounded retry on transient send failures ----
+
+    /// Wraps a `VirtualBackend` and fails the next `fail_remaining`
+    /// `send` calls with a transient transport error, then delegates
+    /// normally. Lets us prove `send_command_retrying` rides out
+    /// dropped frames / adapter hiccups instead of aborting.
+    struct FlakyHost {
+        inner: VirtualBackend,
+        fail_remaining: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl CanBackend for FlakyHost {
+        async fn send(&self, frame: CanFrame) -> crate::transport::Result<()> {
+            // Decrement-if-positive: fail while we still owe failures.
+            let mut cur = self.fail_remaining.load(Ordering::SeqCst);
+            while cur > 0 {
+                match self.fail_remaining.compare_exchange(
+                    cur,
+                    cur - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => {
+                        return Err(TransportError::Other(
+                            "injected transient send failure".into(),
+                        ))
+                    }
+                    Err(actual) => cur = actual,
+                }
+            }
+            self.inner.send(frame).await
+        }
+        async fn recv(&self, timeout: Duration) -> crate::transport::Result<CanFrame> {
+            self.inner.recv(timeout).await
+        }
+        async fn set_bitrate(&self, nominal_bps: u32) -> crate::transport::Result<()> {
+            self.inner.set_bitrate(nominal_bps).await
+        }
+        fn description(&self) -> String {
+            self.inner.description()
+        }
+    }
+
+    async fn spawn_session_and_stub_flaky() -> (
+        Session,
+        Arc<std::sync::atomic::AtomicU32>,
+        oneshot::Sender<()>,
+        JoinHandle<()>,
+    ) {
+        let bus = VirtualBus::new();
+        let host = bus.host_backend();
+        let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+        drop(bus);
+
+        let stub = StubDevice::new(device, STUB_NODE);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _ = stub.run(cancel_rx).await;
+        });
+        let fail_remaining = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let flaky = FlakyHost {
+            inner: host,
+            fail_remaining: Arc::clone(&fail_remaining),
+        };
+        // Long keepalive so a tick can't consume an injected failure
+        // mid-test (keepalive only starts after connect anyway).
+        let config = SessionConfig {
+            keepalive_interval: Duration::from_secs(60),
+            ..test_config()
+        };
+        let session = Session::attach(Box::new(flaky), config);
+        (session, fail_remaining, cancel_tx, handle)
+    }
+
+    #[tokio::test]
+    async fn send_command_retrying_rides_out_transient_send_failures() {
+        let (session, fails, cancel, handle) = spawn_session_and_stub_flaky().await;
+        session.connect().await.unwrap(); // clean connect (fails = 0)
+
+        // Arm: the next 2 sends fail. With 3 attempts, the 3rd send
+        // goes through and the stub NACKs the unknown opcode 0x20.
+        fails.store(2, Ordering::SeqCst);
+        let resp = session.send_command_retrying(&[0x20], 3).await.unwrap();
+        assert!(
+            matches!(
+                resp,
+                Response::Nack {
+                    code: NackCode::Unsupported,
+                    ..
+                }
+            ),
+            "retry should have ridden out 2 drops and got the NACK, got {resp:?}"
+        );
+        assert_eq!(
+            fails.load(Ordering::SeqCst),
+            0,
+            "both injected failures consumed"
+        );
+
+        // Sanity: plain send_command (no retry) fails on a single drop.
+        fails.store(1, Ordering::SeqCst);
+        assert!(
+            session.send_command(&[0x20]).await.is_err(),
+            "non-retrying send must surface the transient failure"
+        );
+
+        session.disconnect().await.unwrap();
+        let _ = cancel.send(());
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn send_command_retrying_gives_up_after_max_attempts() {
+        let (session, fails, cancel, handle) = spawn_session_and_stub_flaky().await;
+        session.connect().await.unwrap();
+
+        // More failures than attempts → exhaust + surface the error.
+        fails.store(5, Ordering::SeqCst);
+        let err = session.send_command_retrying(&[0x20], 3).await;
+        assert!(
+            matches!(err, Err(SessionError::Transport(_))),
+            "should give up with the transport error, got {err:?}"
+        );
+
+        session.disconnect().await.unwrap();
+        let _ = cancel.send(());
+        let _ = handle.await;
     }
 
     #[tokio::test]
