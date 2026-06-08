@@ -392,10 +392,22 @@ async fn apply_wrp_policy(
                 ));
             }
         }
-        // Bootloader resets after OB writes; the session layer
-        // re-establishes the connection on the next command via
-        // the BAD_SESSION retry path. Issue a second OB_READ so the
-        // report reflects the now-applied mask.
+        // FMEA #271 G5: OB_APPLY_WRP resets the bootloader, which
+        // clears `g_session_active`. The flash pipeline uses
+        // `send_command` (not `send_session_gated`), so it does NOT
+        // transparently reconnect on NACK(BAD_SESSION) — the old
+        // comment here claimed it did, but the first erase would
+        // abort. Wait for the BL to come back, then explicitly
+        // re-CONNECT so both the follow-up OB_READ and the whole
+        // flash pipeline run against a live session.
+        tokio::time::sleep(Duration::from_millis(WRP_RESET_SETTLE_MS)).await;
+        session.connect().await.map_err(|e| {
+            exit_err(
+                ExitCodeHint::DeviceNotFound,
+                format!("reconnect after OB_APPLY_WRP reset failed: {e}"),
+            )
+        })?;
+        // Issue a second OB_READ so the report reflects the now-applied mask.
         let after = read_ob_status(session).await?;
         return Ok(after);
     }
@@ -951,6 +963,13 @@ const FLASH_ERASE_FLOOR_MS: u32 = 6_000;
 // Must cover a worst-case ~2-4 s H7 128 KB sector erase. Compile-time
 // so a careless edit downward fails the build, not a flash on the bench.
 const _: () = assert!(FLASH_ERASE_FLOOR_MS >= 4_000);
+
+/// How long to wait for the bootloader to reboot after an OB write
+/// before re-CONNECTing (FMEA #271 G5). `OB_APPLY_WRP` triggers a
+/// device reset; the BL comes back in bootloader mode after its
+/// option-byte reload. Mirrors `config ob apply-wrp`'s default
+/// `--reset-wait-ms`.
+const WRP_RESET_SETTLE_MS: u64 = 2_000;
 
 fn open_session(global: &GlobalFlags, keepalive_ms: u32) -> Result<Session> {
     // FMEA #271 G2: never silently guess which physical board to
