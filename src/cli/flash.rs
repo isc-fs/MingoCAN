@@ -34,7 +34,7 @@ use clap::Args;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{confirm_prompt, exit_err, ExitCodeHint, GlobalFlags};
 use crate::firmware::{self, loader};
@@ -43,7 +43,7 @@ use crate::protocol::commands::{cmd_jump, cmd_ob_apply_wrp, cmd_ob_read};
 use crate::protocol::opcodes::CommandOpcode;
 use crate::protocol::records::ObStatus;
 use crate::protocol::Response;
-use crate::session::{Session, SessionConfig};
+use crate::session::{Session, SessionConfig, SessionError};
 use crate::transport::open_backend;
 
 // ---- Args ----
@@ -250,6 +250,20 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         _ = tokio::signal::ctrl_c() => {
             eprintln!();  // break any partial progress line
             eprintln!("cf: interrupted — disconnecting cleanly…");
+            // FMEA #271 G16: "cleanly" describes the *session*
+            // teardown, not the flash state. If the pipeline had
+            // already started erasing/writing, the app region is now
+            // partially programmed and the bootloader will NOT boot it
+            // — the app-validity marker is only set by the final
+            // FLASH_VERIFY, which an interrupt never reaches. Integrity
+            // is intact (BL still reachable, jump skipped, a re-run
+            // recovers), but spell that out so "cleanly" isn't misread
+            // as "nothing was written".
+            eprintln!(
+                "cf: NOTE — if the flash had started, the app region may be partially \
+                 written; the device will not boot the app until you re-run `cf flash` \
+                 (diff mode re-flashes only what changed)."
+            );
             Err(exit_err(
                 ExitCodeHint::Interrupted,
                 format!("flash interrupted by user on '{}'", args.firmware.display()),
@@ -457,10 +471,28 @@ async fn read_ob_status(session: &Session) -> Result<ObStatus> {
 // ---- JUMP ----
 
 async fn fire_jump(session: &Session) -> Result<()> {
-    let resp = session
-        .send_command(&cmd_jump(firmware::BL_APP_BASE))
-        .await
-        .map_err(|e| exit_err(ExitCodeHint::FlashError, format!("JUMP failed: {e}")))?;
+    let resp = match session.send_command(&cmd_jump(firmware::BL_APP_BASE)).await {
+        Ok(resp) => resp,
+        // FMEA #271 G14: by the time we JUMP, the image is already
+        // CRC-verified and committed (the BL's metadata word is set).
+        // The bootloader ACKs JUMP, then immediately de-inits and
+        // branches into the app — so a lost or slow ACK is the
+        // *expected* outcome, not a failure: the device flashed and
+        // jumped correctly. Treat a JUMP timeout as a soft success.
+        // (A NACK or transport fault is still a hard error below.)
+        Err(SessionError::CommandTimeout { .. }) => {
+            warn!(
+                "JUMP ACK not seen within the command timeout — the device has most \
+                 likely already de-init'd and branched to the freshly-flashed app"
+            );
+            eprintln!(
+                "note: JUMP ACK not seen; device is likely already running the app \
+                 (the flash was committed + verified)."
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(exit_err(ExitCodeHint::FlashError, format!("JUMP failed: {e}"))),
+    };
     match resp {
         Response::Ack { opcode, .. } if opcode == CommandOpcode::Jump.as_byte() => Ok(()),
         Response::Nack {
