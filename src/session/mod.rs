@@ -974,10 +974,12 @@ mod tests {
             })
         };
         // G11: local timeout + transport error.
-        assert!(is_transient_send_outcome(&Err(SessionError::CommandTimeout {
-            timeout: Duration::from_millis(1),
-            adapter_errors_during_wait: 0,
-        })));
+        assert!(is_transient_send_outcome(&Err(
+            SessionError::CommandTimeout {
+                timeout: Duration::from_millis(1),
+                adapter_errors_during_wait: 0,
+            }
+        )));
         assert!(is_transient_send_outcome(&Err(SessionError::Transport(
             TransportError::Disconnected
         ))));

@@ -184,7 +184,9 @@ pub fn open_backend(
                               vcan0)"
                         .into(),
                 })?;
-                Ok(Box::new(socketcan::SocketCanBackend::open(channel, bitrate)?))
+                Ok(Box::new(socketcan::SocketCanBackend::open(
+                    channel, bitrate,
+                )?))
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -212,7 +214,9 @@ pub fn open_backend(
                               exposed (e.g. can0)"
                         .into(),
                 })?;
-                Ok(Box::new(socketcan::SocketCanBackend::open(channel, bitrate)?))
+                Ok(Box::new(socketcan::SocketCanBackend::open(
+                    channel, bitrate,
+                )?))
             }
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             {
