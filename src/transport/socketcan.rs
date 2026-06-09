@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use socketcan::tokio::CanSocket;
 use socketcan::{EmbeddedFrame, Id, StandardId};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::protocol::CanFrame;
 
@@ -61,7 +61,14 @@ impl SocketCanBackend {
     /// Bind to `interface` (e.g. `can0`, `vcan0`). The interface must
     /// already be up — the flasher does not attempt `ip link` changes
     /// and will not request elevated privileges.
-    pub fn open(interface: &str) -> Result<Self> {
+    ///
+    /// `expected_bitrate` is the `--bitrate` the operator asked for.
+    /// SocketCAN can't set the rate from userspace (it's an `ip link`
+    /// property), so we don't try — but we DO read the kernel's
+    /// configured rate and warn loudly on a mismatch (FMEA #271 G13),
+    /// because otherwise a host/kernel divergence shows up only as a
+    /// bare RX timeout with no hint.
+    pub fn open(interface: &str, expected_bitrate: u32) -> Result<Self> {
         if interface.is_empty() {
             return Err(TransportError::InvalidChannel {
                 channel: String::new(),
@@ -82,12 +89,46 @@ impl SocketCanBackend {
             }
         })?;
 
+        warn_on_bitrate_mismatch(interface, expected_bitrate);
+
         let description = format!("SocketCAN (iface {interface})");
         Ok(Self {
             socket,
             description,
             interface: interface.to_string(),
         })
+    }
+}
+
+/// Read the kernel's configured CAN bitrate for `interface` and warn
+/// if it differs from what `--bitrate` requested (FMEA #271 G13).
+///
+/// The rate lives at `/sys/class/net/<iface>/can_bittiming/bitrate`.
+/// Virtual (`vcan`) and non-CAN interfaces have no `can_bittiming`
+/// directory — there the read fails and we stay silent, since the
+/// rate is genuinely advisory for them. We warn rather than hard-fail:
+/// on SocketCAN the kernel rate is the source of truth, so the right
+/// recovery is to fix `ip link`, and a clear message naming both
+/// rates gets the operator there faster than an aborted run.
+fn warn_on_bitrate_mismatch(interface: &str, expected_bitrate: u32) {
+    let path = format!("/sys/class/net/{interface}/can_bittiming/bitrate");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(kernel_bitrate) = raw.trim().parse::<u32>() else {
+        return;
+    };
+    if kernel_bitrate != expected_bitrate {
+        warn!(
+            interface,
+            kernel_bitrate,
+            requested = expected_bitrate,
+            "SocketCAN interface {interface} is configured at {kernel_bitrate} bps but \
+             --bitrate requested {expected_bitrate} bps. SocketCAN ignores --bitrate; set the \
+             rate with `sudo ip link set {interface} type can bitrate {expected_bitrate}`. A \
+             mismatch typically shows up only as a bare RX timeout. Proceeding at the \
+             kernel's {kernel_bitrate} bps."
+        );
     }
 }
 
@@ -344,7 +385,7 @@ mod tests {
         // Can't use .unwrap_err() because SocketCanBackend doesn't
         // implement Debug (the CanSocket from socketcan::tokio doesn't
         // either). Destructure manually.
-        let result = SocketCanBackend::open("");
+        let result = SocketCanBackend::open("", 500_000);
         let err = result.err().expect("empty interface should fail");
         match err {
             TransportError::InvalidChannel { channel, .. } => {
