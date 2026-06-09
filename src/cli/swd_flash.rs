@@ -204,6 +204,10 @@ pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
         let prov = super::provision::ProvisionArgs {
             role,
             no_reset: false,
+            // `swd-flash --provision <role>` is itself the explicit
+            // opt-in, so don't double-prompt (FMEA #271 G17's confirm
+            // is for the standalone `cf provision` mis-target case).
+            yes: true,
         };
         super::provision::run(prov, global).await?;
     }
