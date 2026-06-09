@@ -455,24 +455,27 @@ impl Session {
     }
 
     /// Like [`Session::send_command`], but retries on **transient**
-    /// failures — `CommandTimeout` and transport errors — up to
-    /// `max_attempts` total, with linear backoff between tries.
+    /// outcomes up to `max_attempts` total, with linear backoff.
     ///
-    /// For the flash pipeline (FMEA #271 G11): before this, a single
-    /// dropped frame, a transient adapter hiccup, or a slow erase that
-    /// just missed the timeout would `?`-propagate and abort the whole
-    /// flash mid-stream, leaving an erased-but-unwritten sector. Every
-    /// command this is used for is **idempotent** — re-erasing a
-    /// sector, re-reading a CRC, or re-writing the same bytes to
-    /// already-erased flash is a no-op — so retrying is safe even when
-    /// the timeout was actually a dropped *ACK* (the command did run).
+    /// For the flash pipeline (FMEA #271 G11 + G12): before this, a
+    /// single dropped frame, a transient adapter hiccup, or a slow
+    /// erase that just missed the timeout would `?`-propagate and abort
+    /// the whole flash mid-stream, leaving an erased-but-unwritten
+    /// sector. Every command this is used for is **idempotent** —
+    /// re-erasing a sector, re-reading a CRC, or re-writing the same
+    /// bytes to already-erased flash is a no-op — so retrying is safe
+    /// even when the failure happened *after* the command ran (a
+    /// dropped ACK).
     ///
-    /// A `NACK` is a definitive answer, not a transient failure, so it
-    /// is returned immediately (the caller decides what a NACK means).
-    /// `RxClosed` / `Protocol` are fatal and also returned at once.
-    /// The whole try→retry sequence holds `command_lock` so another
-    /// caller can't interleave between attempts. `max_attempts` is
-    /// clamped to at least 1.
+    /// "Transient" (see [`is_transient_send_outcome`]) covers a local
+    /// `CommandTimeout` / transport error AND a NACK whose code is the
+    /// bootloader's "I didn't receive the whole message" signal
+    /// (`TRANSPORT_TIMEOUT` / `TRANSPORT_ERROR`) — the dropped-frame
+    /// case on the fast adapters we don't 1 ms-pace (G12), far cheaper
+    /// to retry than to pace every frame. A *definitive* NACK
+    /// (CrcMismatch, BadSession, Unsupported, …) is returned at once,
+    /// as are `RxClosed` / `Protocol`. The whole try→retry sequence
+    /// holds `command_lock`. `max_attempts` is clamped to at least 1.
     pub async fn send_command_retrying(
         &self,
         payload: &[u8],
@@ -481,31 +484,23 @@ impl Session {
         let _guard = self.inner.command_lock.lock().await;
         let attempts = max_attempts.max(1);
         for attempt in 1..=attempts {
-            match self.send_raw(payload, MessageType::Cmd).await {
-                Ok(resp) => return Ok(resp),
-                Err(e) => {
-                    let transient = matches!(
-                        e,
-                        SessionError::CommandTimeout { .. } | SessionError::Transport(_)
-                    );
-                    if !transient || attempt == attempts {
-                        return Err(e);
-                    }
-                    warn!(
-                        attempt,
-                        max_attempts = attempts,
-                        error = %e,
-                        "flash command failed transiently — backing off + retrying"
-                    );
-                    tokio::time::sleep(Duration::from_millis(
-                        u64::from(attempt) * COMMAND_RETRY_BACKOFF_MS,
-                    ))
-                    .await;
-                }
+            let outcome = self.send_raw(payload, MessageType::Cmd).await;
+            if !is_transient_send_outcome(&outcome) || attempt == attempts {
+                return outcome;
             }
+            warn!(
+                attempt,
+                max_attempts = attempts,
+                "flash command failed transiently (timeout / dropped-frame NACK) — \
+                 backing off + retrying"
+            );
+            tokio::time::sleep(Duration::from_millis(
+                u64::from(attempt) * COMMAND_RETRY_BACKOFF_MS,
+            ))
+            .await;
         }
-        // Unreachable: the loop either returns Ok, returns the error on
-        // the final attempt, or returns a non-transient error early.
+        // Unreachable: the loop either returns the outcome on the final
+        // attempt or returns a non-transient outcome early.
         unreachable!("send_command_retrying loop must return")
     }
 
@@ -791,6 +786,30 @@ fn reply_source_accepted(src: u8, target: u8) -> bool {
     target == BROADCAST_NODE_ID || src == target
 }
 
+/// Should a [`Session::send_command_retrying`] outcome be retried?
+///
+/// Transient = the command provably didn't take effect and a resend
+/// is safe for an idempotent command:
+/// - a local `CommandTimeout` or transport error (FMEA #271 G11), or
+/// - a NACK whose code is the bootloader's "I didn't receive the
+///   whole message" signal — `TRANSPORT_TIMEOUT` / `TRANSPORT_ERROR`
+///   — i.e. a dropped ISO-TP frame on a fast adapter we don't
+///   1 ms-pace (FMEA #271 G12).
+///
+/// A *definitive* NACK (CrcMismatch, BadSession, Unsupported, …) and
+/// the fatal `RxClosed` / `Protocol` errors are NOT transient — the
+/// caller gets them immediately.
+fn is_transient_send_outcome(outcome: &Result<Response, SessionError>) -> bool {
+    matches!(
+        outcome,
+        Err(SessionError::CommandTimeout { .. } | SessionError::Transport(_))
+            | Ok(Response::Nack {
+                code: NackCode::TransportTimeout | NackCode::TransportError,
+                ..
+            })
+    )
+}
+
 /// Background RX task. Owns the only read path into the backend,
 /// decodes ISO-TP frames, routes completed `Response`s onto the
 /// appropriate channel.
@@ -943,6 +962,39 @@ mod tests {
         assert!(reply_source_accepted(0x1, BROADCAST_NODE_ID));
         assert!(reply_source_accepted(0x5, BROADCAST_NODE_ID));
         assert!(reply_source_accepted(0xE, BROADCAST_NODE_ID));
+    }
+
+    // FMEA #271 G11 + G12 — retry transient outcomes only.
+    #[test]
+    fn transient_send_outcome_classification() {
+        let nack = |code| {
+            Ok(Response::Nack {
+                rejected_opcode: 0x10,
+                code,
+            })
+        };
+        // G11: local timeout + transport error.
+        assert!(is_transient_send_outcome(&Err(
+            SessionError::CommandTimeout {
+                timeout: Duration::from_millis(1),
+                adapter_errors_during_wait: 0,
+            }
+        )));
+        assert!(is_transient_send_outcome(&Err(SessionError::Transport(
+            TransportError::Disconnected
+        ))));
+        // G12: the bootloader's dropped-frame NACK codes.
+        assert!(is_transient_send_outcome(&nack(NackCode::TransportTimeout)));
+        assert!(is_transient_send_outcome(&nack(NackCode::TransportError)));
+        // Definitive answers + fatal errors must NOT be retried.
+        assert!(!is_transient_send_outcome(&nack(NackCode::CrcMismatch)));
+        assert!(!is_transient_send_outcome(&nack(NackCode::BadSession)));
+        assert!(!is_transient_send_outcome(&nack(NackCode::Unsupported)));
+        assert!(!is_transient_send_outcome(&Err(SessionError::RxClosed)));
+        assert!(!is_transient_send_outcome(&Ok(Response::Ack {
+            opcode: 0x10,
+            payload: vec![],
+        })));
     }
 
     fn test_config() -> SessionConfig {
