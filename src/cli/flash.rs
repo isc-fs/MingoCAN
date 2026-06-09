@@ -491,7 +491,12 @@ async fn fire_jump(session: &Session) -> Result<()> {
             );
             return Ok(());
         }
-        Err(e) => return Err(exit_err(ExitCodeHint::FlashError, format!("JUMP failed: {e}"))),
+        Err(e) => {
+            return Err(exit_err(
+                ExitCodeHint::FlashError,
+                format!("JUMP failed: {e}"),
+            ))
+        }
     };
     match resp {
         Response::Ack { opcode, .. } if opcode == CommandOpcode::Jump.as_byte() => Ok(()),
