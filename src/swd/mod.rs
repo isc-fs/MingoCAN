@@ -150,9 +150,12 @@ pub enum SwdError {
     #[error(
         "host-side flash verify FAILED: chip readback CRC32 0x{got:08X} != source CRC32 0x{want:08X} \
          (verified {bytes} bytes from 0x{base:08X}). \
-         The flash write looked successful but the bytes on chip don't match the source — this is \
-         the silent-corruption mode tracked in #247. Re-flash with STM32CubeProgrammer to recover, \
-         and treat this chip as not-burned until you do."
+         The flash write looked successful but the bytes on chip don't match the source — most \
+         likely the silent-corruption mode tracked in #247: re-flash with STM32CubeProgrammer to \
+         recover, and treat this chip as not-burned until you do. \
+         (Less commonly, a CRC mismatch on a known-good probe + artifact can mean a host vs probe-rs \
+         image-parse divergence rather than bad flash — re-fetch the artifact and retry once before \
+         condemning the chip.)"
     )]
     VerifyMismatch {
         want: u32,
@@ -504,6 +507,22 @@ where
             let mut core = session
                 .core(0)
                 .map_err(|e| SwdError::ProbeRs(format!("get core for readback: {e}")))?;
+            // Reset-and-halt BEFORE reading back (audit hardening on
+            // top of the #247 readback). At this point the core is
+            // halted in probe-rs's flash-algorithm state with caches +
+            // the H7 flash ART prefetch potentially holding the bytes
+            // we just wrote. A pre-reset read could be served those
+            // cached bytes while the flash array itself is bad — so a
+            // "passing" CRC wouldn't prove what the bootloader will
+            // actually boot from. reset_and_halt returns caches + ART
+            // to a clean post-reset state; the core stays HALTED (it
+            // does not run the freshly-flashed app), so the readback
+            // reflects true flash contents. Any real reset the operator
+            // asked for (`reset_after`) still happens below.
+            core.reset_and_halt(Duration::from_millis(500))
+                .map_err(|e| {
+                    SwdError::ProbeRs(format!("reset-and-halt before flash readback: {e}"))
+                })?;
             core.read(image_base, &mut readback)
                 .map_err(|e| SwdError::ProbeRs(format!("read flash readback: {e}")))?;
         }
