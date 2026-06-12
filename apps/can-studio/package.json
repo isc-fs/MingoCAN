@@ -1,7 +1,7 @@
 {
   "name": "isc-can-studio",
   "private": true,
-  "version": "2.4.5",
+  "version": "2.5.0",
   "description": "ISC MingoCAN — Tauri desktop app for flashing and debugging CAN messages.",
   "type": "module",
   "scripts": {
@@ -25,7 +25,9 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-store": "^2",
+    "@tauri-apps/plugin-updater": "^2",
     "chart.js": "^4.4.7"
   }
 }

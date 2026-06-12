@@ -1,6 +1,6 @@
 [package]
 name        = "can-studio"
-version     = "2.4.5"
+version     = "2.5.0"
 edition     = "2021"
 rust-version = "1.95"
 description = "ISC CAN Studio — desktop application for flashing, monitoring, and debugging CAN messages."
@@ -36,6 +36,14 @@ tauri-plugin-store = { version = "2" }
 # the Flash view's Browse… buttons to resolve firmware artifact +
 # build-cwd paths.
 tauri-plugin-dialog = { version = "2" }
+
+# In-app auto-update: checks the GitHub release `latest.json` against
+# the running version and, when newer, downloads + installs a signed
+# bundle. `process` is its companion — `relaunch()` restarts the app
+# into the freshly-installed version. Both expose JS APIs the
+# frontend drives directly; no custom commands needed.
+tauri-plugin-updater = { version = "2" }
+tauri-plugin-process = { version = "2" }
 
 # Reuse the can-flasher protocol + transport + flash code by path.
 # The Tauri commands wrap these crates directly (no shell-out tax)

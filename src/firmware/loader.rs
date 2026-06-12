@@ -96,16 +96,45 @@ pub enum Format {
 /// return an [`Image`]. `address_hint` is required for raw binaries
 /// and ignored for ELF / HEX (which carry their own load addresses).
 pub fn load(path: &Path, address_hint: Option<u32>) -> Result<Image, LoaderError> {
+    load_inner(path, address_hint, true)
+}
+
+/// Like [`load`], but **skips** the bootloader memory-map validation
+/// (the sector-0 + app-region guards in [`validate_segments`]).
+///
+/// The SWD path uses this (FMEA #271 G9): `swd-flash`'s whole job is
+/// to program the bootloader onto a bare chip — an image based at
+/// `0x08000000` (sector 0) is exactly what it must accept. probe-rs
+/// flashes the bytes directly; the host only loads the image here to
+/// compute a CRC fingerprint, so the CAN-flash-specific guards (which
+/// exist to stop an *app* image from clobbering the bootloader) don't
+/// apply. The CAN flash path keeps full validation via [`load`].
+pub fn load_unchecked(path: &Path, address_hint: Option<u32>) -> Result<Image, LoaderError> {
+    load_inner(path, address_hint, false)
+}
+
+fn load_inner(
+    path: &Path,
+    address_hint: Option<u32>,
+    validate: bool,
+) -> Result<Image, LoaderError> {
     let bytes = std::fs::read(path)?;
     let format = detect_format(path, &bytes)?;
-    match format {
-        Format::Elf => load_elf(&bytes),
-        Format::IntelHex => load_ihex(&bytes),
+    let segments = match format {
+        Format::Elf => elf_segments(&bytes)?,
+        Format::IntelHex => ihex_segments(&bytes)?,
         Format::Binary => {
+            // The `--base` hint is mandatory for raw binaries on
+            // *both* paths (FMEA #271 G10): a `.bin` carries no
+            // address, so without it we'd guess where to flash.
             let addr = address_hint.ok_or(LoaderError::BinaryNeedsAddress)?;
-            load_bin(&bytes, addr)
+            vec![(addr, bytes.to_vec())]
         }
+    };
+    if validate {
+        validate_segments(&segments)?;
     }
+    compose_image(segments)
 }
 
 /// Inspect the file's magic bytes + extension to pick a format.
@@ -147,6 +176,15 @@ pub fn detect_format(path: &Path, bytes: &[u8]) -> Result<Format, LoaderError> {
 /// normalises to a contiguous buffer with `0xFF`-padding between
 /// segments.
 pub fn load_elf(bytes: &[u8]) -> Result<Image, LoaderError> {
+    let segments = elf_segments(bytes)?;
+    validate_segments(&segments)?;
+    compose_image(segments)
+}
+
+/// Parse ELF bytes into raw `(addr, data)` segments — no validation,
+/// no compose. Shared by [`load_elf`] (which validates) and the
+/// validation-skipping [`load_unchecked`].
+fn elf_segments(bytes: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, LoaderError> {
     let file = object::File::parse(bytes).map_err(|e| LoaderError::Elf(format!("{e}")))?;
 
     let mut segments: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -163,9 +201,7 @@ pub fn load_elf(bytes: &[u8]) -> Result<Image, LoaderError> {
         }
         segments.push((addr as u32, data.to_vec()));
     }
-
-    validate_segments(&segments)?;
-    compose_image(segments)
+    Ok(segments)
 }
 
 // ---- Intel HEX ----
@@ -175,6 +211,15 @@ pub fn load_elf(bytes: &[u8]) -> Result<Image, LoaderError> {
 /// and segment-mode records are ignored (cosmetic, not needed for a
 /// Cortex-M firmware).
 pub fn load_ihex(bytes: &[u8]) -> Result<Image, LoaderError> {
+    let segments = ihex_segments(bytes)?;
+    validate_segments(&segments)?;
+    compose_image(segments)
+}
+
+/// Parse Intel HEX bytes into raw `(addr, data)` segments — no
+/// validation, no compose. Shared by [`load_ihex`] (which validates)
+/// and the validation-skipping [`load_unchecked`].
+fn ihex_segments(bytes: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, LoaderError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|e| LoaderError::IntelHex(format!("input is not valid UTF-8: {e}")))?;
 
@@ -199,9 +244,7 @@ pub fn load_ihex(bytes: &[u8]) -> Result<Image, LoaderError> {
             ihex::Record::EndOfFile => break,
         }
     }
-
-    validate_segments(&segments)?;
-    compose_image(segments)
+    Ok(segments)
 }
 
 // ---- Raw binary ----
@@ -275,6 +318,35 @@ pub fn validate_segments(segments: &[(u32, Vec<u8>)]) -> Result<(), ImageError> 
                 addr: *addr,
                 end,
                 app_end_plus_one: BL_APP_END + 1,
+            });
+        }
+    }
+
+    // Pairwise overlap (FMEA #271 G6): `compose_image` resolves
+    // overlapping segments last-writer-wins with NO diagnostic, so a
+    // wrong-but-self-consistent image would pass host CRC, BL CRC,
+    // and post-flash verify — all run over the same composed buffer —
+    // then get committed + jumped as "verified". The HEX path is the
+    // live exposure (ihex emits Data records verbatim, no merging).
+    // Sort the non-empty [addr, end) ranges by start, reject any that
+    // begins before the previous one ends.
+    let mut ranges: Vec<(u32, u32, usize)> = segments
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, data))| !data.is_empty())
+        .map(|(idx, (addr, data))| (*addr, addr.saturating_add(data.len() as u32), idx))
+        .collect();
+    ranges.sort_by_key(|(start, _, _)| *start);
+    for pair in ranges.windows(2) {
+        let (a_addr, a_end, a_idx) = pair[0];
+        let (b_addr, _b_end, b_idx) = pair[1];
+        if b_addr < a_end {
+            return Err(ImageError::OverlappingSegments {
+                first_index: a_idx,
+                first_addr: a_addr,
+                first_end: a_end,
+                second_index: b_idx,
+                second_addr: b_addr,
             });
         }
     }
@@ -464,6 +536,32 @@ mod tests {
         assert!(validate_segments(&segs).is_ok());
     }
 
+    // FMEA #271 G6 — overlapping segments must be rejected, not
+    // silently last-writer-wins composed.
+    #[test]
+    fn validate_segments_rejects_overlapping_segments() {
+        // Second segment starts 32 bytes into the first's 64-byte range.
+        let segs = vec![
+            (0x0802_0000u32, vec![0u8; 64]),
+            (0x0802_0020u32, vec![1u8; 64]),
+        ];
+        let err = validate_segments(&segs).expect_err("overlap must be rejected");
+        assert!(
+            matches!(err, ImageError::OverlappingSegments { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_segments_accepts_touching_but_not_overlapping() {
+        // [0..64) then [64..128) — adjacent, no overlap.
+        let segs = vec![
+            (0x0802_0000u32, vec![0u8; 64]),
+            (0x0802_0040u32, vec![1u8; 64]),
+        ];
+        assert!(validate_segments(&segs).is_ok());
+    }
+
     #[test]
     fn validate_segments_skips_zero_length_segments() {
         // Some linkers emit a zero-length PT_LOAD for alignment;
@@ -638,6 +736,48 @@ mod tests {
             err,
             LoaderError::Validation(ImageError::TouchesBootloaderSector { .. })
         ));
+    }
+
+    // ---- SWD path: validation-skipping load (FMEA #271 G9 + G10) ----
+
+    #[test]
+    fn load_unchecked_accepts_sector_0_image_and_honours_base() {
+        // A bootloader image based at 0x08000000 (sector 0): `load`
+        // (CAN-flash path) rejects it; `load_unchecked` (SWD path)
+        // must accept it — that's the entire point of swd-flash.
+        let path = std::env::temp_dir().join(format!("cf-swd-g9-{}.bin", std::process::id()));
+        std::fs::write(&path, vec![0xAAu8; 256]).unwrap();
+
+        // Validating load rejects sector-0 (the bug: this aborted
+        // every bootloader burn before any probe I/O).
+        let validated = load(&path, Some(0x0800_0000));
+        assert!(
+            matches!(validated, Err(LoaderError::Validation(_))),
+            "validating load must reject a sector-0 image, got {validated:?}"
+        );
+
+        // SWD load accepts it AND honours the --base hint (G10).
+        let img = load_unchecked(&path, Some(0x0800_0000))
+            .expect("load_unchecked must accept a sector-0 image");
+        assert_eq!(img.base_addr, 0x0800_0000);
+        assert_eq!(img.data.len(), 256);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_unchecked_bin_still_requires_base() {
+        // G10: a raw .bin still needs a base on the SWD path — we
+        // skip the memory-map *validation*, not the "where does it
+        // go?" requirement.
+        let path = std::env::temp_dir().join(format!("cf-swd-g10-{}.bin", std::process::id()));
+        std::fs::write(&path, vec![0x00u8; 64]).unwrap();
+        let err = load_unchecked(&path, None);
+        assert!(
+            matches!(err, Err(LoaderError::BinaryNeedsAddress)),
+            "a .bin with no base must still error, got {err:?}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     // ---- extract_fw_info via a crafted image ----

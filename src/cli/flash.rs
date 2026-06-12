@@ -34,16 +34,16 @@ use clap::Args;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
-use super::{exit_err, ExitCodeHint, GlobalFlags};
+use super::{confirm_prompt, exit_err, ExitCodeHint, GlobalFlags};
 use crate::firmware::{self, loader};
 use crate::flash::{FlashConfig, FlashEvent, FlashManager, FlashReport, SectorRole};
 use crate::protocol::commands::{cmd_jump, cmd_ob_apply_wrp, cmd_ob_read};
 use crate::protocol::opcodes::CommandOpcode;
 use crate::protocol::records::ObStatus;
 use crate::protocol::Response;
-use crate::session::{Session, SessionConfig};
+use crate::session::{Session, SessionConfig, SessionError};
 use crate::transport::open_backend;
 
 // ---- Args ----
@@ -109,6 +109,12 @@ pub struct FlashArgs {
     /// on the flash itself — pure instrumentation.
     #[arg(long = "profile", default_value_t = false)]
     pub profile: bool,
+
+    /// Skip the pre-flight confirmation prompt. Required for
+    /// non-interactive / scripted / CI flashing (a piped stdin
+    /// otherwise auto-declines the prompt and aborts).
+    #[arg(long = "yes", default_value_t = false)]
+    pub yes: bool,
 }
 
 // ---- Entry point ----
@@ -149,6 +155,26 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         ));
     }
 
+    // FMEA #271 G8: the bootloader stamps each version component into
+    // a single metadata byte; `pack_version` would silently clamp a
+    // value > 255, so the version we *display* (raw) and the version
+    // we *stamp* (clamped) would disagree — e.g. "1.300.0" shown,
+    // "1.255.0" stamped — and version-gated field tooling would
+    // mis-gate. Reject out-of-range components up front instead.
+    if let Some(fw) = image.fw_info.as_ref() {
+        let (major, minor, patch) = fw.version();
+        if major > 255 || minor > 255 || patch > 255 {
+            return Err(exit_err(
+                ExitCodeHint::InputFileError,
+                format!(
+                    "firmware version {major}.{minor}.{patch} has a component > 255; the \
+                     bootloader metadata stores each as one byte — fix the embedded version \
+                     so every component fits 0..=255",
+                ),
+            ));
+        }
+    }
+
     let wall_start = SystemTime::now();
 
     // ---- 2. Open session + CONNECT ----
@@ -158,6 +184,47 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         .connect()
         .await
         .map_err(|e| exit_err(ExitCodeHint::DeviceNotFound, format!("CONNECT failed: {e}")))?;
+
+    // ---- 2b. Pre-flight confirmation (FMEA #271 G3) ----
+    //
+    // The most destructive op in the tool had no gate: it went
+    // load → connect → erase/write/jump with nothing echoed about
+    // *what* it was about to overwrite or *which* board. Echo the
+    // target + image + connected BL version and require an explicit
+    // y/N (mirrors `config`'s OB-write prompt). Skipped for
+    // `--dry-run` (non-destructive) and `--yes` (scripted/CI);
+    // `confirm_prompt` auto-declines on a non-TTY stdin, so a piped
+    // flash without `--yes` fails closed rather than hanging.
+    if !args.dry_run && !args.yes {
+        let product = image
+            .fw_info
+            .as_ref()
+            .map(|fw| fw.product_name().to_string())
+            .unwrap_or_else(|| "(no fw-info)".to_string());
+        let (vmaj, vmin, vpat) = image
+            .fw_info
+            .as_ref()
+            .map(|fw| fw.version())
+            .unwrap_or((0, 0, 0));
+        eprintln!(
+            "About to flash node 0x{:X} on {:?} [{}]:",
+            global.node_id.unwrap_or(0),
+            global.interface,
+            global.channel.as_deref().unwrap_or("default channel"),
+        );
+        eprintln!(
+            "  image      : {product} v{vmaj}.{vmin}.{vpat}  ({} bytes @ 0x{:08X})",
+            image.data.len(),
+            image.base_addr,
+        );
+        eprintln!("  bootloader : v{proto_major}.{proto_minor}");
+        if !confirm_prompt("This erases + overwrites the app region. Continue?") {
+            return Err(exit_err(
+                ExitCodeHint::Interrupted,
+                "flash cancelled at the pre-flight prompt (pass --yes to skip)",
+            ));
+        }
+    }
 
     // ---- 3-5. Main pipeline under Ctrl-C watch ----
     //
@@ -183,6 +250,20 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         _ = tokio::signal::ctrl_c() => {
             eprintln!();  // break any partial progress line
             eprintln!("cf: interrupted — disconnecting cleanly…");
+            // FMEA #271 G16: "cleanly" describes the *session*
+            // teardown, not the flash state. If the pipeline had
+            // already started erasing/writing, the app region is now
+            // partially programmed and the bootloader will NOT boot it
+            // — the app-validity marker is only set by the final
+            // FLASH_VERIFY, which an interrupt never reaches. Integrity
+            // is intact (BL still reachable, jump skipped, a re-run
+            // recovers), but spell that out so "cleanly" isn't misread
+            // as "nothing was written".
+            eprintln!(
+                "cf: NOTE — if the flash had started, the app region may be partially \
+                 written; the device will not boot the app until you re-run `cf flash` \
+                 (diff mode re-flashes only what changed)."
+            );
             Err(exit_err(
                 ExitCodeHint::Interrupted,
                 format!("flash interrupted by user on '{}'", args.firmware.display()),
@@ -325,10 +406,22 @@ async fn apply_wrp_policy(
                 ));
             }
         }
-        // Bootloader resets after OB writes; the session layer
-        // re-establishes the connection on the next command via
-        // the BAD_SESSION retry path. Issue a second OB_READ so the
-        // report reflects the now-applied mask.
+        // FMEA #271 G5: OB_APPLY_WRP resets the bootloader, which
+        // clears `g_session_active`. The flash pipeline uses
+        // `send_command` (not `send_session_gated`), so it does NOT
+        // transparently reconnect on NACK(BAD_SESSION) — the old
+        // comment here claimed it did, but the first erase would
+        // abort. Wait for the BL to come back, then explicitly
+        // re-CONNECT so both the follow-up OB_READ and the whole
+        // flash pipeline run against a live session.
+        tokio::time::sleep(Duration::from_millis(WRP_RESET_SETTLE_MS)).await;
+        session.connect().await.map_err(|e| {
+            exit_err(
+                ExitCodeHint::DeviceNotFound,
+                format!("reconnect after OB_APPLY_WRP reset failed: {e}"),
+            )
+        })?;
+        // Issue a second OB_READ so the report reflects the now-applied mask.
         let after = read_ob_status(session).await?;
         return Ok(after);
     }
@@ -378,10 +471,33 @@ async fn read_ob_status(session: &Session) -> Result<ObStatus> {
 // ---- JUMP ----
 
 async fn fire_jump(session: &Session) -> Result<()> {
-    let resp = session
-        .send_command(&cmd_jump(firmware::BL_APP_BASE))
-        .await
-        .map_err(|e| exit_err(ExitCodeHint::FlashError, format!("JUMP failed: {e}")))?;
+    let resp = match session.send_command(&cmd_jump(firmware::BL_APP_BASE)).await {
+        Ok(resp) => resp,
+        // FMEA #271 G14: by the time we JUMP, the image is already
+        // CRC-verified and committed (the BL's metadata word is set).
+        // The bootloader ACKs JUMP, then immediately de-inits and
+        // branches into the app — so a lost or slow ACK is the
+        // *expected* outcome, not a failure: the device flashed and
+        // jumped correctly. Treat a JUMP timeout as a soft success.
+        // (A NACK or transport fault is still a hard error below.)
+        Err(SessionError::CommandTimeout { .. }) => {
+            warn!(
+                "JUMP ACK not seen within the command timeout — the device has most \
+                 likely already de-init'd and branched to the freshly-flashed app"
+            );
+            eprintln!(
+                "note: JUMP ACK not seen; device is likely already running the app \
+                 (the flash was committed + verified)."
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(exit_err(
+                ExitCodeHint::FlashError,
+                format!("JUMP failed: {e}"),
+            ))
+        }
+    };
     match resp {
         Response::Ack { opcode, .. } if opcode == CommandOpcode::Jump.as_byte() => Ok(()),
         Response::Nack {
@@ -873,7 +989,40 @@ fn build_flash_config(args: &FlashArgs) -> FlashConfig {
     }
 }
 
+/// Per-command timeout floor for a flash session (FMEA #271 G4 /
+/// issue #266). A 128 KB STM32H7 sector erase blocks ~2-4 s before
+/// the bootloader ACKs (see `docs/PERFORMANCE.md`), but `--timeout`
+/// defaults to 500 ms — so every default-config flash aborted at the
+/// first `FLASH_ERASE` with a spurious "device not found". Floor the
+/// flash session's per-command timeout to cover one sector's erase;
+/// a larger operator-supplied `--timeout` still wins via `.max`.
+const FLASH_ERASE_FLOOR_MS: u32 = 6_000;
+// Must cover a worst-case ~2-4 s H7 128 KB sector erase. Compile-time
+// so a careless edit downward fails the build, not a flash on the bench.
+const _: () = assert!(FLASH_ERASE_FLOOR_MS >= 4_000);
+
+/// How long to wait for the bootloader to reboot after an OB write
+/// before re-CONNECTing (FMEA #271 G5). `OB_APPLY_WRP` triggers a
+/// device reset; the BL comes back in bootloader mode after its
+/// option-byte reload. Mirrors `config ob apply-wrp`'s default
+/// `--reset-wait-ms`.
+const WRP_RESET_SETTLE_MS: u64 = 2_000;
+
 fn open_session(global: &GlobalFlags, keepalive_ms: u32) -> Result<Session> {
+    // FMEA #271 G2: never silently guess which physical board to
+    // overwrite. A missing `--node-id` used to resolve to `0x3` (the
+    // uDV role) — a real board — so on a shared bus a default flash
+    // hit the wrong ECU. Require an explicit target. Validated before
+    // opening the adapter so the error is hardware-independent.
+    let target_node = global.node_id.ok_or_else(|| {
+        exit_err(
+            ExitCodeHint::DeviceNotFound,
+            "flash requires an explicit --node-id (which board to flash): \
+             0x1 = ECU, 0x2 = AMS, 0x3 = uDV. Refusing to guess a target \
+             on a shared bus.",
+        )
+    })?;
+
     let backend = open_backend(global.interface, global.channel.as_deref(), global.bitrate)
         .map_err(|e| {
             exit_err(
@@ -881,11 +1030,11 @@ fn open_session(global: &GlobalFlags, keepalive_ms: u32) -> Result<Session> {
                 format!("opening CAN backend: {e}"),
             )
         })?;
-    let target_node = global.node_id.unwrap_or(0x3);
+    let command_timeout_ms = global.timeout_ms.max(FLASH_ERASE_FLOOR_MS);
     let config = SessionConfig {
         target_node,
         keepalive_interval: Duration::from_millis(u64::from(keepalive_ms)),
-        command_timeout: Duration::from_millis(u64::from(global.timeout_ms)),
+        command_timeout: Duration::from_millis(u64::from(command_timeout_ms)),
         ..SessionConfig::default()
     };
     Ok(Session::attach(backend, config))
@@ -958,6 +1107,33 @@ fn parse_hex_u32(raw: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
 
+    // FMEA #271 G2 — `flash` must refuse to run without an explicit
+    // --node-id rather than silently targeting 0x3 (uDV). The check
+    // is hardware-independent (runs before the adapter opens), so this
+    // needs no backend.
+    #[test]
+    fn flash_requires_explicit_node_id() {
+        let global = GlobalFlags {
+            interface: crate::cli::InterfaceType::Virtual,
+            channel: None,
+            bitrate: 500_000,
+            node_id: None,
+            timeout_ms: 500,
+            json: false,
+            log_path: None,
+            verbose: false,
+            operator: None,
+        };
+        let err = match open_session(&global, 5_000) {
+            Ok(_) => panic!("missing --node-id must error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("--node-id"),
+            "error should name the missing flag, got: {err}"
+        );
+    }
+
     #[test]
     fn build_flash_config_honours_negative_flags() {
         let args = FlashArgs {
@@ -974,6 +1150,7 @@ mod tests {
             no_jump: false,
             keepalive_ms: 5000,
             profile: false,
+            yes: true,
         };
         let cfg = build_flash_config(&args);
         assert!(!cfg.diff, "--no-diff should win");
@@ -997,6 +1174,7 @@ mod tests {
             no_jump: false,
             keepalive_ms: 5000,
             profile: false,
+            yes: true,
         };
         let cfg = build_flash_config(&args);
         assert!(cfg.dry_run);

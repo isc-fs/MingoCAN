@@ -55,6 +55,12 @@ use crate::session::{Session, SessionError};
 /// bootloader's `FLASH_NB_32BITWORD_IN_FLASHWORD * 4` on hardware.
 pub const FLASHWORD_SIZE: u32 = 32;
 
+/// Total attempts per flash command before giving up (FMEA #271
+/// G11). Each flash command is idempotent, so a transient timeout /
+/// dropped frame / adapter hiccup is retried instead of aborting the
+/// whole flash mid-stream. 3 = the original try + 2 retries.
+const FLASH_CMD_ATTEMPTS: u32 = 3;
+
 /// Default bytes per `CMD_FLASH_WRITE` payload. Matches
 /// REQUIREMENTS.md § Write chunk size — 256 B, i.e. one ISO-TP
 /// FF + ~37 CFs at 8-byte frames on classic CAN.
@@ -439,7 +445,10 @@ impl<'a> FlashManager<'a> {
         let addr = sector_base_addr(sector);
         let resp = self
             .session
-            .send_command(&cmd_flash_read_crc(addr, BL_SECTOR_SIZE))
+            .send_command_retrying(
+                &cmd_flash_read_crc(addr, BL_SECTOR_SIZE),
+                FLASH_CMD_ATTEMPTS,
+            )
             .await
             .map_err(map_session_err)?;
         match resp {
@@ -478,7 +487,7 @@ impl<'a> FlashManager<'a> {
         let addr = sector_base_addr(sector);
         let resp = self
             .session
-            .send_command(&cmd_flash_erase(addr, BL_SECTOR_SIZE))
+            .send_command_retrying(&cmd_flash_erase(addr, BL_SECTOR_SIZE), FLASH_CMD_ATTEMPTS)
             .await
             .map_err(map_session_err)?;
         match resp {
@@ -520,7 +529,7 @@ impl<'a> FlashManager<'a> {
             let padded = pad_to_flashword(chunk);
             let resp = self
                 .session
-                .send_command(&cmd_flash_write(addr, &padded))
+                .send_command_retrying(&cmd_flash_write(addr, &padded), FLASH_CMD_ATTEMPTS)
                 .await
                 .map_err(map_session_err)?;
             match resp {
@@ -573,7 +582,7 @@ impl<'a> FlashManager<'a> {
         let version = self.image.packed_version();
         let resp = self
             .session
-            .send_command(&cmd_flash_verify(crc, size, version))
+            .send_command_retrying(&cmd_flash_verify(crc, size, version), FLASH_CMD_ATTEMPTS)
             .await
             .map_err(map_session_err)?;
         match resp {

@@ -572,24 +572,25 @@
     </header>
 
     {#if !adapterReady}
-        <div class="warning">
+        <div class="banner banner-warning">
             <strong>No adapter selected.</strong> Pick one in the
             <em>Adapters</em> view first — the flash command needs an
             <code>--interface</code>/<code>--channel</code> pair.
         </div>
     {/if}
 
-    <div class="form">
-        <div class="row">
+    <div class="card form">
+        <div class="field">
             <label for="artifact">Firmware artifact (file)</label>
             <div class="input-with-button">
                 <input
                     id="artifact"
+                    class="input mono"
                     type="text"
                     placeholder="/abs/path/to/firmware.elf"
                     bind:value={settings.flash.artifactPath}
                 />
-                <button type="button" class="browse" onclick={browseForArtifact}>
+                <button type="button" class="btn btn-sm" onclick={browseForArtifact}>
                     Browse…
                 </button>
             </div>
@@ -603,18 +604,19 @@
             </p>
         </div>
 
-        <div class="row">
+        <div class="field">
             <label for="buildcmd">Build command</label>
             <div class="input-with-button templates-host">
                 <input
                     id="buildcmd"
+                    class="input mono"
                     type="text"
                     placeholder="cmake --build build"
                     bind:value={settings.flash.buildCommand}
                 />
                 <button
                     type="button"
-                    class="browse templates-trigger"
+                    class="btn btn-sm templates-trigger"
                     onclick={() => (templatesOpen = !templatesOpen)}
                     aria-expanded={templatesOpen}
                     title="Pick a build command template — auto-detects CMake presets in your build cwd"
@@ -677,16 +679,17 @@
             </p>
         </div>
 
-        <div class="row">
+        <div class="field">
             <label for="buildcwd">Build working directory (folder)</label>
             <div class="input-with-button">
                 <input
                     id="buildcwd"
+                    class="input mono"
                     type="text"
                     placeholder="(defaults to artifact's parent)"
                     bind:value={settings.flash.buildCwd}
                 />
-                <button type="button" class="browse" onclick={browseForBuildCwd}>
+                <button type="button" class="btn btn-sm" onclick={browseForBuildCwd}>
                     Browse…
                 </button>
             </div>
@@ -699,10 +702,11 @@
         </div>
 
         <div class="row-three">
-            <div>
+            <div class="field">
                 <label for="bitrate">Bitrate (bps)</label>
                 <input
                     id="bitrate"
+                    class="input mono"
                     type="number"
                     min="10000"
                     max="1000000"
@@ -710,20 +714,22 @@
                     bind:value={settings.adapter.bitrate}
                 />
             </div>
-            <div>
+            <div class="field">
                 <label for="nodeId">Node ID (0–0xF)</label>
                 <input
                     id="nodeId"
+                    class="input mono"
                     type="number"
                     min="0"
                     max="15"
                     bind:value={settings.adapter.nodeId}
                 />
             </div>
-            <div>
+            <div class="field">
                 <label for="timeout">Frame timeout (ms)</label>
                 <input
                     id="timeout"
+                    class="input mono"
                     type="number"
                     min="50"
                     max="60000"
@@ -733,11 +739,11 @@
         </div>
 
         <div class="opts">
-            <label><input type="checkbox" bind:checked={settings.flash.diff} /> Diff-skip unchanged sectors</label>
-            <label><input type="checkbox" bind:checked={settings.flash.verifyAfter} /> Verify each sector</label>
-            <label><input type="checkbox" bind:checked={settings.flash.finalCommit} /> Final CMD_FLASH_VERIFY commit</label>
-            <label><input type="checkbox" bind:checked={settings.flash.jump} /> Jump to app after flash</label>
-            <label><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
+            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.diff} /> Diff-skip unchanged sectors</label>
+            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.verifyAfter} /> Verify each sector</label>
+            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.finalCommit} /> Final CMD_FLASH_VERIFY commit</label>
+            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.jump} /> Jump to app after flash</label>
+            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
             <!--
                 Provision-after-flash auto-detects the role from
                 the artifact's basename. We always render the
@@ -746,6 +752,7 @@
                 the filename. Tooltip explains the requirement.
             -->
             <label
+                class="toggle"
                 class:provision-disabled={detectedRole === null}
                 title={detectedRole === null
                     ? 'Artifact filename must match a role (ams.elf / ecu.hex / udv.bin) to enable.'
@@ -770,7 +777,7 @@
     <div class="actions">
         <button
             type="button"
-            class="primary"
+            class="btn btn-primary"
             disabled={running || !adapterReady}
             onclick={() => start({ skipBuild: false })}
         >
@@ -778,6 +785,7 @@
         </button>
         <button
             type="button"
+            class="btn"
             disabled={running || !adapterReady}
             onclick={() => start({ skipBuild: true })}
         >
@@ -785,6 +793,7 @@
         </button>
         <button
             type="button"
+            class="btn"
             disabled={running}
             onclick={buildOnly}
             title="Run the build step only — useful before the first flash, when `build/` doesn't exist yet so the .elf can't be picked."
@@ -851,11 +860,11 @@
     {/if}
 
     {#if error !== null}
-        <div class="error">{error}</div>
+        <div class="banner banner-danger">{error}</div>
     {/if}
 
     {#if result !== null}
-        <div class="result">
+        <div class="banner banner-success">
             <strong>Done.</strong>
             {result.sectors_written.length} sector(s) written,
             {result.sectors_skipped.length} skipped,
@@ -872,17 +881,17 @@
         unchecked the box) — no noise in that case.
     -->
     {#if provisionState.kind === 'running'}
-        <div class="result provisioning">
+        <div class="banner">
             <strong>Provisioning…</strong>
             writing node-id NVM key, resetting the bootloader.
         </div>
     {:else if provisionState.kind === 'ok'}
-        <div class="result success">
+        <div class="banner banner-success">
             <strong>Provisioned as {provisionState.role.toUpperCase()}.</strong>
             Run <code>discover</code> to confirm the new node-id.
         </div>
     {:else if provisionState.kind === 'error'}
-        <div class="result error">
+        <div class="banner banner-danger">
             <strong>Provision failed:</strong>
             {provisionState.message}
         </div>
@@ -891,10 +900,12 @@
     {#if log.length > 0}
         <div class="log-wrap">
             <div class="log-header">
-                <span class="log-count">{log.length} line{log.length === 1 ? '' : 's'}</span>
+                <span class="log-count mono small">
+                    {log.length} line{log.length === 1 ? '' : 's'}
+                </span>
                 <button
                     type="button"
-                    class="copy-btn"
+                    class="btn btn-sm"
                     onclick={copyLog}
                     title="Copy the full log buffer to the clipboard"
                 >
@@ -922,35 +933,35 @@
 </div>
 
 <style>
-    .view {
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-        padding: 24px 28px;
-        overflow: auto;
-    }
-    header h2 { margin: 0; font-size: 1.3rem; }
-    .muted { color: var(--text-muted); font-size: 0.9rem; margin: 4px 0 0; }
-    .warning {
-        padding: 10px 14px;
-        border: 1px solid var(--accent);
-        background: rgba(242, 178, 51, 0.08);
-        border-radius: 6px;
-    }
-    .warning code { font-family: var(--font-mono); }
+    /* The shared design system supplies: .view, .card, .field,
+       .toggle, .btn (+variants), .banner (+variants), .input, .small,
+       .muted, .mono. This file's local styles cover the bits that
+       are genuinely Flash-specific: the form's stack rhythm + grid,
+       the build-templates dropdown, the running-progress badge with
+       its status icon, the indeterminate progress bar, and the log
+       window with its copy-row header. */
+
+    /* Form card — tighter gap than the default .stack (10px vs.
+       12px) so a long field stack stays compact enough to read at
+       a glance. */
     .form {
         display: flex;
         flex-direction: column;
-        gap: 10px;
-        padding: 16px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface);
+        gap: var(--space-3);
     }
-    .row { display: flex; flex-direction: column; gap: 4px; }
+
+    /* Field labels — small, muted, top-stacked with the input. The
+       label/input pair lives in a .field; this just sizes the
+       leading <label> consistent with the rest of the design
+       system's "small caption" pattern. */
+    .field > label {
+        font-size: var(--text-sm);
+        color: var(--text-muted);
+    }
+
     .hint {
-        margin: 4px 0 0;
-        font-size: 0.78rem;
+        margin: var(--space-1) 0 0;
+        font-size: var(--text-xs);
         color: var(--text-muted);
         line-height: 1.5;
     }
@@ -958,40 +969,53 @@
         font-family: var(--font-mono);
         font-size: 0.95em;
         padding: 0 3px;
-        border-radius: 3px;
+        border-radius: var(--radius-sm);
         background: rgba(255, 255, 255, 0.04);
     }
-    .hint strong { color: var(--text); font-weight: 600; }
+    .hint strong {
+        color: var(--text);
+        font-weight: 600;
+    }
+
+    /* Input + adjacent button row. The input flexes to fill, the
+       button hugs its content. */
     .input-with-button {
         display: flex;
-        gap: 6px;
+        gap: var(--space-2);
     }
+    .input-with-button .input {
+        flex: 1;
+    }
+
+    /* Build-templates dropdown — anchored to the templates trigger
+       button. Owns its own surface so it sits cleanly above the
+       form regardless of card background. */
     .templates-host {
         position: relative;
     }
     .templates-dropdown {
         position: absolute;
-        top: calc(100% + 4px);
+        top: calc(100% + var(--space-1));
         right: 0;
         z-index: 10;
         min-width: 360px;
         max-width: min(560px, calc(100vw - 60px));
-        background: var(--surface);
+        background: var(--surface-elev);
         border: 1px solid var(--border);
-        border-radius: 6px;
-        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
-        padding: 6px 0;
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-md);
+        padding: var(--space-2) 0;
         max-height: 360px;
         overflow: auto;
     }
     .templates-section + .templates-section {
         border-top: 1px solid var(--border);
-        margin-top: 4px;
-        padding-top: 4px;
+        margin-top: var(--space-1);
+        padding-top: var(--space-1);
     }
     .templates-section-title {
-        padding: 6px 12px 4px;
-        font-size: 0.7rem;
+        padding: var(--space-2) var(--space-3) var(--space-1);
+        font-size: var(--text-xs);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         color: var(--text-muted);
@@ -1004,14 +1028,14 @@
         text-align: left;
         background: transparent;
         border: none;
-        padding: 8px 12px;
+        padding: var(--space-2) var(--space-3);
         cursor: pointer;
         color: var(--text);
         border-radius: 0;
+        font: inherit;
     }
     .templates-item:hover {
-        background: rgba(255, 255, 255, 0.04);
-        border-color: transparent;
+        background: var(--hover);
         color: var(--text);
     }
     .templates-item.preset .templates-item-label::before {
@@ -1019,106 +1043,74 @@
         color: var(--accent);
     }
     .templates-item-label {
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
         font-weight: 500;
     }
     .templates-item-cmd {
         font-family: var(--font-mono);
-        font-size: 0.72rem;
+        font-size: var(--text-xs);
         color: var(--text-muted);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    .input-with-button input { flex: 1; }
-    .browse {
-        white-space: nowrap;
-        padding: 6px 12px;
-        background: var(--bg);
-        border: 1px solid var(--border);
-        color: var(--text-muted);
-        border-radius: 4px;
-        font-size: 0.85rem;
-        cursor: pointer;
-    }
-    .browse:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Three-up grid for bitrate / node-id / timeout. Drops to a
+       single column at narrow widths so the sidebar-collapsed
+       layout doesn't squish the inputs. */
     .row-three {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
-        gap: 10px;
+        gap: var(--space-3);
     }
-    label { font-size: 0.85rem; color: var(--text-muted); }
-    input[type="text"], input[type="number"] {
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 6px 8px;
-        font: inherit;
-        font-family: var(--font-mono);
-        font-size: 0.85rem;
+    @media (max-width: 720px) {
+        .row-three {
+            grid-template-columns: 1fr;
+        }
     }
-    input:focus { outline: none; border-color: var(--accent); }
+
+    /* Per-run options — wrapping row of checkboxes. The .toggle
+       utility handles spacing + accent-color; we just lay them out
+       horizontally with a wider gap than the in-card stack so they
+       breathe. */
     .opts {
         display: flex;
         flex-wrap: wrap;
-        gap: 14px;
-        margin-top: 4px;
+        gap: var(--space-4);
+        margin-top: var(--space-1);
     }
-    .opts label {
-        color: var(--text);
-        font-size: 0.85rem;
-        display: flex;
-        gap: 6px;
-        align-items: center;
-    }
-    .opts label.provision-disabled {
+    .opts .toggle.provision-disabled {
         opacity: 0.45;
         cursor: help;
     }
-    .result.provisioning {
-        background: var(--surface);
-        border-color: var(--border);
+
+    /* Buttons row under the form — gap matches the form's internal
+       spacing so the page reads as a vertical rhythm. */
+    .actions {
+        display: flex;
+        gap: var(--space-2);
     }
-    .result.success {
-        background: rgba(6, 214, 160, 0.06);
-        border-color: rgba(6, 214, 160, 0.4);
-    }
-    .result.error {
-        background: rgba(255, 115, 115, 0.08);
-        border-color: var(--error);
-        color: var(--error);
-    }
-    .actions { display: flex; gap: 8px; }
-    button {
-        appearance: none;
-        background: var(--surface);
-        color: var(--text);
-        border: 1px solid var(--border);
-        font: inherit;
-        padding: 8px 16px;
-        border-radius: 6px;
-        cursor: pointer;
-    }
-    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    button.primary {
-        background: var(--accent);
-        color: #1a1a1a;
-        border-color: var(--accent);
-    }
-    button.primary:hover:not(:disabled) { filter: brightness(1.05); color: #1a1a1a; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Running-progress badge. This is bespoke (no .progress
+       utility in the design system) — a status icon + textual
+       message + optional overall-pct readout, in a banner that
+       changes border/background tint to reflect the last outcome.
+       The classes here (.running / .success / .failure) layer on
+       top of a base .progress that uses the same chrome as a
+       .banner but with mono-font + transition affordances. */
     .progress {
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 10px 14px;
+        gap: var(--space-3);
+        padding: var(--space-3) var(--space-4);
         border: 1px solid var(--border);
         background: var(--surface);
-        border-radius: 6px;
+        border-radius: var(--radius-md);
         font-family: var(--font-mono);
-        font-size: 0.85rem;
-        transition: border-color 0.2s ease, background 0.2s ease;
+        font-size: var(--text-sm);
+        transition:
+            border-color var(--motion-base),
+            background var(--motion-base);
     }
     .status-icon {
         display: inline-flex;
@@ -1127,45 +1119,48 @@
         width: 18px;
         height: 18px;
         line-height: 1;
-        font-size: 0.95rem;
+        font-size: var(--text-base);
     }
     .progress.running .status-icon {
         color: var(--accent);
         animation: pulse 1.2s ease-in-out infinite;
     }
     .progress.success {
-        border-color: #06d6a0;
-        background: rgba(6, 214, 160, 0.08);
+        border-color: var(--success);
+        background: var(--success-soft);
     }
-    .progress.success .status-icon { color: #06d6a0; font-weight: 700; }
+    .progress.success .status-icon {
+        color: var(--success);
+        font-weight: 700;
+    }
     .progress.failure {
-        border-color: var(--error);
-        background: rgba(255, 115, 115, 0.08);
+        border-color: var(--danger);
+        background: var(--danger-soft);
     }
-    .progress.failure .status-icon { color: var(--error); font-weight: 700; }
-
+    .progress.failure .status-icon {
+        color: var(--danger);
+        font-weight: 700;
+    }
     .overall-pct {
         margin-left: auto;
         font-family: var(--font-mono);
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
         color: var(--text-muted);
     }
 
+    /* Per-run progress bar — same look as the SWD view's bar. */
     .bar {
-        margin-top: 8px;
         height: 8px;
         background: var(--bg);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         overflow: hidden;
         border: 1px solid var(--border);
     }
-
     .bar .fill {
         height: 100%;
         background: var(--accent);
         transition: width 120ms ease-out;
     }
-
     .bar.indeterminate .fill {
         animation: bar-slide 1.2s ease-in-out infinite;
         background: linear-gradient(
@@ -1175,7 +1170,6 @@
             transparent 100%
         );
     }
-
     @keyframes bar-slide {
         0% {
             transform: translateX(-100%);
@@ -1185,68 +1179,43 @@
         }
     }
     @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.4; }
+        0%,
+        100% {
+            opacity: 1;
+        }
+        50% {
+            opacity: 0.4;
+        }
     }
-    .error {
-        padding: 10px 14px;
-        border: 1px solid var(--error);
-        color: var(--error);
-        border-radius: 6px;
-        background: rgba(255, 115, 115, 0.08);
-    }
-    .result {
-        padding: 10px 14px;
-        border: 1px solid #06d6a0;
-        color: #06d6a0;
-        border-radius: 6px;
-        background: rgba(6, 214, 160, 0.08);
-        font-size: 0.9rem;
-    }
+
+    /* Log window — terminal-style follow-tail output. Bespoke
+       layout because it has a sticky-style header (line count +
+       copy button) above a scrollable body. */
     .log-wrap {
         display: flex;
         flex-direction: column;
         gap: 0;
         border: 1px solid var(--border);
-        border-radius: 6px;
+        border-radius: var(--radius-md);
         overflow: hidden;
     }
     .log-header {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 6px 10px 6px 12px;
+        padding: var(--space-2) var(--space-3);
         background: var(--surface);
         border-bottom: 1px solid var(--border);
-        font-size: 0.75rem;
         color: var(--text-muted);
-    }
-    .log-count {
-        font-family: var(--font-mono);
-    }
-    .copy-btn {
-        background: transparent;
-        border: 1px solid var(--border);
-        color: var(--text-muted);
-        padding: 3px 10px;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        cursor: pointer;
-        font-family: inherit;
-        transition: all 0.15s ease;
-    }
-    .copy-btn:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
     }
     .log {
         margin: 0;
         max-height: 320px;
         overflow: auto;
-        padding: 12px;
+        padding: var(--space-3);
         background: var(--bg);
         font-family: var(--font-mono);
-        font-size: 0.8rem;
+        font-size: var(--text-sm);
         line-height: 1.5;
     }
     .log-line {

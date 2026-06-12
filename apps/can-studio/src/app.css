@@ -1,30 +1,121 @@
-/* ISC MingoCAN — global styles.
-   Dark theme keyed to the same #F2B233 / #1F1F1F palette as the
-   extension icon and the VS Code-extension webview. CSS variables
-   so a future light-theme toggle is a one-place change. */
+/* ISC MingoCAN — global design system.
+   Source of truth for color, spacing, type, radii, shadows.
+   Every view should reach for these tokens before defining its
+   own local CSS. The utility classes below cover ~90 % of common
+   shapes (buttons, cards, fields, pills); view-local styles only
+   handle truly view-specific layouts (cell-V grids, log windows,
+   chart canvases).
+
+   Design intent — quiet by default, accent used sparingly:
+     - One card surface (--surface), not three elevation levels
+     - Hairline borders + whitespace separate sections, no heavy
+       backgrounds
+     - Banners are plain --surface with a colored *left rail* —
+       no full tinted backgrounds shouting at the operator
+     - Card headers are plain title case, not UPPERCASE-LETTER-SPACED
+     - Buttons are outline by default; only the primary CTA fills
+*/
 
 :root {
     color-scheme: dark;
 
-    --bg: #1f1f1f;
-    --surface: #262626;
-    --hover: #2f2f2f;
-    --border: #383838;
-    --code-bg: #2d2d2d;
+    /* ---- Color tokens ---- */
 
+    /* Four-tone greyscale. The page is darker than the card it
+       hosts, hover sits just above the card, border is a hairline
+       that's almost invisible until you look for it. --border-strong
+       is the only "visible" border tone, reserved for outlines that
+       need to read at a glance (buttons, input outlines).
+
+       --bg-soft + --surface-elev are aliases kept for back-compat
+       with views that still reference them. New code should not
+       use them. */
+    --bg: #131313;
+    --surface: #1a1a1a;
+    --hover: #1f1f1f;
+    --border: #262626;
+    --border-strong: #383838;
+    --code-bg: #1a1a1a;
+    --bg-soft: #161616; /* input fills — recessed inside a card */
+    --surface-elev: var(--surface);
+
+    /* Text ramp — primary, secondary, muted (for body hints — not
+       just tooltips, so contrast has to stay readable). */
     --text: #ececec;
-    --text-muted: #999;
-    --error: #ff7373;
+    --text-secondary: #b8b8b8;
+    --text-muted: #7a7a7a;
 
+    /* Brand accent — ISC yellow. Used for: primary-CTA fills, the
+       sidebar's active-row indicator, focus rings, the "active"
+       pill on the adapter row. Avoid using it for chrome that
+       isn't a clear "you are here" / "you should press this". */
     --accent: #f2b233;
+    --accent-hover: #f8c150;
+    --accent-soft: rgba(242, 178, 51, 0.10);
+    --accent-strong: #d99c1f;
 
+    /* Semantic colors — used as a single accent on banner left
+       rails + pill borders, NOT as fill backgrounds. The -soft
+       variants are still here for the rare case (e.g. inline
+       errors) that needs a tinted background. */
+    --success: #4ade80;
+    --success-soft: rgba(74, 222, 128, 0.10);
+    --warning: #fbbf24;
+    --warning-soft: rgba(251, 191, 36, 0.10);
+    --danger: #ff7373;
+    --danger-soft: rgba(255, 115, 115, 0.10);
+    --info: #60a5fa;
+    --info-soft: rgba(96, 165, 250, 0.10);
+
+    /* Alias — keep --error working for legacy references. */
+    --error: var(--danger);
+
+    /* ---- Spacing scale ---- */
+    /* 4px rhythm. Use --space-2 (8px) for tight gaps, --space-3
+       (12px) for fields, --space-4 (16px) for sections, --space-6
+       (24px) for page padding. */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-7: 32px;
+    --space-8: 48px;
+
+    /* ---- Radii ---- */
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-pill: 999px;
+
+    /* ---- Shadows ---- */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
+
+    /* ---- Type scale ---- */
+    --text-xs: 0.72rem;
+    --text-sm: 0.82rem;
+    --text-base: 0.9rem;
+    --text-lg: 1rem;
+    --text-xl: 1.15rem;
+    --text-2xl: 1.4rem;
+
+    /* ---- Fonts ---- */
     --font-sans:
-        -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto,
+        -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto,
         'Helvetica Neue', Arial, sans-serif;
     --font-mono:
-        ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas,
-        'Liberation Mono', monospace;
+        ui-monospace, 'JetBrains Mono', 'SF Mono', SFMono-Regular, Menlo, Monaco,
+        Consolas, 'Liberation Mono', monospace;
+
+    /* ---- Motion ---- */
+    --motion-fast: 100ms ease-out;
+    --motion-base: 160ms ease-out;
 }
+
+/* ---- Document reset ---- */
 
 html,
 body {
@@ -42,4 +133,409 @@ body {
 
 #app {
     min-height: 100vh;
+}
+
+/* Scrollbar — minimal, just visible enough on hover. */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: var(--radius-pill);
+    border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--border-strong);
+}
+
+/* Focus rings — visible but quiet. Keyboard-only so mouse users
+   don't get the outline on click. */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+/* ---- Typography helpers ---- */
+
+.muted {
+    color: var(--text-muted);
+}
+
+.text-secondary {
+    color: var(--text-secondary);
+}
+
+.small {
+    font-size: var(--text-sm);
+}
+
+.mono {
+    font-family: var(--font-mono);
+}
+
+/* ---- Layout primitives ---- */
+
+.stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+.stack-sm {
+    gap: var(--space-2);
+}
+.stack-lg {
+    gap: var(--space-5);
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+.row-spread {
+    justify-content: space-between;
+}
+
+.divider {
+    height: 1px;
+    background: var(--border);
+    border: none;
+    margin: var(--space-4) 0;
+}
+
+/* ---- Buttons ---- */
+/* Default: outline-only — transparent fill, --border-strong
+   outline. Hover fills with --hover so the affordance is clear.
+   This reads cleanly on both --bg (page) and --surface (cards)
+   without needing a different button color per surface. */
+
+.btn,
+button.btn {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4);
+    font: inherit;
+    font-size: var(--text-base);
+    cursor: pointer;
+    transition: background var(--motion-fast),
+        border-color var(--motion-fast),
+        color var(--motion-fast);
+}
+.btn:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: var(--text-muted);
+}
+.btn:active:not(:disabled) {
+    background: var(--surface);
+}
+.btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Primary — the only filled button. Reserve for the main action
+   in a section (Flash, Burn bootloader, Provision). */
+.btn-primary {
+    background: var(--accent);
+    color: #1a1a1a;
+    border-color: var(--accent);
+    font-weight: 600;
+}
+.btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: #1a1a1a;
+}
+.btn-primary:active:not(:disabled) {
+    background: var(--accent-strong);
+    border-color: var(--accent-strong);
+}
+
+/* Secondary — quieter than the outline default: hover swaps the
+   text + outline to accent. Useful for "view this" / "switch
+   that" inline-link buttons. */
+.btn-secondary:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: transparent;
+}
+
+/* Ghost — no outline, no fill. For inline secondary actions in
+   tables/lists where a full button would be too loud. */
+.btn-ghost {
+    background: transparent;
+    border-color: transparent;
+}
+.btn-ghost:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: var(--border);
+}
+
+/* Danger — destructive actions (Clear DTCs, Erase chip). Outlined
+   in --danger; fills with a faint tint on hover so accidental
+   clicks don't blend in. */
+.btn-danger {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+.btn-danger:hover:not(:disabled) {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+/* Compact size — for inline secondary actions next to fields. */
+.btn-sm {
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+}
+
+/* Square icon button — 36px, single glyph. Outline-only to match
+   the .btn default. */
+.icon-btn {
+    appearance: none;
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--text-lg);
+    cursor: pointer;
+    transition: background var(--motion-fast),
+        border-color var(--motion-fast),
+        color var(--motion-fast);
+}
+.icon-btn:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: var(--text-muted);
+    color: var(--text);
+}
+.icon-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* ---- Cards ---- */
+/* Cards lean on background contrast (surface vs. bg) + a hairline
+   border for separation. No heavy outlines, no shadows. */
+
+.card {
+    padding: var(--space-5);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+}
+
+.card-tight {
+    padding: var(--space-4);
+}
+
+.card-elev {
+    box-shadow: var(--shadow-sm);
+}
+
+/* Card header — plain title-case h3. The old uppercase letter-
+   spaced caption felt loud + dated; this is just a sentence-case
+   label that reads like the rest of the body text. */
+.card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-3);
+}
+.card-header h3 {
+    margin: 0;
+    font-size: var(--text-base);
+    color: var(--text);
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+/* ---- Form fields ---- */
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+.field > .label,
+.field > span:first-child,
+.field > label {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+.input,
+.field input[type='text'],
+.field input[type='number'],
+.field select,
+.field textarea {
+    appearance: none;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-base);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    transition: border-color var(--motion-fast);
+}
+.input:focus,
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.input:disabled,
+.field input:disabled,
+.field select:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+/* Toggle — labelled checkbox / radio. */
+.toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    cursor: pointer;
+}
+.toggle input {
+    accent-color: var(--accent);
+}
+
+/* ---- Pills + badges ---- */
+/* No mono font, no UPPERCASE — pills are inline status reads, not
+   code identifiers. The body keeps the sans body font so they
+   blend into surrounding text instead of jumping out. */
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-pill);
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+}
+.pill-accent {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.pill-success {
+    border-color: var(--success);
+    color: var(--success);
+}
+.pill-warning {
+    border-color: var(--warning);
+    color: var(--warning);
+}
+.pill-danger {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+.pill-info {
+    border-color: var(--info);
+    color: var(--info);
+}
+
+/* ---- Status banners ---- */
+/* Quiet pattern: plain --surface chrome with a colored left rail
+   to flag intent. Body text + headings stay in --text; the only
+   colored element is the rail + any <strong> inside. Banners do
+   NOT scream — they sit alongside the rest of the page chrome. */
+
+.banner {
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    border-radius: var(--radius-md);
+    color: var(--text);
+}
+.banner-success {
+    border-left-color: var(--success);
+}
+.banner-success strong {
+    color: var(--success);
+}
+.banner-warning {
+    border-left-color: var(--warning);
+}
+.banner-warning strong {
+    color: var(--warning);
+}
+.banner-danger {
+    border-left-color: var(--danger);
+}
+.banner-danger strong {
+    color: var(--danger);
+}
+.banner-info {
+    border-left-color: var(--info);
+}
+.banner-info strong {
+    color: var(--info);
+}
+
+/* ---- View shell ---- */
+/* Every top-level view shares the same outer chrome: comfortable
+   page padding, vertical stack of sections, scroll on Y when
+   content overflows. Header gets generous space below it to set
+   the page-title rhythm. */
+
+.view {
+    padding: var(--space-6) var(--space-7) var(--space-7);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+}
+
+.view > header {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+}
+.view > header > div {
+    flex: 1;
+}
+.view > header h2 {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-2xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+.view > header p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--text-base);
+    max-width: 70ch;
+    line-height: 1.55;
 }

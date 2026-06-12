@@ -14,6 +14,7 @@ mod dbc;
 mod diagnose;
 mod flash;
 mod live_data;
+mod pit_diag;
 mod provision;
 mod swd;
 
@@ -52,8 +53,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        // Auto-update: the updater plugin checks the release manifest
+        // + installs signed bundles; the process plugin's relaunch()
+        // restarts into the new version. Both are driven from the
+        // frontend (lib/updater.ts).
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(live_data::LiveDataState::default())
         .manage(bus_monitor::BusMonitorState::default())
+        .manage(pit_diag::PitDiagState::default())
         .manage(dbc::DbcState::default())
         .invoke_handler(tauri::generate_handler![
             can_flasher_version,
@@ -70,6 +78,8 @@ pub fn run() {
             bus_monitor::bus_monitor_stop,
             bus_monitor::bus_monitor_capture_start,
             bus_monitor::bus_monitor_capture_stop,
+            pit_diag::pit_diag_enable,
+            pit_diag::pit_diag_disable,
             dbc::dbc_load,
             dbc::dbc_unload,
             dbc::dbc_status,

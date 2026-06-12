@@ -337,29 +337,31 @@
 
 <div class="view">
     <header>
-        <h2>Bus monitor</h2>
-        <p class="muted">
-            Live capture of every frame on the selected CAN bus.
-            Two views: <em>By&nbsp;ID</em> for the at-a-glance picture
-            (one row per unique ID, rolling Hz, latest payload) and
-            <em>Live frames</em> for the candump-style scrolling log.
-        </p>
+        <div>
+            <h2>Bus monitor</h2>
+            <p class="muted">
+                Live capture of every frame on the selected CAN bus.
+                Two views: <em>By&nbsp;ID</em> for the at-a-glance picture
+                (one row per unique ID, rolling Hz, latest payload) and
+                <em>Live frames</em> for the candump-style scrolling log.
+            </p>
+        </div>
     </header>
 
     {#if !adapterReady}
-        <div class="warning">
+        <div class="banner banner-warning">
             <strong>No adapter selected.</strong> Pick one in the
             <em>Adapters</em> view first — the monitor needs an
             <code>--interface</code>/<code>--channel</code> pair.
         </div>
     {/if}
 
-    <div class="controls">
+    <div class="controls card card-tight">
         <div class="actions">
             {#if status === 'idle' || status === 'error'}
                 <button
                     type="button"
-                    class="primary"
+                    class="btn btn-primary"
                     disabled={!adapterReady}
                     onclick={start}
                 >
@@ -368,6 +370,7 @@
             {:else}
                 <button
                     type="button"
+                    class="btn"
                     disabled={status === 'starting' || status === 'stopping'}
                     onclick={stop}
                 >
@@ -375,6 +378,7 @@
                 </button>
                 <button
                     type="button"
+                    class="btn"
                     disabled={status === 'starting' || status === 'stopping'}
                     onclick={togglePause}
                 >
@@ -383,6 +387,7 @@
             {/if}
             <button
                 type="button"
+                class="btn"
                 disabled={liveFrames.length === 0 && idStatsView.length === 0}
                 onclick={clearBuffers}
             >
@@ -390,7 +395,7 @@
             </button>
             <button
                 type="button"
-                class="capture-btn"
+                class="btn capture-btn"
                 class:active={captureActive}
                 disabled={status === 'idle' || status === 'error'
                     || status === 'starting' || status === 'stopping'}
@@ -407,6 +412,7 @@
             <label for="idfilter">Filter by ID</label>
             <input
                 id="idfilter"
+                class="input mono"
                 type="text"
                 placeholder="e.g. 0x1A, 0x200"
                 bind:value={settings.busMonitor.idFilter}
@@ -435,11 +441,11 @@
     </div>
 
     {#if captureError !== null}
-        <div class="error">Capture: {captureError}</div>
+        <div class="banner banner-danger">Capture: {captureError}</div>
     {/if}
 
     {#if error !== null}
-        <div class="error">{error}</div>
+        <div class="banner banner-danger">{error}</div>
     {/if}
 
     <div class="tabs">
@@ -523,108 +529,115 @@
 </div>
 
 <style>
+    /* Shared chrome (.view, .card, .banner-*, .btn, .input,
+       .muted, .mono) comes from app.css. Local styles cover the
+       controls row layout, the tabbed table chrome, the frame
+       table itself, and the status-dot indicator. */
+
+    /* This view fills the viewport and scrolls its table — override
+       the design system's .view that scrolls the whole page. */
     .view {
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-        padding: 24px 28px;
         overflow: hidden;
         height: 100%;
     }
-    header h2 { margin: 0; font-size: 1.3rem; }
-    .muted { color: var(--text-muted); font-size: 0.9rem; margin: 4px 0 0; }
-    .warning {
-        padding: 10px 14px;
-        border: 1px solid var(--accent);
-        background: rgba(242, 178, 51, 0.08);
-        border-radius: 6px;
-    }
-    .warning code { font-family: var(--font-mono); }
+
+    /* Controls row — actions on the left, ID filter in the middle,
+       run-stats on the right. Wraps to a second row at narrow
+       widths. */
     .controls {
         display: flex;
         flex-wrap: wrap;
-        gap: 14px;
+        gap: var(--space-4);
         align-items: end;
-        padding: 12px 14px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        border-radius: 8px;
     }
-    .actions { display: flex; gap: 8px; }
+    .actions {
+        display: flex;
+        gap: var(--space-2);
+    }
     .filter {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: var(--space-1);
         flex: 1;
         min-width: 200px;
     }
-    .filter label { font-size: 0.78rem; color: var(--text-muted); }
-    .filter input {
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 6px 8px;
-        font-family: var(--font-mono);
-        font-size: 0.85rem;
+    .filter label {
+        font-size: var(--text-sm);
+        color: var(--text-muted);
     }
-    .filter input:focus { outline: none; border-color: var(--accent); }
+
+    /* Stats row — mono-font cluster of run-time counters. Each
+       .stat is a label + value pair; .strong picks up --text so
+       the counter pops out of the muted label. */
     .stats {
         display: flex;
-        gap: 14px;
-        font-size: 0.8rem;
+        gap: var(--space-4);
+        font-size: var(--text-sm);
         color: var(--text-muted);
         font-family: var(--font-mono);
     }
-    .stat { display: inline-flex; gap: 4px; align-items: center; }
-    .stat strong { color: var(--text); font-weight: 600; }
-    .stat.dropped strong { color: var(--error); }
-    .status-dot { color: var(--text-muted); }
-    .status-dot.running { color: #06d6a0; animation: pulse 1.2s ease-in-out infinite; }
-    .status-dot.paused { color: var(--accent); }
-    .status-dot.error { color: var(--error); }
-    @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.4; }
+    .stat {
+        display: inline-flex;
+        gap: var(--space-1);
+        align-items: center;
     }
-    button {
-        appearance: none;
-        background: var(--surface);
+    .stat strong {
         color: var(--text);
-        border: 1px solid var(--border);
-        font: inherit;
-        padding: 8px 16px;
-        border-radius: 6px;
-        cursor: pointer;
+        font-weight: 600;
     }
-    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    button.primary {
-        background: var(--accent);
-        color: #1a1a1a;
-        border-color: var(--accent);
+    .stat.dropped strong {
+        color: var(--danger);
     }
-    button.primary:hover:not(:disabled) { filter: brightness(1.05); color: #1a1a1a; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    button.capture-btn.active {
-        border-color: var(--error);
-        color: var(--error);
+    .stat.capturing strong {
+        color: var(--danger);
     }
-    button.capture-btn.active:hover {
-        color: var(--error);
-        filter: brightness(1.1);
+
+    /* Run-status dot — color encodes state. Pulse animation while
+       running so the operator can tell the stream is live without
+       reading the label. */
+    .status-dot {
+        color: var(--text-muted);
     }
-    .stat.capturing strong { color: var(--error); }
-    .error {
-        padding: 10px 14px;
-        border: 1px solid var(--error);
-        color: var(--error);
-        border-radius: 6px;
-        background: rgba(255, 115, 115, 0.08);
-        font-size: 0.85rem;
+    .status-dot.running {
+        color: var(--success);
+        animation: pulse 1.2s ease-in-out infinite;
     }
+    .status-dot.paused {
+        color: var(--accent);
+    }
+    .status-dot.error {
+        color: var(--danger);
+    }
+    @keyframes pulse {
+        0%,
+        100% {
+            opacity: 1;
+        }
+        50% {
+            opacity: 0.4;
+        }
+    }
+
+    /* Active-capture indicator — swap the .btn outline to danger
+       so the operator can tell capture is on without parsing the
+       label. */
+    .btn.capture-btn.active {
+        border-color: var(--danger);
+        color: var(--danger);
+    }
+    .btn.capture-btn.active:hover:not(:disabled) {
+        background: var(--danger-soft);
+        border-color: var(--danger);
+        color: var(--danger);
+    }
+
+    /* Tab strip — two flat buttons that sit above the table; the
+       active tab merges visually into the table's top edge by
+       sharing border + background. Negative margin pulls the
+       table up against the tab strip's bottom border. */
     .tabs {
         display: flex;
-        gap: 4px;
+        gap: var(--space-1);
         border-bottom: 1px solid var(--border);
         margin-bottom: -1px;
     }
@@ -632,32 +645,38 @@
         background: transparent;
         border: 1px solid transparent;
         border-bottom: none;
-        border-radius: 6px 6px 0 0;
-        padding: 6px 14px;
+        border-radius: var(--radius-md) var(--radius-md) 0 0;
+        padding: var(--space-2) var(--space-3);
         color: var(--text-muted);
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
+        font: inherit;
+        font-size: var(--text-sm);
+        cursor: pointer;
     }
     .tab:hover:not(:disabled) {
         color: var(--text);
-        border-color: transparent;
     }
     .tab.active {
         background: var(--surface);
         border-color: var(--border);
         color: var(--text);
     }
+
+    /* Frame table — flex-fills the remaining height with a sticky
+       thead. The table-wrap matches the .tab.active background so
+       it visually continues from the active tab. */
     .table-wrap {
         flex: 1;
         min-height: 0;
         overflow: auto;
         border: 1px solid var(--border);
-        border-radius: 0 6px 6px 6px;
-        background: var(--bg);
+        border-radius: 0 var(--radius-md) var(--radius-md) var(--radius-md);
+        background: var(--surface);
     }
     .frame-table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 0.82rem;
+        font-size: var(--text-sm);
     }
     .frame-table thead {
         position: sticky;
@@ -665,27 +684,40 @@
         background: var(--surface);
         z-index: 1;
     }
-    .frame-table th, .frame-table td {
-        padding: 6px 10px;
+    .frame-table th,
+    .frame-table td {
+        padding: var(--space-2) var(--space-3);
         text-align: left;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        border-bottom: 1px solid var(--border);
     }
     .frame-table th {
-        font-weight: 600;
-        font-size: 0.72rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
+        font-weight: 500;
+        font-size: var(--text-xs);
         color: var(--text-muted);
     }
-    .mono { font-family: var(--font-mono); }
-    .col-id { width: 80px; }
-    .col-count { width: 80px; text-align: right; }
-    .col-rate { width: 70px; text-align: right; }
-    .col-dlc { width: 50px; text-align: right; }
-    .col-ts { width: 100px; }
-    .col-data { white-space: nowrap; }
+    .col-id {
+        width: 80px;
+    }
+    .col-count {
+        width: 80px;
+        text-align: right;
+    }
+    .col-rate {
+        width: 70px;
+        text-align: right;
+    }
+    .col-dlc {
+        width: 50px;
+        text-align: right;
+    }
+    .col-ts {
+        width: 100px;
+    }
+    .col-data {
+        white-space: nowrap;
+    }
     .empty {
-        padding: 20px;
+        padding: var(--space-5);
         text-align: center;
         color: var(--text-muted);
     }

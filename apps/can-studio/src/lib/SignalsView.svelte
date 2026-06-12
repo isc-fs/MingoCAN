@@ -116,12 +116,14 @@
 
 <div class="view">
     <header>
-        <h2>Signals</h2>
-        <p class="muted">
-            Every signal defined in the loaded DBC, with its live
-            decoded value driven by the Bus monitor. Per-adapter
-            DBC associations live in <em>Settings → DBC files</em>.
-        </p>
+        <div>
+            <h2>Signals</h2>
+            <p class="muted">
+                Every signal defined in the loaded DBC, with its live
+                decoded value driven by the Bus monitor. Per-adapter
+                DBC associations live in <em>Settings → DBC files</em>.
+            </p>
+        </div>
     </header>
 
     {#if summary === null}
@@ -136,7 +138,7 @@
             </p>
         </div>
     {:else}
-        <div class="loaded-bar">
+        <div class="loaded-bar card card-tight">
             <span class="path mono">{summary.path}</span>
             <span class="stat">
                 <strong>{summary.messageCount}</strong> messages
@@ -146,10 +148,11 @@
             </span>
         </div>
 
-        <div class="filter">
+        <div class="filter-row">
             <label for="sigfilter">Filter</label>
             <input
                 id="sigfilter"
+                class="input mono"
                 type="text"
                 placeholder="signal name / message / unit"
                 bind:value={filter}
@@ -198,40 +201,49 @@
 </div>
 
 <style>
+    /* Bespoke layout for this view — the table needs sticky-header
+       + flex-fill scroll behavior that the design system doesn't
+       ship. Empty-state, loaded-bar, filter-row, and the signal
+       table itself live here. */
+
+    /* This view fills the viewport and scrolls its own table —
+       override the design system's .view that scrolls the whole
+       page. */
     .view {
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-        padding: 24px 28px;
         overflow: hidden;
         height: 100%;
     }
-    header h2 { margin: 0; font-size: 1.3rem; }
-    .muted { color: var(--text-muted); font-size: 0.9rem; margin: 4px 0 0; }
+
+    /* Empty-state — dashed border tells the operator "no real
+       data here yet, but it'll fill in when you point at a DBC". */
     .empty-state {
-        padding: 20px;
-        border: 1px dashed var(--border);
+        padding: var(--space-5);
+        border: 1px dashed var(--border-strong);
         background: var(--surface);
-        border-radius: 8px;
+        border-radius: var(--radius-lg);
         color: var(--text-muted);
     }
-    .empty-state strong { color: var(--text); }
-    .empty-state p { margin: 6px 0 0; }
+    .empty-state strong {
+        color: var(--text);
+    }
+    .empty-state p {
+        margin: var(--space-2) 0 0;
+    }
     .empty-state code {
         font-family: var(--font-mono);
-        padding: 1px 4px;
+        padding: 1px var(--space-1);
         background: rgba(255, 255, 255, 0.04);
-        border-radius: 3px;
+        border-radius: var(--radius-sm);
     }
+
+    /* Loaded-bar — tight summary card (DBC path + counts). Builds
+       on .card .card-tight; this just lays out the inner contents
+       inline with the path stretching to fill. */
     .loaded-bar {
         display: flex;
-        gap: 14px;
+        gap: var(--space-4);
         align-items: center;
-        padding: 8px 14px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        border-radius: 8px;
-        font-size: 0.82rem;
+        font-size: var(--text-sm);
         color: var(--text-muted);
     }
     .loaded-bar .path {
@@ -241,36 +253,38 @@
         white-space: nowrap;
         color: var(--text);
     }
-    .stat strong { color: var(--text); }
-    .filter {
+    .stat strong {
+        color: var(--text);
+    }
+
+    /* Filter row — label + free-text input that flexes. */
+    .filter-row {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: var(--space-3);
     }
-    .filter label { font-size: 0.78rem; color: var(--text-muted); }
-    .filter input {
+    .filter-row label {
+        font-size: var(--text-sm);
+        color: var(--text-muted);
+    }
+    .filter-row .input {
         flex: 1;
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 6px 8px;
-        font-family: var(--font-mono);
-        font-size: 0.85rem;
     }
-    .filter input:focus { outline: none; border-color: var(--accent); }
+
+    /* Signal table — flex-fills the remaining height with a
+       sticky thead. Body scrolls on Y. */
     .table-wrap {
         flex: 1;
         min-height: 0;
         overflow: auto;
         border: 1px solid var(--border);
-        border-radius: 6px;
-        background: var(--bg);
+        border-radius: var(--radius-md);
+        background: var(--surface);
     }
     .signal-table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
     }
     .signal-table thead {
         position: sticky;
@@ -278,29 +292,55 @@
         background: var(--surface);
         z-index: 1;
     }
-    .signal-table th, .signal-table td {
-        padding: 6px 10px;
+    .signal-table th,
+    .signal-table td {
+        padding: var(--space-2) var(--space-3);
         text-align: left;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        border-bottom: 1px solid var(--border);
     }
     .signal-table th {
-        font-weight: 600;
-        font-size: 0.72rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
+        font-weight: 500;
+        font-size: var(--text-xs);
         color: var(--text-muted);
     }
-    .mono { font-family: var(--font-mono); }
-    .col-message { width: 180px; display: flex; gap: 6px; align-items: baseline; }
-    .col-message .msg-name { font-weight: 500; }
-    .col-message .msg-id { color: var(--text-muted); font-size: 0.78em; }
-    .col-name { width: 220px; }
-    .col-value { width: 100px; text-align: right; color: var(--text-muted); }
-    tr.has-value .col-value { color: #06d6a0; font-weight: 600; }
-    .col-unit { width: 80px; color: var(--text-muted); }
-    .col-range { color: var(--text-muted); font-size: 0.78em; }
+
+    .col-message {
+        width: 180px;
+        display: flex;
+        gap: var(--space-2);
+        align-items: baseline;
+    }
+    .col-message .msg-name {
+        font-weight: 500;
+    }
+    .col-message .msg-id {
+        color: var(--text-muted);
+        font-size: var(--text-xs);
+    }
+    .col-name {
+        width: 220px;
+    }
+    .col-value {
+        width: 100px;
+        text-align: right;
+        color: var(--text-muted);
+    }
+    /* Live row — green value cell when this signal has streamed
+       at least once during the current monitor session. */
+    tr.has-value .col-value {
+        color: var(--success);
+        font-weight: 600;
+    }
+    .col-unit {
+        width: 80px;
+        color: var(--text-muted);
+    }
+    .col-range {
+        color: var(--text-muted);
+        font-size: var(--text-xs);
+    }
     .empty {
-        padding: 20px;
+        padding: var(--space-5);
         text-align: center;
         color: var(--text-muted);
     }

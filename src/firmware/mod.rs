@@ -251,6 +251,23 @@ pub enum ImageError {
         end: u32,
         app_end_plus_one: u32,
     },
+
+    /// Two input segments cover overlapping address ranges. Compose
+    /// would silently resolve this last-writer-wins, producing a
+    /// wrong-but-self-consistent image that passes every CRC/verify
+    /// check. Reject it instead (FMEA #271 G6).
+    #[error(
+        "segments {first_index} (0x{first_addr:08X}..0x{first_end:08X}) and {second_index} \
+         (starting 0x{second_addr:08X}) overlap; the image would be silently mis-composed \
+         (last-writer-wins) — check the linker script / hex generation"
+    )]
+    OverlappingSegments {
+        first_index: usize,
+        first_addr: u32,
+        first_end: u32,
+        second_index: usize,
+        second_addr: u32,
+    },
 }
 
 #[cfg(test)]

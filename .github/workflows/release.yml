@@ -2,9 +2,16 @@ name: Release
 
 # Unified release pipeline for **all three** product surfaces:
 #
-#   - `can-flasher` CLI (Rust binaries — Linux / macOS / Windows)
+#   - `can-flasher` CLI — built on all four targets as a compile
+#     gate, but NOT attached to the Release (install via `cargo
+#     install --git … --tag …`; operators wanted installer packages
+#     only, not raw binary tarballs).
 #   - VS Code extension (.vsix)
-#   - ISC CAN Studio (Tauri desktop bundles — .dmg / .deb / .AppImage / .rpm / .msi / .exe)
+#   - ISC CAN Studio (Tauri desktop installers — .dmg / .deb / .rpm /
+#     .AppImage / .exe (NSIS); .msi excluded. AppImage is back so the
+#     in-app auto-updater can self-update on Linux, and updater `.sig`
+#     bundles + a `latest.json` manifest ship alongside — see
+#     docs/UPDATES.md)
 #
 # A single `v*` tag (e.g. `v2.0.0`) triggers all three surfaces to
 # build in parallel and attach their artefacts to one GitHub
@@ -107,30 +114,44 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            **Unified release** — `can-flasher` CLI + ISC STM32 CAN Flasher (VS Code extension) + ISC CAN Studio (desktop app) all ship together at the same version from a single tag.
+            # 🏁 ISC MingoCAN ${{ github.ref_name }}
 
-            ### Install / upgrade per surface
+            Flash, monitor, and debug CAN messages on the team's STM32 ECUs — a desktop app plus optional editor and command-line tools, all at version ${{ github.ref_name }}.
 
-            **CLI (`can-flasher`)** — pre-built binaries below for Linux x86_64 / aarch64, macOS aarch64, Windows x86_64.
-            ```bash
-            cargo install --git https://github.com/isc-fs/can-flasher.git --tag ${{ github.ref_name }}
-            ```
+            New here? You almost certainly want the **desktop app** below. 👇
 
-            **VS Code extension** — download `vscode-stm32-can-*.vsix` from the assets below, then in VS Code: **Extensions panel → ⋯ menu → Install from VSIX…**
+            ## 💻 Desktop app — download & install
+
+            Scroll to **Assets** at the bottom of this page and grab the file for your computer:
+
+            | Your computer | Download the file ending in | How to install |
+            |---|---|---|
+            | **Windows 10 / 11** | `-setup.exe` | Double-click it. If a blue *"Windows protected your PC"* box appears → **More info → Run anyway**. |
+            | **Mac** (Apple Silicon / M1–M4) | `.dmg` | Open it, drag the app to **Applications**. **First launch only:** right-click the app → **Open** → **Open**. |
+            | **Ubuntu / Debian** | `.deb` | In a terminal from your Downloads folder: `sudo apt install ./*.deb` |
+            | **Fedora / RHEL** | `.rpm` | `sudo dnf install ./*.rpm` |
+
+            > ℹ️ **Why the warning?** The app isn't code-signed yet, so Windows and macOS show a one-time *"unidentified developer"* prompt. It's expected and safe — the steps above clear it. You only do this the first time you open the app.
+
+            📖 First time setting up a CAN adapter (SLCAN / SocketCAN / PCAN / Vector)? See the **[setup guide](https://github.com/isc-fs/can-flasher/blob/${{ github.ref_name }}/docs/INSTALL.md)**.
+
+            ## 🧩 VS Code extension (optional)
+
+            Flash and discover devices without leaving your editor. Download the `.vsix` from **Assets**, then in VS Code: **Extensions panel → ⋯ menu → Install from VSIX…** — or run:
             ```bash
             code --install-extension vscode-stm32-can-*.vsix
             ```
 
-            **ISC CAN Studio** — pick the bundle for your OS:
-            - macOS: `.dmg` (ad-hoc signed; first launch needs **right-click → Open → confirm**)
-            - Linux: `.deb`, `.AppImage`, or `.rpm`
-            - Windows: `.msi` (preferred) or `.exe` installer
+            ## 🛠️ Command-line tool (advanced)
 
-            See [docs/INSTALL.md](https://github.com/isc-fs/can-flasher/blob/${{ github.ref_name }}/docs/INSTALL.md) for per-OS adapter setup (SLCAN / SocketCAN / PCAN / Vector).
+            `can-flasher` is the scriptable CLI. Install it from source at this version:
+            ```bash
+            cargo install --git https://github.com/isc-fs/can-flasher.git --tag ${{ github.ref_name }}
+            ```
 
             ---
 
-            **Full commit log**: https://github.com/isc-fs/can-flasher/commits/${{ github.ref_name }}
+            <sub>Everything here ships together from one release. Full list of changes: [commit log for ${{ github.ref_name }}](https://github.com/isc-fs/can-flasher/commits/${{ github.ref_name }}).</sub>
 
   # ---- CLI binaries -------------------------------------------
   #
@@ -218,19 +239,20 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
           echo "archive=$stage.zip" >> $env:GITHUB_ENV
 
+      # The CLI is distributed via `cargo install --git … --tag …`,
+      # NOT as a pre-built binary on the Release page (operators
+      # asked for installer packages only — .deb / .rpm / .dmg /
+      # .exe / .msi — not raw binary tarballs). We still build all
+      # four targets every release as a cross-platform compile gate
+      # and keep the archives as 7-day workflow artifacts for
+      # debugging, but they are deliberately NOT attached to the
+      # GitHub Release.
       - name: Upload as workflow artifact (always)
         uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.target }}
           path: ${{ env.archive }}
           retention-days: 7
-
-      - name: Attach to GitHub Release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.archive }}
-          fail_on_unmatched_files: true
 
   # ---- VS Code extension --------------------------------------
 
@@ -341,10 +363,19 @@ jobs:
       # existing Release (created by `create-release`). Setting
       # `tagName` makes it append to that release instead of
       # creating a sibling — single release page, all bundles.
+      #
+      # With `bundle.createUpdaterArtifacts: true` (tauri.conf.json) +
+      # the TAURI_SIGNING_* env below, it also produces the signed
+      # `.sig` updater bundles and generates + uploads `latest.json`
+      # (the auto-update manifest the app polls). The two secrets MUST
+      # exist before the first tag is cut, or this step fails — see
+      # docs/UPDATES.md for the one-time keypair setup.
       - name: Build + attach to Release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/can-studio
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}

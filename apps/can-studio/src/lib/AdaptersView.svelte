@@ -6,6 +6,10 @@
 
     No background polling: every fetch is operator-initiated, same
     rule as the VS Code extension's device tree.
+
+    Visual: uses the shared design system in `app.css`. View-local
+    CSS is limited to the adapter-row layout + the per-interface
+    color tags (one shade per backend kind).
 -->
 <script lang="ts">
     import { onMount } from 'svelte';
@@ -56,17 +60,18 @@
         </div>
         <button
             type="button"
-            class="refresh"
+            class="icon-btn"
             onclick={refresh}
             disabled={loading}
             title="Refresh adapter list"
+            aria-label="Refresh adapter list"
         >
             {loading ? '…' : '⟳'}
         </button>
     </header>
 
     {#if error !== null}
-        <div class="error">
+        <div class="banner banner-danger">
             <strong>Failed to discover adapters:</strong>
             {error}
         </div>
@@ -82,36 +87,38 @@
         </div>
     {/if}
 
-    <ul class="list">
+    <ul class="adapter-list">
         {#each adapters as entry (`${entry.interface}:${entry.channel}`)}
-            {@const active = settings.adapter.interface !== null && isSameAdapter(
-                {
-                    interface: settings.adapter.interface,
-                    channel: settings.adapter.channel,
-                    label: settings.adapter.label,
-                },
-                entry.interface,
-                entry.channel,
-            )}
+            {@const active =
+                settings.adapter.interface !== null &&
+                isSameAdapter(
+                    {
+                        interface: settings.adapter.interface,
+                        channel: settings.adapter.channel,
+                        label: settings.adapter.label,
+                    },
+                    entry.interface,
+                    entry.channel,
+                )}
             <li>
                 <button
                     type="button"
-                    class="row"
+                    class="adapter-row"
                     class:active
                     onclick={() => select(entry)}
                 >
-                    <div class="row-main">
-                        <div class="row-title">
+                    <div class="adapter-row-main">
+                        <div class="adapter-row-title">
                             <span class="iface" data-iface={entry.interface}>
                                 {entry.interface}
                             </span>
-                            <span class="label">{entry.label}</span>
+                            <span class="adapter-label">{entry.label}</span>
                             {#if active}
                                 <span class="active-pill">active</span>
                             {/if}
                         </div>
-                        <div class="row-detail muted small">
-                            <span class="channel">
+                        <div class="adapter-row-detail muted small">
+                            <span class="mono">
                                 {entry.channel.length > 0
                                     ? entry.channel
                                     : '(no channel)'}
@@ -129,92 +136,32 @@
 </div>
 
 <style>
-    .view {
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        padding: 28px 32px;
-        overflow: auto;
-    }
-
-    header {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 16px;
-    }
-
-    h2 {
-        margin: 0;
-        font-size: 1.3rem;
-    }
-
-    .muted {
-        color: var(--text-muted);
-    }
-
-    header .muted {
-        margin: 4px 0 0;
-        font-size: 0.9rem;
-        max-width: 60ch;
-    }
-
-    .refresh {
-        appearance: none;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        color: var(--text);
-        width: 36px;
-        height: 36px;
-        border-radius: 6px;
-        font: inherit;
-        font-size: 1rem;
-        cursor: pointer;
-    }
-
-    .refresh:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
-    }
-
-    .refresh:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-    }
-
-    .error {
-        padding: 12px 16px;
-        border-radius: 6px;
-        background: rgba(255, 115, 115, 0.1);
-        border: 1px solid var(--error);
-        color: var(--error);
-    }
-
+    /* Empty state — dashed border to signal "this is where things
+       will appear once you have hardware". Distinct from the
+       solid-border .card so it doesn't look like populated content. */
     .empty {
-        padding: 24px;
+        padding: var(--space-6);
         border: 1px dashed var(--border);
-        border-radius: 8px;
+        border-radius: var(--radius-lg);
         background: var(--surface);
     }
-
     .empty p {
-        margin: 4px 0;
+        margin: var(--space-1) 0;
     }
 
-    .small {
-        font-size: 0.85rem;
-    }
-
-    .list {
+    .adapter-list {
         list-style: none;
         margin: 0;
         padding: 0;
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: var(--space-2);
     }
 
-    .row {
+    /* Adapter row — a clickable card. Inherits surface/border
+       tokens from the design system. Active variant uses the
+       accent ramp for both border and a faint accent wash. */
+    .adapter-row {
         width: 100%;
         appearance: none;
         background: var(--surface);
@@ -222,92 +169,88 @@
         color: var(--text);
         font: inherit;
         text-align: left;
-        padding: 12px 16px;
-        border-radius: 8px;
+        padding: var(--space-3) var(--space-4);
+        border-radius: var(--radius-lg);
         cursor: pointer;
-        transition: border-color 80ms ease, background 80ms ease;
+        transition:
+            border-color var(--motion-fast),
+            background var(--motion-fast);
     }
-
-    .row:hover {
-        border-color: var(--text-muted);
+    .adapter-row:hover {
+        border-color: var(--border-strong);
+        background: var(--hover);
     }
-
-    .row.active {
+    .adapter-row.active {
         border-color: var(--accent);
-        background: rgba(242, 178, 51, 0.06);
+        background: var(--accent-soft);
     }
 
-    .row-main {
+    .adapter-row-main {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: var(--space-1);
     }
-
-    .row-title {
+    .adapter-row-title {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: var(--space-3);
+    }
+    .adapter-row-detail {
+        display: flex;
+        gap: var(--space-2);
+        flex-wrap: wrap;
     }
 
+    /* Per-interface color tags. Plain --bg pill, tinted border +
+       text by backend so an operator can scan the list and spot
+       "the PCAN one" or "the Vector one" without reading the label. */
     .iface {
         font-family: var(--font-mono);
-        font-size: 0.75rem;
+        font-size: var(--text-xs);
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        padding: 1px 6px;
-        border-radius: 3px;
+        padding: 2px var(--space-2);
+        border-radius: var(--radius-sm);
         background: var(--bg);
         border: 1px solid var(--border);
         color: var(--text-muted);
     }
-
     .iface[data-iface='vector'] {
         color: #ffd166;
         border-color: rgba(255, 209, 102, 0.4);
     }
-
     .iface[data-iface='pcan'] {
         color: #06d6a0;
         border-color: rgba(6, 214, 160, 0.4);
     }
-
     .iface[data-iface='slcan'] {
         color: #4cc9f0;
         border-color: rgba(76, 201, 240, 0.4);
     }
-
     .iface[data-iface='socketcan'] {
         color: #b388ff;
         border-color: rgba(179, 136, 255, 0.4);
     }
-
     .iface[data-iface='virtual'] {
         color: var(--text-muted);
     }
 
-    .label {
+    .adapter-label {
         font-weight: 500;
     }
 
+    /* Active pill — solid accent fill so the active row's marker
+       stands out from the row's accent wash. Pinned to the right
+       of the title row via margin-auto. */
     .active-pill {
         margin-left: auto;
-        font-size: 0.7rem;
+        font-size: var(--text-xs);
         background: var(--accent);
         color: #1a1a1a;
-        padding: 1px 8px;
-        border-radius: 10px;
+        padding: 1px var(--space-2);
+        border-radius: var(--radius-pill);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         font-weight: 600;
-    }
-
-    .row-detail {
-        display: flex;
-        gap: 6px;
-        flex-wrap: wrap;
-    }
-
-    .channel {
-        font-family: var(--font-mono);
     }
 </style>

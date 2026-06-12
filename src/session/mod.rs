@@ -78,6 +78,7 @@
 //! indistinguishable from a long-running operation), so the bar at
 //! review time is higher than "does it compile."
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -95,6 +96,12 @@ use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
 use crate::protocol::opcodes::{CommandOpcode, NackCode};
 use crate::protocol::{CanFrame, Response, BROADCAST_NODE_ID};
 use crate::transport::{CanBackend, TransportError};
+
+/// Linear-backoff base between retries in [`Session::send_command_retrying`]
+/// (FMEA #271 G11). Attempt N waits `N * this` before re-sending —
+/// short enough not to stall a healthy flash, long enough to ride out
+/// a transient adapter TX-buffer hiccup.
+const COMMAND_RETRY_BACKOFF_MS: u64 = 50;
 
 /// Everything this layer can fail with. Wraps the lower-level
 /// `TransportError` / `ParseError` variants and adds session-specific
@@ -380,6 +387,14 @@ impl Session {
     /// The broader session state (keepalive, reconnect-on-BAD_SESSION,
     /// notification routing) is unaffected — this is purely a
     /// per-call destination override.
+    ///
+    /// NOTE (FMEA #271 G7): the rx task only forwards command replies
+    /// whose source matches the session's `target_node`, *unless* the
+    /// session targets `BROADCAST_NODE_ID`. So `send_command_to` is
+    /// meant for **broadcast-target sessions** (which is exactly how
+    /// `discover` uses it). Calling it on a session pinned to a single
+    /// node, with a `dst` other than that node, would see the reply
+    /// filtered out.
     pub async fn send_command_to(&self, dst: u8, payload: &[u8]) -> Result<Response, SessionError> {
         let _guard = self.inner.command_lock.lock().await;
         let errors_before = self.inner.backend.adapter_error_count();
@@ -437,6 +452,56 @@ impl Session {
             }
             _ => Ok(first),
         }
+    }
+
+    /// Like [`Session::send_command`], but retries on **transient**
+    /// outcomes up to `max_attempts` total, with linear backoff.
+    ///
+    /// For the flash pipeline (FMEA #271 G11 + G12): before this, a
+    /// single dropped frame, a transient adapter hiccup, or a slow
+    /// erase that just missed the timeout would `?`-propagate and abort
+    /// the whole flash mid-stream, leaving an erased-but-unwritten
+    /// sector. Every command this is used for is **idempotent** —
+    /// re-erasing a sector, re-reading a CRC, or re-writing the same
+    /// bytes to already-erased flash is a no-op — so retrying is safe
+    /// even when the failure happened *after* the command ran (a
+    /// dropped ACK).
+    ///
+    /// "Transient" (see [`is_transient_send_outcome`]) covers a local
+    /// `CommandTimeout` / transport error AND a NACK whose code is the
+    /// bootloader's "I didn't receive the whole message" signal
+    /// (`TRANSPORT_TIMEOUT` / `TRANSPORT_ERROR`) — the dropped-frame
+    /// case on the fast adapters we don't 1 ms-pace (G12), far cheaper
+    /// to retry than to pace every frame. A *definitive* NACK
+    /// (CrcMismatch, BadSession, Unsupported, …) is returned at once,
+    /// as are `RxClosed` / `Protocol`. The whole try→retry sequence
+    /// holds `command_lock`. `max_attempts` is clamped to at least 1.
+    pub async fn send_command_retrying(
+        &self,
+        payload: &[u8],
+        max_attempts: u32,
+    ) -> Result<Response, SessionError> {
+        let _guard = self.inner.command_lock.lock().await;
+        let attempts = max_attempts.max(1);
+        for attempt in 1..=attempts {
+            let outcome = self.send_raw(payload, MessageType::Cmd).await;
+            if !is_transient_send_outcome(&outcome) || attempt == attempts {
+                return outcome;
+            }
+            warn!(
+                attempt,
+                max_attempts = attempts,
+                "flash command failed transiently (timeout / dropped-frame NACK) — \
+                 backing off + retrying"
+            );
+            tokio::time::sleep(Duration::from_millis(
+                u64::from(attempt) * COMMAND_RETRY_BACKOFF_MS,
+            ))
+            .await;
+        }
+        // Unreachable: the loop either returns the outcome on the final
+        // attempt or returns a non-transient outcome early.
+        unreachable!("send_command_retrying loop must return")
     }
 
     /// Broadcast a command (dst = `BROADCAST_NODE_ID`) and collect
@@ -704,6 +769,47 @@ async fn keepalive_tick(
     }
 }
 
+/// Should a command reply (ACK / NACK / DISCOVER) from source node
+/// `src` be accepted by a session whose configured target is
+/// `target`? (FMEA #271 G7.)
+///
+/// - point-to-point session (target = a specific node): only that
+///   node's replies — a foreign node's same-opcode ACK must not be
+///   allowed to satisfy our in-flight command.
+/// - broadcast session (target = `BROADCAST_NODE_ID`, used by
+///   `discover` + its per-node follow-up pings): accept every
+///   responder.
+///
+/// Notifications are NOT gated by this — they're forwarded regardless
+/// of source (consumers filter).
+fn reply_source_accepted(src: u8, target: u8) -> bool {
+    target == BROADCAST_NODE_ID || src == target
+}
+
+/// Should a [`Session::send_command_retrying`] outcome be retried?
+///
+/// Transient = the command provably didn't take effect and a resend
+/// is safe for an idempotent command:
+/// - a local `CommandTimeout` or transport error (FMEA #271 G11), or
+/// - a NACK whose code is the bootloader's "I didn't receive the
+///   whole message" signal — `TRANSPORT_TIMEOUT` / `TRANSPORT_ERROR`
+///   — i.e. a dropped ISO-TP frame on a fast adapter we don't
+///   1 ms-pace (FMEA #271 G12).
+///
+/// A *definitive* NACK (CrcMismatch, BadSession, Unsupported, …) and
+/// the fatal `RxClosed` / `Protocol` errors are NOT transient — the
+/// caller gets them immediately.
+fn is_transient_send_outcome(outcome: &Result<Response, SessionError>) -> bool {
+    matches!(
+        outcome,
+        Err(SessionError::CommandTimeout { .. } | SessionError::Transport(_))
+            | Ok(Response::Nack {
+                code: NackCode::TransportTimeout | NackCode::TransportError,
+                ..
+            })
+    )
+}
+
 /// Background RX task. Owns the only read path into the backend,
 /// decodes ISO-TP frames, routes completed `Response`s onto the
 /// appropriate channel.
@@ -711,10 +817,16 @@ async fn rx_task(
     backend: Arc<dyn CanBackend>,
     reply_tx: mpsc::Sender<Response>,
     notification_tx: broadcast::Sender<Response>,
-    _node_id: u8,
+    node_id: u8,
     shutdown: Arc<AtomicBool>,
 ) {
-    let mut reasm = Reassembler::new();
+    // FMEA #271 G7: one reassembler PER SOURCE NODE, not one shared.
+    // The old single reassembler fed every NodeToHost frame, so a
+    // foreign node's FF/CF on a multi-BL bus could splice into the
+    // target's in-flight multi-frame reply (GET_FW_INFO / OB_READ /
+    // CRC). Keyed by source node, each responder reassembles
+    // independently. Bounded — at most one entry per 4-bit node id.
+    let mut reassemblers: HashMap<u8, Reassembler> = HashMap::new();
     let mut tick_start = Instant::now();
     let tick_ms = move || tick_start.elapsed().as_millis() as u64;
     // Re-borrow because closures that capture mutable state can't
@@ -758,8 +870,11 @@ async fn rx_task(
             continue;
         }
 
+        // For NodeToHost, `id.node` is the responder (source).
+        let src = id.node;
         let payload = frame.payload();
 
+        let reasm = reassemblers.entry(src).or_default();
         match reasm.feed(payload, tick_ms()) {
             Ok(ReassembleOutcome::Ongoing) => continue,
             Ok(ReassembleOutcome::Complete(bytes)) => {
@@ -786,12 +901,31 @@ async fn rx_task(
                 match Response::parse(msg_type, inner_bytes) {
                     Ok(Response::Notify { .. }) => {
                         let response = Response::parse(msg_type, inner_bytes).unwrap();
-                        // Lagged subscribers get RecvError::Lagged on
-                        // their next recv; we don't treat overflow as
-                        // an error here.
+                        // Notifications (log / live-data telemetry) are
+                        // forwarded regardless of source — consumers
+                        // filter — but lagged subscribers get
+                        // RecvError::Lagged on their next recv; we
+                        // don't treat overflow as an error here.
                         let _ = notification_tx.send(response);
                     }
                     Ok(other) => {
+                        // FMEA #271 G7: a command reply (ACK / NACK /
+                        // DISCOVER) only counts if it came from the node
+                        // we're addressing. A foreign node's same-opcode
+                        // ACK must NOT satisfy our in-flight command —
+                        // that's how a wrong board's reply could be read
+                        // as ours. EXCEPTION: a broadcast session
+                        // (target = 0xF, used by `discover` + its
+                        // per-node follow-up pings) legitimately collects
+                        // replies from every node, so don't filter then.
+                        if !reply_source_accepted(src, node_id) {
+                            trace!(
+                                src,
+                                target = node_id,
+                                "session rx: dropping command reply from non-target node"
+                            );
+                            continue;
+                        }
                         if reply_tx.send(other).await.is_err() {
                             // No one is listening — command holder
                             // has dropped. Not fatal; keep running
@@ -813,9 +947,55 @@ async fn rx_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{StubDevice, VirtualBus};
+    use crate::transport::{StubDevice, VirtualBackend, VirtualBus};
 
     const STUB_NODE: u8 = 0x3;
+
+    // FMEA #271 G7 — reply source filter.
+    #[test]
+    fn reply_source_filter_accepts_only_target_or_broadcast() {
+        // Point-to-point: only the addressed node's replies count.
+        assert!(reply_source_accepted(0x3, 0x3));
+        assert!(!reply_source_accepted(0x5, 0x3));
+        assert!(!reply_source_accepted(0x0, 0x3));
+        // Broadcast session (discover): every responder is accepted.
+        assert!(reply_source_accepted(0x1, BROADCAST_NODE_ID));
+        assert!(reply_source_accepted(0x5, BROADCAST_NODE_ID));
+        assert!(reply_source_accepted(0xE, BROADCAST_NODE_ID));
+    }
+
+    // FMEA #271 G11 + G12 — retry transient outcomes only.
+    #[test]
+    fn transient_send_outcome_classification() {
+        let nack = |code| {
+            Ok(Response::Nack {
+                rejected_opcode: 0x10,
+                code,
+            })
+        };
+        // G11: local timeout + transport error.
+        assert!(is_transient_send_outcome(&Err(
+            SessionError::CommandTimeout {
+                timeout: Duration::from_millis(1),
+                adapter_errors_during_wait: 0,
+            }
+        )));
+        assert!(is_transient_send_outcome(&Err(SessionError::Transport(
+            TransportError::Disconnected
+        ))));
+        // G12: the bootloader's dropped-frame NACK codes.
+        assert!(is_transient_send_outcome(&nack(NackCode::TransportTimeout)));
+        assert!(is_transient_send_outcome(&nack(NackCode::TransportError)));
+        // Definitive answers + fatal errors must NOT be retried.
+        assert!(!is_transient_send_outcome(&nack(NackCode::CrcMismatch)));
+        assert!(!is_transient_send_outcome(&nack(NackCode::BadSession)));
+        assert!(!is_transient_send_outcome(&nack(NackCode::Unsupported)));
+        assert!(!is_transient_send_outcome(&Err(SessionError::RxClosed)));
+        assert!(!is_transient_send_outcome(&Ok(Response::Ack {
+            opcode: 0x10,
+            payload: vec![],
+        })));
+    }
 
     fn test_config() -> SessionConfig {
         SessionConfig {
@@ -841,6 +1021,136 @@ mod tests {
         });
         let session = Session::attach(Box::new(host), test_config());
         (session, cancel_tx, handle)
+    }
+
+    // ---- FMEA #271 G11: bounded retry on transient send failures ----
+
+    /// Wraps a `VirtualBackend` and fails the next `fail_remaining`
+    /// `send` calls with a transient transport error, then delegates
+    /// normally. Lets us prove `send_command_retrying` rides out
+    /// dropped frames / adapter hiccups instead of aborting.
+    struct FlakyHost {
+        inner: VirtualBackend,
+        fail_remaining: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl CanBackend for FlakyHost {
+        async fn send(&self, frame: CanFrame) -> crate::transport::Result<()> {
+            // Decrement-if-positive: fail while we still owe failures.
+            let mut cur = self.fail_remaining.load(Ordering::SeqCst);
+            while cur > 0 {
+                match self.fail_remaining.compare_exchange(
+                    cur,
+                    cur - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => {
+                        return Err(TransportError::Other(
+                            "injected transient send failure".into(),
+                        ))
+                    }
+                    Err(actual) => cur = actual,
+                }
+            }
+            self.inner.send(frame).await
+        }
+        async fn recv(&self, timeout: Duration) -> crate::transport::Result<CanFrame> {
+            self.inner.recv(timeout).await
+        }
+        async fn set_bitrate(&self, nominal_bps: u32) -> crate::transport::Result<()> {
+            self.inner.set_bitrate(nominal_bps).await
+        }
+        fn description(&self) -> String {
+            self.inner.description()
+        }
+    }
+
+    async fn spawn_session_and_stub_flaky() -> (
+        Session,
+        Arc<std::sync::atomic::AtomicU32>,
+        oneshot::Sender<()>,
+        JoinHandle<()>,
+    ) {
+        let bus = VirtualBus::new();
+        let host = bus.host_backend();
+        let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+        drop(bus);
+
+        let stub = StubDevice::new(device, STUB_NODE);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _ = stub.run(cancel_rx).await;
+        });
+        let fail_remaining = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let flaky = FlakyHost {
+            inner: host,
+            fail_remaining: Arc::clone(&fail_remaining),
+        };
+        // Long keepalive so a tick can't consume an injected failure
+        // mid-test (keepalive only starts after connect anyway).
+        let config = SessionConfig {
+            keepalive_interval: Duration::from_secs(60),
+            ..test_config()
+        };
+        let session = Session::attach(Box::new(flaky), config);
+        (session, fail_remaining, cancel_tx, handle)
+    }
+
+    #[tokio::test]
+    async fn send_command_retrying_rides_out_transient_send_failures() {
+        let (session, fails, cancel, handle) = spawn_session_and_stub_flaky().await;
+        session.connect().await.unwrap(); // clean connect (fails = 0)
+
+        // Arm: the next 2 sends fail. With 3 attempts, the 3rd send
+        // goes through and the stub NACKs the unknown opcode 0x20.
+        fails.store(2, Ordering::SeqCst);
+        let resp = session.send_command_retrying(&[0x20], 3).await.unwrap();
+        assert!(
+            matches!(
+                resp,
+                Response::Nack {
+                    code: NackCode::Unsupported,
+                    ..
+                }
+            ),
+            "retry should have ridden out 2 drops and got the NACK, got {resp:?}"
+        );
+        assert_eq!(
+            fails.load(Ordering::SeqCst),
+            0,
+            "both injected failures consumed"
+        );
+
+        // Sanity: plain send_command (no retry) fails on a single drop.
+        fails.store(1, Ordering::SeqCst);
+        assert!(
+            session.send_command(&[0x20]).await.is_err(),
+            "non-retrying send must surface the transient failure"
+        );
+
+        session.disconnect().await.unwrap();
+        let _ = cancel.send(());
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn send_command_retrying_gives_up_after_max_attempts() {
+        let (session, fails, cancel, handle) = spawn_session_and_stub_flaky().await;
+        session.connect().await.unwrap();
+
+        // More failures than attempts → exhaust + surface the error.
+        fails.store(5, Ordering::SeqCst);
+        let err = session.send_command_retrying(&[0x20], 3).await;
+        assert!(
+            matches!(err, Err(SessionError::Transport(_))),
+            "should give up with the transport error, got {err:?}"
+        );
+
+        session.disconnect().await.unwrap();
+        let _ = cancel.send(());
+        let _ = handle.await;
     }
 
     #[tokio::test]

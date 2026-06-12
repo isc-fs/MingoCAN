@@ -32,11 +32,11 @@
 //! / `--interface` / `--channel` flags so the existing playbook for
 //! "talk to this board" carries over unchanged.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::Args;
 
 use crate::cli::config::run_nvm_write;
-use crate::cli::GlobalFlags;
+use crate::cli::{confirm_prompt, GlobalFlags};
 
 #[derive(Debug, Args)]
 pub struct ProvisionArgs {
@@ -53,6 +53,11 @@ pub struct ProvisionArgs {
     /// multiple writes (the final one should reset).
     #[arg(long, default_value_t = false)]
     pub no_reset: bool,
+
+    /// Skip the confirmation prompt. Required for non-interactive /
+    /// scripted use (a piped stdin otherwise auto-declines and aborts).
+    #[arg(long = "yes", default_value_t = false)]
+    pub yes: bool,
 }
 
 pub async fn run(args: ProvisionArgs, global: &GlobalFlags) -> Result<()> {
@@ -87,6 +92,38 @@ pub async fn run(args: ProvisionArgs, global: &GlobalFlags) -> Result<()> {
                     args.role
                 );
             }
+        }
+    }
+
+    // FMEA #271 G17: provisioning can mis-target silently. The
+    // session reaches whatever board sits at the *target* node-id
+    // (default 0x3 when --node-id is omitted), which is NOT the role
+    // we're assigning — so `cf provision ams` with no --node-id would
+    // reprovision + reset a co-resident uDV at 0x3 into an id
+    // collision. Echo the target we'll reach + the reset intent, then
+    // gate the write behind a confirmation (mirrors `apply-wrp` /
+    // `nvm format`). `--yes` (and JSON/scripted mode) skips the
+    // prompt; a non-TTY stdin auto-declines so unattended callers
+    // without `--yes` fail closed.
+    let target = global.node_id.unwrap_or(0x3);
+    if !args.yes && !global.json {
+        eprintln!(
+            "About to reach the board at node 0x{target:X}, set its node-id to \
+             0x{node_id:02X}, and {}.",
+            if args.no_reset {
+                "leave it running (no reset — chain another write)"
+            } else {
+                "reset it so the new node-id takes effect"
+            }
+        );
+        if target != node_id {
+            eprintln!(
+                "Note: the board currently at 0x{target:X} will answer — make sure that's \
+                 the one you mean to renumber, not a co-resident node sharing 0x{target:X}."
+            );
+        }
+        if !confirm_prompt("Continue?") {
+            bail!("cancelled");
         }
     }
 

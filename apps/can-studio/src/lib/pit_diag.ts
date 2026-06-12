@@ -1,0 +1,251 @@
+// Typed wrappers + display helpers for the AMS pit-diag observer
+// (Tier 2). Mirrors PitDiagRequest / PitDiagEvent / PitDiagStatus in
+// `apps/can-studio/src-tauri/src/pit_diag.rs`.
+
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+
+import type { InterfaceType } from './types';
+
+// ---- Pack geometry ----
+// Mirrors the AMS_* constants in `can_flasher::pit_diag`. Hardcoded
+// here for the grid layout maths; the values will move to a shared
+// types file once VCU/UDV profiles land in slice 5.
+
+export const AMS_NUM_MODULES = 5;
+export const AMS_CELLS_PER_MODULE = 19;
+export const AMS_NUM_CELLS = AMS_NUM_MODULES * AMS_CELLS_PER_MODULE; // 95
+export const AMS_NTC_PER_MODULE = 40;
+export const AMS_NUM_NTCS = AMS_NUM_MODULES * AMS_NTC_PER_MODULE; // 200
+/** Sentinel value emitted in slots past the last real cell. */
+export const AMS_CELLV_SENTINEL = 0xffff;
+/** Sentinel value for an unwired / shorted NTC channel (INT8_MIN). */
+export const AMS_NTC_SENTINEL = -128;
+/**
+ * Total frames the AMS emits per 1 Hz scan when armed.
+ *
+ * Source of truth: `docs/dbc/ams.dbc` in IFS08-CE-AMS. The diag
+ * block is the contiguous `0x6C0..=0x6C8` (9 frames):
+ *
+ *   58 = 24 cell-V + 25 NTC + 9 diag
+ *      = FSM(0x6C0) + poll(0x6C1) + balance×2(0x6C2/0x6C3)
+ *        + boot(0x6C4) + crash(0x6C5) + fw-id(0x6C6)
+ *        + per-IC PEC×2(0x6C7/0x6C8)
+ *
+ * (Historical note: the host briefly used 53 in PR #263 — built off
+ * the `CAN_MAP.md` prose table, which had skipped `0x6C2..=0x6C6`.
+ * The DBC modelled them all along; AMS #293 fixed the doc table.)
+ *
+ * The view banners a "schema drift suspected" warning if the
+ * observed scan rate diverges from this value by more than ±2.
+ */
+export const AMS_EXPECTED_FRAMES_PER_SCAN = 58;
+/** Monitor ICs in the pack — 2 per module × 5 modules. */
+export const AMS_NUM_ICS = 10;
+
+// ---- Request ----
+
+export interface PitDiagRequest {
+    interface: InterfaceType;
+    channel: string | null;
+    bitrate: number;
+    /**
+     * Which ECU profile to arm. Slice 1 only supports `"ams"`; field
+     * exists from day one so slice 5 doesn't need a wire bump.
+     */
+    profile: 'ams';
+}
+
+// ---- Streamed events ----
+
+/**
+ * Lifecycle status on `pit-diag:status`. Lets the UI render
+ * armed / waiting / failed without parsing per-frame events.
+ */
+export type PitDiagStatus =
+    | { kind: 'armed'; profile: string }
+    | { kind: 'stopped' }
+    | { kind: 'error'; message: string };
+
+/**
+ * Per-frame event on `pit-diag:frame`. Tagged union — discriminator
+ * is `kind`, payload depends on the variant. Mirrors the Rust enum
+ * `PitDiagEvent` field-for-field.
+ */
+export type PitDiagEvent =
+    | { kind: 'ack'; enabled: boolean }
+    | {
+          kind: 'cellVoltage';
+          frameIdx: number;
+          firstCell: number;
+          voltagesMv: [number, number, number, number];
+      }
+    | {
+          kind: 'ntcTemp';
+          frameIdx: number;
+          firstNtc: number;
+          tempsC: [number, number, number, number, number, number, number, number];
+      }
+    | {
+          /** 0x6C0 — FSM extended status. */
+          kind: 'fsmStatus';
+          /** Stringified FSM state from the firmware enum:
+           *  "start" | "precharge" | "transition" | "run" | "charge"
+           *  | "error" | "unknown(0xNN)". */
+          state: string;
+          /** Mode lock as a string: "undecided" | "car" | "charger"
+           *  | "unknown(0xNN)". */
+          modeLocked: string;
+          tsms: boolean;
+          dashChg: boolean;
+          amsOk: boolean;
+          pecErrorTotal: number;
+          /** Latched-ERROR predicate branch (#276): "none" when
+           *  healthy, else "bmsStale" / "cellOverVoltage" / … /
+           *  "fsmError" / "unknown(0xNN)". */
+          faultReason: string;
+          /** Context for faultReason: module index (bmsStale),
+           *  module_online_mask (bmsModuleOffline), or 0. */
+          faultDetail: number;
+      }
+    | {
+          /** 0x6C1 — V-poll latency + T-sweep failure mask. */
+          kind: 'pollTiming';
+          lastVPollMs: number;
+          worstVPollMs: number;
+          tSweepFailMask: number;
+      }
+    | {
+          /** 0x6C2 — balance DCC mask, cells 0..=63. Decimal string
+           *  (full u64 exceeds JS safe-integer range). */
+          kind: 'balanceMaskA';
+          dccLo: string;
+      }
+    | {
+          /** 0x6C3 — balance DCC mask hi (cells 64..=94, low 31 bits)
+           *  + cycle counters. */
+          kind: 'balanceMaskB';
+          dccHi: number;
+          cyclesTotal: number;
+          cyclesActive: number;
+      }
+    | {
+          /** 0x6C4 — boot diagnostics. */
+          kind: 'bootDiag';
+          /** "powerOn" | "canTrigger" | "manual" | "unknown(0x…)". */
+          jumpReason: string;
+          /** 0..7 init milestone; 7 = clean self-exit. */
+          appInitProgress: number;
+          /** Low 24 bits of HAL_FDCAN_Start; 0 = HAL_OK. */
+          fdcan1StartResult: number;
+      }
+    | {
+          /** 0x6C5 — crash post-mortem from the previous boot. */
+          kind: 'postMortem';
+          stackOverflowSeen: boolean;
+          watermarkLowByte: number;
+          taskAddrLo: number;
+          mallocFailedCount: number;
+          /** true when nothing crashed — suppress the banner. */
+          clean: boolean;
+      }
+    | {
+          /** 0x6C6 — firmware identity. */
+          kind: 'fwId';
+          versionMajor: number;
+          versionMinor: number;
+          versionPatch: number;
+          gitHash: number[];
+          blNodeId: number;
+      }
+    | {
+          /** 0x6C7 / 0x6C8 — per-IC PEC error counts. `firstIc` is 0
+           *  for 0x6C7 (ICs 0..7) or 8 for 0x6C8 (ICs 8..9). Only the
+           *  first `valid` entries of `counts` are real ICs. */
+          kind: 'perIcPec';
+          firstIc: number;
+          valid: number;
+          counts: number[];
+      };
+
+// ---- Wrappers ----
+
+export function pitDiagEnable(request: PitDiagRequest): Promise<void> {
+    return invoke<void>('pit_diag_enable', { request });
+}
+
+export function pitDiagDisable(request: PitDiagRequest): Promise<void> {
+    return invoke<void>('pit_diag_disable', { request });
+}
+
+export function onPitDiagFrame(
+    handler: (event: PitDiagEvent) => void,
+): Promise<UnlistenFn> {
+    return listen<PitDiagEvent>('pit-diag:frame', (e) => handler(e.payload));
+}
+
+export function onPitDiagStatus(
+    handler: (status: PitDiagStatus) => void,
+): Promise<UnlistenFn> {
+    return listen<PitDiagStatus>('pit-diag:status', (e) => handler(e.payload));
+}
+
+// ---- Display helpers ----
+
+/**
+ * Snap a cell's index to its (module, slot-within-module) coords.
+ * Module 0 = cells 0..18, module 1 = cells 19..37, etc.
+ */
+export function cellCoords(cellIdx: number): { module: number; slot: number } {
+    return {
+        module: Math.floor(cellIdx / AMS_CELLS_PER_MODULE),
+        slot: cellIdx % AMS_CELLS_PER_MODULE,
+    };
+}
+
+/** Same idea for NTCs. */
+export function ntcCoords(ntcIdx: number): { module: number; slot: number } {
+    return {
+        module: Math.floor(ntcIdx / AMS_NTC_PER_MODULE),
+        slot: ntcIdx % AMS_NTC_PER_MODULE,
+    };
+}
+
+/**
+ * Pack the four-element voltage tuple from a CellVoltage frame back
+ * into the pack-wide array, skipping the sentinel. Returns the
+ * cells actually written (1..=4) so the caller can update its
+ * count of "frames received this scan".
+ */
+export function writeCellsInto(
+    cells: (number | null)[],
+    frame: Extract<PitDiagEvent, { kind: 'cellVoltage' }>,
+): number {
+    let written = 0;
+    for (let i = 0; i < 4; i++) {
+        const cellIdx = frame.firstCell + i;
+        if (cellIdx >= AMS_NUM_CELLS) break;
+        const mv = frame.voltagesMv[i];
+        if (mv === AMS_CELLV_SENTINEL) break;
+        cells[cellIdx] = mv;
+        written += 1;
+    }
+    return written;
+}
+
+/** Same idea for NTCs — no sentinel-by-value, but the unwired
+ *  channels report INT8_MIN, which we map to `null` for the UI. */
+export function writeNtcsInto(
+    ntcs: (number | null)[],
+    frame: Extract<PitDiagEvent, { kind: 'ntcTemp' }>,
+): number {
+    let written = 0;
+    for (let i = 0; i < 8; i++) {
+        const ntcIdx = frame.firstNtc + i;
+        if (ntcIdx >= AMS_NUM_NTCS) break;
+        const c = frame.tempsC[i];
+        ntcs[ntcIdx] = c === AMS_NTC_SENTINEL ? null : c;
+        written += 1;
+    }
+    return written;
+}

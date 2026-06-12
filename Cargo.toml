@@ -9,7 +9,7 @@ members = [
 
 [package]
 name        = "can-flasher"
-version     = "2.4.5"
+version     = "2.5.0"
 edition     = "2021"
 rust-version = "1.95"
 description = "Host-side CAN flasher for the isc-fs STM32 CAN bootloader"
@@ -88,6 +88,11 @@ swd = ["dep:probe-rs", "dep:ureq", "dep:dirs"]
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Test-only: parse the vendored AMS DBC in the pit-diag conformance
+# test so the hardcoded decoder layout is machine-checked against the
+# AMS wire definition. NOT a runtime dependency — the shipped decoder
+# stays hardcoded (fast, typed); this only guards against silent drift.
+can-dbc = "9"
 
 # Linux-only dependencies. SocketCAN talks to the kernel's AF_CAN
 # stack directly; on macOS and Windows the same --interface choices

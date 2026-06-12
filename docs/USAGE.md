@@ -24,13 +24,14 @@ Commands:
   replay      Record or replay a CAN session (testing)
   send-raw    Send one raw CAN frame (app-level reboot-to-BL, bench probes)
   provision   Assign a board's node-id by role name (ecu / ams / udv)
+  pit-diag    AMS pit-diag observer — arm / disarm / stream the diag stream
   adapters    List detected CAN adapters on this machine
 
 Global Options:
   -i, --interface <TYPE>    CAN backend: slcan | socketcan | pcan | vector | virtual
   -c, --channel <CHANNEL>   Adapter channel (format depends on OS and backend)
   -b, --bitrate <BPS>       Nominal CAN bitrate [default: 500000]
-      --node-id <ID>        Target node ID hex or decimal [default: broadcast]
+      --node-id <ID>        Target node ID hex or decimal (required by `flash`; per-command default otherwise)
       --timeout <MS>        Per-frame timeout in ms [default: 500]
       --json                Machine-readable JSON output on stdout
       --verbose             Trace-level logging
@@ -263,6 +264,56 @@ node-id.
 
 ---
 
+## `pit-diag` — AMS observer mode
+
+The AMS firmware can be flipped into a 1 Hz diagnostic stream by
+the host. When armed it broadcasts 58 frames per scan (every cell
+voltage, every NTC temperature, FSM state, V-poll timing, cell
+balancing, boot diagnostics, crash post-mortem, firmware ID, and
+per-IC PEC counts) to whoever's listening. `pit-diag` is the
+terminal-side driver — it sends the arm command, waits for the
+ACK, and decodes the stream.
+
+The MingoCAN app has the same observer rendered as a live
+cell-V grid + temp heatmap; this subcommand is the headless
+equivalent for bench scripts, CI smoke checks, and `jq`-piping.
+
+```bash
+# Arm the stream — the AMS starts emitting 58 frames/sec.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag enable
+# ✓ ams pit-diag armed
+
+# Disarm — stops the stream.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag disable
+# ✓ ams pit-diag disarmed
+
+# Arm + stream + auto-disarm-on-exit. Ctrl-C cleanly disarms.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag stream
+# [+  0.143s] cell  frame= 0 cells[ 0.. 4] = 3400 3408 3413 3424 mV
+# [+  0.156s] cell  frame= 1 cells[ 4.. 8] = 3402 3411 3399 3407 mV
+# [+  0.842s] fsm   state=Run mode=Car tsms=1 dash=1 ams_ok=1 pec=0
+# [+  0.881s] poll  v_last=  12ms v_worst=  41ms tsweep_fail=0x00000000
+#  ...
+
+# Bounded run — stream for 10 seconds, then disarm + exit.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag stream --duration 10
+
+# NDJSON output for scripting. One JSON object per line; pipe
+# through jq for grepping specific fields.
+can-flasher -i slcan -c … --json pit-diag stream --duration 5 \
+    | jq -c 'select(.kind == "cellVoltage" and .firstCell == 0)'
+
+# CI smoke check — fails non-zero if any 1Hz window has wildly
+# wrong frame count (catches firmware drift before bench time).
+can-flasher -i slcan -c … pit-diag stream --duration 5 --strict-scan
+```
+
+Profile flag (`--profile ams`) is hardcoded to AMS today. The
+plugin layer for VCU / UDV streams lands in the slice 5 work on
+[#252](https://github.com/isc-fs/can-flasher/issues/252).
+
+---
+
 ## `replay` — record + read CAN sessions
 
 Passive bus monitor. Writes every frame to a file in
@@ -363,7 +414,35 @@ can-flasher swd-flash bootloader.elf --no-verify
 
 # Leave the chip halted after the write (e.g. for a debugger attach)
 can-flasher swd-flash bootloader.elf --no-reset
+
+# One-shot commissioning: burn the bootloader over SWD, then assign
+# the CAN node-id over CAN — no separate `provision` step. Needs the
+# global CAN flags (the provision half talks over the bus), and for a
+# fresh board address it on broadcast (--node-id 0xF) when it's the
+# only node connected. Role can be a name or a firmware path.
+can-flasher --interface slcan --channel /dev/ttyACM0 --node-id 0xF \
+  swd-flash bootloader.elf --provision ams
 ```
+
+### Two-step commissioning (and why `--provision` folds them into one)
+
+The SWD burn writes **only the bootloader** to the bare chip over
+ST-LINK. The CAN **node-id lives in NVM** and is written *over CAN*
+by the now-running bootloader — a separate transport. So a fresh
+board normally takes two commands:
+
+```bash
+can-flasher swd-flash bootloader.elf                       # 1. burn (SWD)
+can-flasher --interface slcan --channel /dev/ttyACM0 \     # 2. assign id (CAN)
+  --node-id 0xF provision ams
+```
+
+`swd-flash --provision <role>` chains step 2 automatically after a
+successful burn (it waits for the post-flash reset to boot the BL,
+then runs the same node-id write). It's therefore **incompatible with
+`--no-reset`** — the board has to be running the bootloader to be
+provisioned. See [`provision`](#provision--assign-a-node-id-by-role-name)
+for the role→id table and the broadcast-addressing rules.
 
 Platform prerequisites (libusb stack for the ST-LINK USB endpoint)
 are listed in [INSTALL.md § ST-LINK + SWD](INSTALL.md#st-link--swd-optional-feature-swd).

@@ -266,25 +266,27 @@
 
 <div class="view">
     <header>
-        <h2>Live data</h2>
-        <p class="muted">
-            Streaming bootloader telemetry — frames/sec, session age, NACK
-            counts. One panel per (adapter, channel); pressing Start
-            opens a session and subscribes to NOTIFY_LIVE_DATA.
-        </p>
+        <div>
+            <h2>Live data</h2>
+            <p class="muted">
+                Streaming bootloader telemetry — frames/sec, session age,
+                NACK counts. One panel per (adapter, channel); pressing
+                Start opens a session and subscribes to NOTIFY_LIVE_DATA.
+            </p>
+        </div>
     </header>
 
     {#if !adapterReady}
-        <div class="warning">
+        <div class="banner banner-warning">
             <strong>No adapter selected.</strong> Pick one in the
             <em>Adapters</em> view first.
         </div>
     {/if}
 
-    <div class="toolbar">
+    <div class="toolbar card card-tight">
         <button
             type="button"
-            class="primary"
+            class="btn btn-primary"
             disabled={status === 'running' || !adapterReady}
             onclick={start}
         >
@@ -292,20 +294,21 @@
         </button>
         <button
             type="button"
-            class="secondary"
+            class="btn"
             disabled={status !== 'running'}
             onclick={stop}
         >
             Stop
         </button>
-        <button type="button" class="secondary" onclick={clearChart}>
+        <button type="button" class="btn" onclick={clearChart}>
             Clear chart
         </button>
 
         <div class="config">
-            <label>
-                Rate (Hz)
+            <label class="config-field">
+                <span>Rate (Hz)</span>
                 <input
+                    class="input mono"
                     type="number"
                     min="1"
                     max="50"
@@ -313,9 +316,15 @@
                     disabled={status === 'running'}
                 />
             </label>
-            <label>
-                Window (s)
-                <input type="number" min="5" max="600" bind:value={settings.liveData.windowSeconds} />
+            <label class="config-field">
+                <span>Window (s)</span>
+                <input
+                    class="input mono"
+                    type="number"
+                    min="5"
+                    max="600"
+                    bind:value={settings.liveData.windowSeconds}
+                />
             </label>
         </div>
 
@@ -325,24 +334,24 @@
     </div>
 
     {#if error !== null}
-        <div class="error">{error}</div>
+        <div class="banner banner-danger">{error}</div>
     {/if}
 
     {#if snap !== null}
         <div class="indicators">
-            <span class="pill" class:on={snap.sessionActive} class:off={!snap.sessionActive}>
+            <span class="indicator" class:on={snap.sessionActive}>
                 session active
             </span>
-            <span class="pill" class:on={snap.validAppPresent} class:off={!snap.validAppPresent}>
+            <span class="indicator" class:on={snap.validAppPresent}>
                 valid app
             </span>
-            <span class="pill" class:on={snap.wrpProtected} class:off={!snap.wrpProtected}>
+            <span class="indicator" class:on={snap.wrpProtected}>
                 WRP
             </span>
-            <span class="pill" class:on={snap.logStreaming} class:off={!snap.logStreaming}>
+            <span class="indicator" class:on={snap.logStreaming}>
                 log stream
             </span>
-            <span class="pill" class:on={snap.livedataStreaming} class:off={!snap.livedataStreaming}>
+            <span class="indicator" class:on={snap.livedataStreaming}>
                 live-data stream
             </span>
         </div>
@@ -389,150 +398,108 @@
 </div>
 
 <style>
-    .view {
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-        padding: 24px 28px;
-        overflow: auto;
-        height: 100%;
-        min-height: 0;
-        box-sizing: border-box;
-    }
-    h2 { margin: 0; font-size: 1.3rem; }
-    .muted { color: var(--text-muted); }
-    header p { margin: 4px 0 0; font-size: 0.9rem; color: var(--text-muted); }
+    /* Shared chrome (.view, .card, .banner-*, .btn, .input,
+       .muted, .mono) comes from app.css. Local styles cover the
+       toolbar layout, the on/off indicators, the counter grid,
+       and the chart wrapper. */
 
-    .warning {
-        padding: 10px 14px;
-        border: 1px solid var(--accent);
-        background: rgba(242, 178, 51, 0.08);
-        border-radius: 6px;
-    }
-
+    /* Toolbar — controls + config inputs + status text, all on
+       one row with wrap. Builds on .card .card-tight. */
     .toolbar {
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 12px 14px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface);
+        gap: var(--space-3);
         flex-wrap: wrap;
     }
     .toolbar .config {
         display: flex;
-        gap: 12px;
-        margin-left: 4px;
+        gap: var(--space-3);
+        margin-left: var(--space-1);
     }
-    .toolbar .config label {
+    .config-field {
         display: flex;
         align-items: center;
-        gap: 6px;
-        font-size: 0.85rem;
+        gap: var(--space-2);
+        font-size: var(--text-sm);
         color: var(--text-muted);
     }
-    .toolbar .config input {
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 4px 6px;
-        font: inherit;
-        font-family: var(--font-mono);
-        font-size: 0.8rem;
-        width: 70px;
+    .config-field .input {
+        width: 80px;
+        padding: var(--space-1) var(--space-2);
     }
-    .toolbar input:focus { outline: none; border-color: var(--accent); }
 
-    button {
-        appearance: none;
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        font: inherit;
-        padding: 6px 14px;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 0.85rem;
-    }
-    button:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
-    }
-    button.primary {
-        background: var(--accent);
-        color: #1a1a1a;
-        border-color: var(--accent);
-    }
-    button.primary:hover:not(:disabled) {
-        filter: brightness(1.05);
-        color: #1a1a1a;
-    }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-
+    /* Status text pinned to the right edge of the toolbar. Color
+       encodes state — muted by default, green when streaming,
+       danger when errored. */
     .status {
         margin-left: auto;
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
         color: var(--text-muted);
         font-family: var(--font-mono);
     }
-    .status.status-running { color: #4caf50; }
-    .status.status-error { color: var(--error); }
-
-    .error {
-        padding: 10px 14px;
-        border: 1px solid var(--error);
-        color: var(--error);
-        border-radius: 6px;
-        background: rgba(255, 115, 115, 0.08);
+    .status.status-running {
+        color: var(--success);
+    }
+    .status.status-error {
+        color: var(--danger);
     }
 
+    /* Boolean indicators — pill shapes that fill with --success
+       when the corresponding flag is true, plain outlined when
+       false. Quieter than the design system's .pill-success
+       which would be loud for five flags side by side. */
     .indicators {
         display: flex;
         flex-wrap: wrap;
-        gap: 6px;
+        gap: var(--space-2);
     }
-    .pill {
-        padding: 2px 10px;
-        border-radius: 10px;
-        font-size: 0.8rem;
+    .indicator {
+        padding: 2px var(--space-3);
+        border-radius: var(--radius-pill);
+        font-size: var(--text-sm);
         border: 1px solid var(--border);
-    }
-    .pill.on {
-        background: #198a3c;
-        color: #fff;
-        border-color: transparent;
-    }
-    .pill.off {
-        background: transparent;
         color: var(--text-muted);
+        transition:
+            background var(--motion-fast),
+            color var(--motion-fast),
+            border-color var(--motion-fast);
+    }
+    .indicator.on {
+        background: var(--success-soft);
+        color: var(--success);
+        border-color: var(--success);
     }
 
+    /* Counter grid — auto-fit columns so the layout adapts to
+       sidebar-collapse without breaking. Each tile is a flat
+       --surface block (no border) with a small uppercase label
+       above a big mono value. */
     .counters {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        gap: 8px;
+        gap: var(--space-2);
     }
     .counter {
-        padding: 8px 12px;
+        padding: var(--space-3) var(--space-4);
         border: 1px solid var(--border);
-        border-radius: 4px;
+        border-radius: var(--radius-md);
         background: var(--surface);
     }
     .counter .label {
-        font-size: 0.75rem;
+        font-size: var(--text-xs);
         color: var(--text-muted);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
     }
     .counter .value {
         font-family: var(--font-mono);
-        font-size: 1.1rem;
+        font-size: var(--text-xl);
         margin-top: 2px;
     }
-    code { font-family: var(--font-mono); }
+    code {
+        font-family: var(--font-mono);
+    }
 
+    /* Chart wrapper — fixed height so the canvas has somewhere
+       to fill into. */
     .chart-wrap {
         position: relative;
         height: 320px;

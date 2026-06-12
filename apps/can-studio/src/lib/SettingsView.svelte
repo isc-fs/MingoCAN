@@ -18,7 +18,10 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
+    import { getVersion } from '@tauri-apps/api/app';
     import { open as openDialog } from '@tauri-apps/plugin-dialog';
+
+    import { checkForUpdate, downloadInstallAndRelaunch } from './updater';
 
     import { settings, currentDbcKey } from './settings.svelte';
     import type { ViewId } from './stores';
@@ -42,6 +45,40 @@
     );
 
     let canFlasherVersion = $state<string>('…');
+
+    // App version + manual update check (the launch check + banner
+    // live in App.svelte; this is the "check now" path from Settings).
+    let appVersion = $state<string>('…');
+    let updateStatus = $state<
+        | { kind: 'idle' }
+        | { kind: 'checking' }
+        | { kind: 'uptodate' }
+        | { kind: 'available'; version: string }
+        | { kind: 'installing' }
+        | { kind: 'error'; message: string }
+    >({ kind: 'idle' });
+
+    async function runUpdateCheck(): Promise<void> {
+        updateStatus = { kind: 'checking' };
+        const available = await checkForUpdate(); // never throws
+        updateStatus =
+            available === null
+                ? { kind: 'uptodate' }
+                : { kind: 'available', version: available.version };
+    }
+
+    async function installUpdate(): Promise<void> {
+        updateStatus = { kind: 'installing' };
+        try {
+            await downloadInstallAndRelaunch();
+            // App relaunches on success; nothing to do here.
+        } catch (err) {
+            updateStatus = {
+                kind: 'error',
+                message: err instanceof Error ? err.message : String(err),
+            };
+        }
+    }
 
     // DBC state ----------------------------------------------------
     let dbcSummary = $state<DbcSummary | null>(null);
@@ -125,6 +162,11 @@
         } catch {
             canFlasherVersion = 'unknown';
         }
+        try {
+            appVersion = await getVersion();
+        } catch {
+            appVersion = 'unknown';
+        }
         // Cold-start: if a DBC was already loaded by the auto-load
         // effect on app startup, reflect it here.
         try {
@@ -137,30 +179,38 @@
 
 <div class="view">
     <header>
-        <h2>Settings</h2>
-        <p class="muted">
-            Defaults applied to every CAN operation. Changes save
-            automatically to <code>settings.json</code> in the app-config
-            directory.
-        </p>
+        <div>
+            <h2>Settings</h2>
+            <p class="muted">
+                Defaults applied to every CAN operation. Changes save
+                automatically to <code>settings.json</code> in the app-config
+                directory.
+            </p>
+        </div>
     </header>
 
     <!-- Selected adapter — read-only, link to Adapters view -->
     <section class="card">
-        <header>
+        <div class="card-header">
             <h3>Selected adapter</h3>
-            <button type="button" onclick={() => navigateTo('adapters')}>
+            <button
+                type="button"
+                class="btn btn-sm"
+                onclick={() => navigateTo('adapters')}
+            >
                 Change…
             </button>
-        </header>
+        </div>
         {#if adapterSet}
             <div class="adapter">
                 <span class="iface" data-iface={settings.adapter.interface}>
                     {settings.adapter.interface}
                 </span>
                 <div class="adapter-detail">
-                    <div class="label">{settings.adapter.label || '(no label)'}</div>
-                    <code class="channel">
+                    <div class="adapter-label">
+                        {settings.adapter.label || '(no label)'}
+                    </div>
+                    <code class="adapter-channel">
                         {settings.adapter.channel.length > 0
                             ? settings.adapter.channel
                             : '(no channel)'}
@@ -176,17 +226,18 @@
 
     <!-- Bus parameters -->
     <section class="card">
-        <header>
+        <div class="card-header">
             <h3>Bus parameters</h3>
-        </header>
-        <p class="muted small">
+        </div>
+        <p class="muted small section-hint">
             Applied to every flash, discover, diagnose, and live-data call.
         </p>
         <div class="grid-three">
-            <div>
+            <div class="field">
                 <label for="bitrate">Bitrate (bps)</label>
                 <input
                     id="bitrate"
+                    class="input mono"
                     type="number"
                     min="10000"
                     max="1000000"
@@ -194,20 +245,22 @@
                     bind:value={settings.adapter.bitrate}
                 />
             </div>
-            <div>
+            <div class="field">
                 <label for="nodeId">Default node ID (0–0xF)</label>
                 <input
                     id="nodeId"
+                    class="input mono"
                     type="number"
                     min="0"
                     max="15"
                     bind:value={settings.adapter.nodeId}
                 />
             </div>
-            <div>
+            <div class="field">
                 <label for="timeout">Frame timeout (ms)</label>
                 <input
                     id="timeout"
+                    class="input mono"
                     type="number"
                     min="50"
                     max="60000"
@@ -219,28 +272,30 @@
 
     <!-- Live-data defaults -->
     <section class="card">
-        <header>
+        <div class="card-header">
             <h3>Live-data defaults</h3>
-        </header>
-        <p class="muted small">
+        </div>
+        <p class="muted small section-hint">
             Initial values for the Live-data view. Editable per-session there
             too; this is the persisted default.
         </p>
         <div class="grid-two">
-            <div>
+            <div class="field">
                 <label for="rateHz">Rate (Hz)</label>
                 <input
                     id="rateHz"
+                    class="input mono"
                     type="number"
                     min="1"
                     max="50"
                     bind:value={settings.liveData.rateHz}
                 />
             </div>
-            <div>
+            <div class="field">
                 <label for="windowSeconds">Window (s)</label>
                 <input
                     id="windowSeconds"
+                    class="input mono"
                     type="number"
                     min="5"
                     max="600"
@@ -252,10 +307,10 @@
 
     <!-- DBC files (per-adapter) -->
     <section class="card">
-        <header>
+        <div class="card-header">
             <h3>DBC files (per-adapter)</h3>
-        </header>
-        <p class="muted small">
+        </div>
+        <p class="muted small section-hint">
             Pick a <code>.dbc</code> for the current adapter; the bus
             monitor decodes every matching frame into named physical
             signals (visible in the <em>Signals</em> view). Each
@@ -291,9 +346,12 @@
                     {/if}
                 </div>
                 <div class="dbc-actions">
-                    <button type="button" onclick={pickDbc}>Browse…</button>
+                    <button type="button" class="btn btn-sm" onclick={pickDbc}>
+                        Browse…
+                    </button>
                     <button
                         type="button"
+                        class="btn btn-sm"
                         disabled={currentPath === null}
                         onclick={clearDbc}
                     >
@@ -302,22 +360,49 @@
                 </div>
             </div>
             {#if dbcError !== null}
-                <div class="error small">{dbcError}</div>
+                <div class="banner banner-danger">{dbcError}</div>
             {/if}
         {/if}
     </section>
 
     <!-- About -->
     <section class="card">
-        <header>
+        <div class="card-header">
             <h3>About</h3>
-        </header>
+        </div>
         <dl class="about">
             <dt>App</dt>
-            <dd>ISC MingoCAN</dd>
+            <dd>ISC MingoCAN v{appVersion}</dd>
 
             <dt>Bundled <code>can-flasher</code></dt>
             <dd>v{canFlasherVersion}</dd>
+
+            <dt>Updates</dt>
+            <dd>
+                {#if updateStatus.kind === 'available'}
+                    <span>v{updateStatus.version} available.</span>
+                    <button type="button" class="btn btn-sm btn-primary" onclick={installUpdate}>
+                        Install &amp; restart
+                    </button>
+                {:else if updateStatus.kind === 'installing'}
+                    <span class="muted">Installing… the app will restart.</span>
+                {:else if updateStatus.kind === 'error'}
+                    <span class="muted small">Update failed: {updateStatus.message}</span>
+                    <button type="button" class="btn btn-sm" onclick={runUpdateCheck}>Retry</button>
+                {:else}
+                    <button
+                        type="button"
+                        class="btn btn-sm"
+                        onclick={runUpdateCheck}
+                        disabled={updateStatus.kind === 'checking'}
+                    >
+                        {updateStatus.kind === 'checking' ? 'Checking…' : 'Check for updates'}
+                    </button>
+                    {#if updateStatus.kind === 'uptodate'}
+                        <span class="muted small">You're on the latest version.</span>
+                    {/if}
+                {/if}
+            </dd>
 
             <dt>Repository</dt>
             <dd>
@@ -327,7 +412,7 @@
             </dd>
 
             <dt>Settings file</dt>
-            <dd class="settings-path">
+            <dd>
                 <span class="muted small">
                     Stored under the OS app-config directory:
                     <code>com.iscracingteam.can-studio/settings.json</code>
@@ -338,144 +423,109 @@
 </div>
 
 <style>
-    .view {
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        padding: 24px 28px;
-        overflow: auto;
-    }
-    h2 { margin: 0; font-size: 1.3rem; }
-    .muted { color: var(--text-muted); }
-    header .muted { margin: 4px 0 0; font-size: 0.9rem; }
-    .small { font-size: 0.85rem; }
-    code { font-family: var(--font-mono); }
+    /* Shared chrome (.view, .card, .card-header, .banner-*, .btn,
+       .field, .input, .muted, .small, .mono) comes from app.css.
+       Local styles cover: section-hint margin, the per-interface
+       .iface tag (duplicated from AdaptersView since the design
+       system treats backend IDs as functional color coding), the
+       form grids, the About <dl>, and the DBC-row layout. */
 
-    .card {
-        padding: 16px 18px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface);
+    code {
+        font-family: var(--font-mono);
     }
-    .card header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 8px;
-    }
-    .card h3 { margin: 0; font-size: 1rem; }
-    .card > p { margin: 0 0 12px; }
 
-    button {
-        appearance: none;
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        font: inherit;
-        padding: 6px 12px;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 0.85rem;
+    .section-hint {
+        margin: 0 0 var(--space-3);
     }
-    button:hover { border-color: var(--accent); color: var(--accent); }
 
+    /* Selected-adapter row — same iface tag + label/channel pair
+       as AdaptersView. Color-coded backend IDs help operators
+       scan; keeping them functional (not decorative) is why these
+       styles live here instead of being collapsed to a .pill. */
     .adapter {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: var(--space-3);
     }
     .iface {
         font-family: var(--font-mono);
-        font-size: 0.75rem;
+        font-size: var(--text-xs);
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        padding: 2px 8px;
-        border-radius: 3px;
-        background: var(--bg);
+        padding: 2px var(--space-2);
+        border-radius: var(--radius-sm);
+        background: transparent;
         border: 1px solid var(--border);
         color: var(--text-muted);
     }
-    .iface[data-iface='vector'] { color: #ffd166; border-color: rgba(255, 209, 102, 0.4); }
-    .iface[data-iface='pcan']   { color: #06d6a0; border-color: rgba(6, 214, 160, 0.4); }
-    .iface[data-iface='slcan']  { color: #4cc9f0; border-color: rgba(76, 201, 240, 0.4); }
-    .iface[data-iface='socketcan'] { color: #b388ff; border-color: rgba(179, 136, 255, 0.4); }
-    .iface[data-iface='virtual'] { color: var(--text-muted); }
-
-    .adapter-detail .label {
+    .iface[data-iface='vector'] {
+        color: #ffd166;
+        border-color: rgba(255, 209, 102, 0.4);
+    }
+    .iface[data-iface='pcan'] {
+        color: var(--success);
+        border-color: var(--success);
+    }
+    .iface[data-iface='slcan'] {
+        color: var(--info);
+        border-color: var(--info);
+    }
+    .iface[data-iface='socketcan'] {
+        color: #b388ff;
+        border-color: rgba(179, 136, 255, 0.4);
+    }
+    .iface[data-iface='virtual'] {
+        color: var(--text-muted);
+    }
+    .adapter-label {
         font-weight: 500;
     }
-    .adapter-detail .channel {
+    .adapter-channel {
         color: var(--text-muted);
-        font-size: 0.85rem;
+        font-size: var(--text-sm);
     }
 
+    /* Form grids — three-up for bus params, two-up for live-data.
+       Collapse to single column on narrow widths. */
     .grid-three {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
-        gap: 12px;
+        gap: var(--space-3);
     }
     .grid-two {
         display: grid;
         grid-template-columns: repeat(2, 1fr);
-        gap: 12px;
+        gap: var(--space-3);
     }
-    label {
-        display: block;
-        font-size: 0.85rem;
-        color: var(--text-muted);
-        margin-bottom: 4px;
+    @media (max-width: 720px) {
+        .grid-three,
+        .grid-two {
+            grid-template-columns: 1fr;
+        }
     }
-    input[type="number"] {
-        width: 100%;
-        background: var(--bg);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 6px 8px;
-        font: inherit;
-        font-family: var(--font-mono);
-        font-size: 0.85rem;
-        box-sizing: border-box;
-    }
-    input:focus { outline: none; border-color: var(--accent); }
 
-    .about {
-        display: grid;
-        grid-template-columns: max-content 1fr;
-        gap: 6px 16px;
-        margin: 0;
-    }
-    .about dt {
-        color: var(--text-muted);
-        font-size: 0.85rem;
-    }
-    .about dd {
-        margin: 0;
-        font-size: 0.9rem;
-    }
-    .about a { color: var(--accent); }
-    .settings-path { display: flex; align-items: center; }
-
+    /* DBC-row — info on the left (key + path + summary), action
+       buttons on the right. Stacks if the path is long. */
     .dbc-row {
         display: flex;
-        gap: 12px;
+        gap: var(--space-3);
         align-items: flex-start;
-        margin-top: 6px;
     }
     .dbc-info {
         flex: 1;
         min-width: 0;
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: var(--space-1);
     }
     .dbc-key {
-        font-size: 0.78rem;
+        font-size: var(--text-xs);
         color: var(--text-muted);
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
-    .dbc-loaded, .dbc-pending {
+    .dbc-loaded,
+    .dbc-pending {
         display: flex;
         flex-direction: column;
         gap: 2px;
@@ -485,20 +535,30 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        font-size: 0.82rem;
+        font-size: var(--text-sm);
     }
     .dbc-actions {
         display: flex;
-        gap: 6px;
+        gap: var(--space-2);
     }
-    .error.small {
-        margin-top: 8px;
-        padding: 6px 10px;
-        border: 1px solid var(--error);
-        background: rgba(255, 115, 115, 0.08);
-        color: var(--error);
-        border-radius: 4px;
-        font-size: 0.82rem;
+
+    /* About — definition-list table. Compact two-column grid with
+       muted dt + body-text dd. */
+    .about {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: var(--space-2) var(--space-4);
+        margin: 0;
     }
-    .mono { font-family: var(--font-mono); }
+    .about dt {
+        color: var(--text-muted);
+        font-size: var(--text-sm);
+    }
+    .about dd {
+        margin: 0;
+        font-size: var(--text-base);
+    }
+    .about a {
+        color: var(--accent);
+    }
 </style>
