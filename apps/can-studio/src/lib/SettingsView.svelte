@@ -18,7 +18,10 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
+    import { getVersion } from '@tauri-apps/api/app';
     import { open as openDialog } from '@tauri-apps/plugin-dialog';
+
+    import { checkForUpdate, downloadInstallAndRelaunch } from './updater';
 
     import { settings, currentDbcKey } from './settings.svelte';
     import type { ViewId } from './stores';
@@ -42,6 +45,40 @@
     );
 
     let canFlasherVersion = $state<string>('…');
+
+    // App version + manual update check (the launch check + banner
+    // live in App.svelte; this is the "check now" path from Settings).
+    let appVersion = $state<string>('…');
+    let updateStatus = $state<
+        | { kind: 'idle' }
+        | { kind: 'checking' }
+        | { kind: 'uptodate' }
+        | { kind: 'available'; version: string }
+        | { kind: 'installing' }
+        | { kind: 'error'; message: string }
+    >({ kind: 'idle' });
+
+    async function runUpdateCheck(): Promise<void> {
+        updateStatus = { kind: 'checking' };
+        const available = await checkForUpdate(); // never throws
+        updateStatus =
+            available === null
+                ? { kind: 'uptodate' }
+                : { kind: 'available', version: available.version };
+    }
+
+    async function installUpdate(): Promise<void> {
+        updateStatus = { kind: 'installing' };
+        try {
+            await downloadInstallAndRelaunch();
+            // App relaunches on success; nothing to do here.
+        } catch (err) {
+            updateStatus = {
+                kind: 'error',
+                message: err instanceof Error ? err.message : String(err),
+            };
+        }
+    }
 
     // DBC state ----------------------------------------------------
     let dbcSummary = $state<DbcSummary | null>(null);
@@ -124,6 +161,11 @@
             canFlasherVersion = await invoke<string>('can_flasher_version');
         } catch {
             canFlasherVersion = 'unknown';
+        }
+        try {
+            appVersion = await getVersion();
+        } catch {
+            appVersion = 'unknown';
         }
         // Cold-start: if a DBC was already loaded by the auto-load
         // effect on app startup, reflect it here.
@@ -330,10 +372,37 @@
         </div>
         <dl class="about">
             <dt>App</dt>
-            <dd>ISC MingoCAN</dd>
+            <dd>ISC MingoCAN v{appVersion}</dd>
 
             <dt>Bundled <code>can-flasher</code></dt>
             <dd>v{canFlasherVersion}</dd>
+
+            <dt>Updates</dt>
+            <dd>
+                {#if updateStatus.kind === 'available'}
+                    <span>v{updateStatus.version} available.</span>
+                    <button type="button" class="btn btn-sm btn-primary" onclick={installUpdate}>
+                        Install &amp; restart
+                    </button>
+                {:else if updateStatus.kind === 'installing'}
+                    <span class="muted">Installing… the app will restart.</span>
+                {:else if updateStatus.kind === 'error'}
+                    <span class="muted small">Update failed: {updateStatus.message}</span>
+                    <button type="button" class="btn btn-sm" onclick={runUpdateCheck}>Retry</button>
+                {:else}
+                    <button
+                        type="button"
+                        class="btn btn-sm"
+                        onclick={runUpdateCheck}
+                        disabled={updateStatus.kind === 'checking'}
+                    >
+                        {updateStatus.kind === 'checking' ? 'Checking…' : 'Check for updates'}
+                    </button>
+                    {#if updateStatus.kind === 'uptodate'}
+                        <span class="muted small">You're on the latest version.</span>
+                    {/if}
+                {/if}
+            </dd>
 
             <dt>Repository</dt>
             <dd>
