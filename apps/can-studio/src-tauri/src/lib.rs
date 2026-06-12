@@ -53,6 +53,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        // Auto-update: the updater plugin checks the release manifest
+        // + installs signed bundles; the process plugin's relaunch()
+        // restarts into the new version. Both are driven from the
+        // frontend (lib/updater.ts).
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(live_data::LiveDataState::default())
         .manage(bus_monitor::BusMonitorState::default())
         .manage(pit_diag::PitDiagState::default())

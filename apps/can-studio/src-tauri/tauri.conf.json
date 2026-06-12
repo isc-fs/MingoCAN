@@ -32,7 +32,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "dmg", "nsis"],
+    "targets": ["deb", "rpm", "appimage", "dmg", "nsis"],
+    "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "copyright": "Copyright © 2026 ISC Racing Team",
     "shortDescription": "Flash, monitor, and debug CAN messages on STM32 ECUs.",
@@ -47,6 +48,14 @@
     "macOS": {
       "signingIdentity": "-",
       "entitlements": "entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/isc-fs/can-flasher/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_TAURI_SIGNER_GENERATE_PUBLIC_KEY"
     }
   }
 }

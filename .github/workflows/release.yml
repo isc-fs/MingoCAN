@@ -8,7 +8,10 @@ name: Release
 #     only, not raw binary tarballs).
 #   - VS Code extension (.vsix)
 #   - ISC CAN Studio (Tauri desktop installers — .dmg / .deb / .rpm /
-#     .exe (NSIS); AppImage + .msi intentionally excluded)
+#     .AppImage / .exe (NSIS); .msi excluded. AppImage is back so the
+#     in-app auto-updater can self-update on Linux, and updater `.sig`
+#     bundles + a `latest.json` manifest ship alongside — see
+#     docs/UPDATES.md)
 #
 # A single `v*` tag (e.g. `v2.0.0`) triggers all three surfaces to
 # build in parallel and attach their artefacts to one GitHub
@@ -360,10 +363,19 @@ jobs:
       # existing Release (created by `create-release`). Setting
       # `tagName` makes it append to that release instead of
       # creating a sibling — single release page, all bundles.
+      #
+      # With `bundle.createUpdaterArtifacts: true` (tauri.conf.json) +
+      # the TAURI_SIGNING_* env below, it also produces the signed
+      # `.sig` updater bundles and generates + uploads `latest.json`
+      # (the auto-update manifest the app polls). The two secrets MUST
+      # exist before the first tag is cut, or this step fails — see
+      # docs/UPDATES.md for the one-time keypair setup.
       - name: Build + attach to Release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/can-studio
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
