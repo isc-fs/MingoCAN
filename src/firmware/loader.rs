@@ -16,7 +16,9 @@
 
 use std::path::Path;
 
-use object::{Object, ObjectSegment};
+use object::elf::{FileHeader32, PT_LOAD};
+use object::read::elf::{FileHeader, ProgramHeader};
+use object::Endianness;
 
 use super::{
     Image, ImageError, BL_APP_BASE, BL_APP_END, BL_BOOTLOADER_SECTOR_END, BL_FLASH_BASE,
@@ -184,22 +186,41 @@ pub fn load_elf(bytes: &[u8]) -> Result<Image, LoaderError> {
 /// Parse ELF bytes into raw `(addr, data)` segments — no validation,
 /// no compose. Shared by [`load_elf`] (which validates) and the
 /// validation-skipping [`load_unchecked`].
+///
+/// Addresses are each `PT_LOAD`'s **load address** (`p_paddr`, where
+/// the bytes are stored in flash), NOT the virtual address (`p_vaddr`,
+/// where they run). The two differ for `.data`: VMA in RAM (e.g.
+/// `0x20000000`), LMA in flash. A flasher must use the LMA — reading
+/// the VMA put `.data` at a RAM address that `validate_segments`
+/// (correctly) rejected as outside the flash app region. STM32 Cortex-M
+/// firmware is 32-bit ELF, so we parse the program headers directly to
+/// reach `p_paddr` (the generic `ObjectSegment::address` only exposes
+/// the VMA).
 fn elf_segments(bytes: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, LoaderError> {
-    let file = object::File::parse(bytes).map_err(|e| LoaderError::Elf(format!("{e}")))?;
+    let header =
+        FileHeader32::<Endianness>::parse(bytes).map_err(|e| LoaderError::Elf(format!("{e}")))?;
+    let endian = header
+        .endian()
+        .map_err(|e| LoaderError::Elf(format!("{e}")))?;
+    let program_headers = header
+        .program_headers(endian, bytes)
+        .map_err(|e| LoaderError::Elf(format!("{e}")))?;
 
     let mut segments: Vec<(u32, Vec<u8>)> = Vec::new();
-    for seg in file.segments() {
-        // Only segments with an actual payload are interesting — skip
-        // zero-size + memsz-only (BSS-style) segments.
-        let data = seg.data().map_err(|e| LoaderError::Elf(format!("{e}")))?;
+    for ph in program_headers {
+        if ph.p_type(endian) != PT_LOAD {
+            continue;
+        }
+        // File bytes for this segment (`p_offset..p_offset+p_filesz`).
+        // BSS-style segments carry no file data (`p_filesz == 0`) and
+        // contribute nothing to flash — skip them.
+        let data = ph
+            .data(endian, bytes)
+            .map_err(|_| LoaderError::Elf("ELF PT_LOAD data out of file bounds".into()))?;
         if data.is_empty() {
             continue;
         }
-        let addr = seg.address();
-        if addr > u32::MAX as u64 {
-            return Err(LoaderError::AddressOverflow { addr });
-        }
-        segments.push((addr as u32, data.to_vec()));
+        segments.push((ph.p_paddr(endian), data.to_vec()));
     }
     Ok(segments)
 }
@@ -778,6 +799,60 @@ mod tests {
             "a .bin with no base must still error, got {err:?}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- ELF load-address (LMA) vs virtual-address (VMA) ----
+
+    /// Assemble a minimal ELF32-LE with a single PT_LOAD whose virtual
+    /// address is in RAM (like `.data`) but whose load address is in
+    /// flash. `vaddr` / `paddr` let the caller diverge them.
+    fn minimal_elf32(vaddr: u32, paddr: u32, payload: &[u8]) -> Vec<u8> {
+        let mut elf = Vec::new();
+        // ELF header (52 bytes): magic, class=32, data=LE, version.
+        elf.extend_from_slice(&[0x7F, b'E', b'L', b'F', 1, 1, 1, 0]);
+        elf.extend_from_slice(&[0u8; 8]); // EI_PAD
+        elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+        elf.extend_from_slice(&40u16.to_le_bytes()); // e_machine = EM_ARM
+        elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+        elf.extend_from_slice(&paddr.to_le_bytes()); // e_entry
+        elf.extend_from_slice(&52u32.to_le_bytes()); // e_phoff (right after header)
+        elf.extend_from_slice(&0u32.to_le_bytes()); // e_shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+        elf.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
+        elf.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize
+        elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // e_shentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+                                                    // Program header (32 bytes) at offset 52; data follows at 84.
+        elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+        elf.extend_from_slice(&84u32.to_le_bytes()); // p_offset
+        elf.extend_from_slice(&vaddr.to_le_bytes()); // p_vaddr (RAM)
+        elf.extend_from_slice(&paddr.to_le_bytes()); // p_paddr (flash LMA)
+        elf.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // p_filesz
+        elf.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // p_memsz
+        elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = R+X
+        elf.extend_from_slice(&4u32.to_le_bytes()); // p_align
+        elf.extend_from_slice(payload); // segment data at offset 84
+        elf
+    }
+
+    #[test]
+    fn load_elf_uses_load_address_not_virtual_address() {
+        // Regression for the real AMS.elf flash: a `.data`-style
+        // segment runs in RAM (VMA 0x20000000) but is stored in flash
+        // at its LMA. The flasher must place it at the LMA; the old
+        // code read the VMA, and validate_segments (correctly) rejected
+        // the RAM address as outside the flash app region.
+        let elf = minimal_elf32(0x2000_0000, BL_APP_BASE, &[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let segs = elf_segments(&elf).expect("parse");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].0, BL_APP_BASE, "must use the load address (LMA)");
+
+        let img = load_elf(&elf).expect("ELF with RAM VMA / flash LMA must load + validate");
+        assert_eq!(img.base_addr, BL_APP_BASE);
+        assert_eq!(&img.data[..4], &[0xAA, 0xBB, 0xCC, 0xDD]);
     }
 
     // ---- extract_fw_info via a crafted image ----
