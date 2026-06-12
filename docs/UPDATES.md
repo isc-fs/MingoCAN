@@ -38,45 +38,43 @@ Platform self-update support:
 
 The updater signs every bundle with a **minisign keypair** (separate
 from OS code-signing). The private key lives in CI secrets and must
-never be committed. Until this is done, the in-app check no-ops.
+never be committed.
 
-1. **Generate the keypair** (writes a password-protected private key):
+> **Status: configured for v2.5.0.** The keypair was generated, the
+> two secrets below are set on the repo, and the public key is in
+> `tauri.conf.json`. The steps here are kept for **key rotation** or
+> re-setup — you don't need to run them for a normal release.
+
+1. **Generate the keypair** (writes a private key; `-p ''` = no
+   password, `--ci` = non-interactive):
 
    ```sh
    cd apps/can-studio
-   npm run tauri signer generate -- -w ~/.tauri/mingocan-updater.key
+   npx --yes @tauri-apps/cli@^2 signer generate -w ~/.tauri/mingocan-updater.key -p '' --ci
    ```
 
-   It prints a **public key** and writes the private key to that path.
+   It writes the private key to that path and the **public key** to
+   `…key.pub`.
 
-2. **Add two GitHub Actions repo secrets** (Settings → Secrets and
-   variables → Actions):
-   - `TAURI_SIGNING_PRIVATE_KEY` — the full contents of
-     `~/.tauri/mingocan-updater.key`
-   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password you set
+2. **Set two GitHub Actions repo secrets:**
 
-3. **Paste the public key** into `apps/can-studio/src-tauri/tauri.conf.json`:
-
-   ```json
-   "plugins": {
-     "updater": {
-       "endpoints": ["…"],
-       "pubkey": "<paste the public key here>"
-     }
-   }
+   ```sh
+   gh secret set TAURI_SIGNING_PRIVATE_KEY --repo isc-fs/can-flasher < ~/.tauri/mingocan-updater.key
+   printf '' | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo isc-fs/can-flasher   # empty password
    ```
 
-   (It currently holds the placeholder
-   `REPLACE_WITH_TAURI_SIGNER_GENERATE_PUBLIC_KEY`.)
+3. **Put the public key** (`cat ~/.tauri/mingocan-updater.key.pub`)
+   into `apps/can-studio/src-tauri/tauri.conf.json` →
+   `plugins.updater.pubkey`.
 
-After this, the next `v*` tag builds signed updater artifacts and
-uploads `latest.json` to the release automatically
+Every `v*` tag then builds signed updater artifacts and uploads
+`latest.json` to the release automatically
 (`bundle.createUpdaterArtifacts: true` + the `TAURI_SIGNING_*` env in
 `.github/workflows/release.yml`).
 
 > **Hard gate:** once `createUpdaterArtifacts` is on, a release build
-> *fails* if the signing secret is absent. Set the secrets before
-> cutting the next tag.
+> *fails* if the signing secret is absent. (Satisfied for v2.5.0.) If
+> you rotate the key, update both the secret and the `pubkey`.
 
 ## Caveat — unsigned macOS
 
