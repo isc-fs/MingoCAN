@@ -129,7 +129,12 @@
         "iscFs.canFlasherPath": {
           "type": "string",
           "default": "can-flasher",
-          "markdownDescription": "Path to the `can-flasher` binary. Use the bare name `can-flasher` if it's on `$PATH`; otherwise an absolute path."
+          "markdownDescription": "Path to the `can-flasher` binary. Use the bare name `can-flasher` if it's on `$PATH`; otherwise an absolute path. When left at the default and `#iscFs.cliAutoDownload#` is on, the extension prefers a version-matched binary it downloads itself."
+        },
+        "iscFs.cliAutoDownload": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Download a `can-flasher` binary matching this extension's version from the GitHub release and use it, instead of relying on whatever is on `$PATH`. Keeps flashing in lockstep with the extension (the desktop app stays in sync by compiling the same library in). Ignored when `#iscFs.canFlasherPath#` is set to a custom path — that is always honoured. Falls back to `$PATH` when offline or on an unsupported platform."
         },
         "iscFs.interface": {
           "type": "string",

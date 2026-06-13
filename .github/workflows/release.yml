@@ -239,20 +239,27 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
           echo "archive=$stage.zip" >> $env:GITHUB_ENV
 
-      # The CLI is distributed via `cargo install --git … --tag …`,
-      # NOT as a pre-built binary on the Release page (operators
-      # asked for installer packages only — .deb / .rpm / .dmg /
-      # .exe / .msi — not raw binary tarballs). We still build all
-      # four targets every release as a cross-platform compile gate
-      # and keep the archives as 7-day workflow artifacts for
-      # debugging, but they are deliberately NOT attached to the
-      # GitHub Release.
+      # Human operators install the CLI via `cargo install --git …
+      # --tag …`; the Release page leads with the installer packages
+      # (.deb / .rpm / .dmg / .exe), not these raw tarballs. But the
+      # VS Code extension downloads a version-matched `can-flasher`
+      # binary on demand (see editor/vscode/src/cliManager.ts), so the
+      # per-target archives ARE attached to the Release as well — named
+      # `can-flasher-<tag>-<target>.{tar.gz,zip}` for the extension to
+      # fetch. Still kept as workflow artifacts for debugging too.
       - name: Upload as workflow artifact (always)
         uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.target }}
           path: ${{ env.archive }}
           retention-days: 7
+
+      - name: Attach to GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.archive }}
+          fail_on_unmatched_files: true
 
   # ---- VS Code extension --------------------------------------
 
