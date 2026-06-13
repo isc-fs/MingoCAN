@@ -101,7 +101,13 @@
     let idStatsView = $state<IdStat[]>([]);
 
     let totalFrames = $state<number>(0);
-    let droppedFrames = $state<number>(0);
+    // Rows evicted from the *visible* Live-frames buffer once it
+    // exceeds maxRows. This is display-only bookkeeping — NOT frames
+    // lost from the bus: the decoded Signals view, By-ID aggregation,
+    // and capture-to-file all see every frame regardless. (Real RX
+    // overruns would need per-transport driver support, which the
+    // backend doesn't surface yet.)
+    let trimmedFrames = $state<number>(0);
 
     let unlistenFrame: UnlistenFn | null = null;
     let unlistenStatus: UnlistenFn | null = null;
@@ -167,14 +173,22 @@
     });
 
     // Filtered signal schema — case-insensitive substring across
-    // signal name / message name / unit. Touches the values tick so
-    // the table re-renders as values arrive without re-filtering the
-    // (static) schema needlessly.
+    // signal name / message name / unit. Reads the values tick so the
+    // table re-renders as decoded values stream in.
+    //
+    // It MUST return a fresh array every recompute: the live values
+    // live in a plain (non-reactive) Map that the row template reads
+    // via `formatValue`, so the only thing that re-runs the {#each}
+    // (and thus re-reads the Map) is a change in this derived's
+    // identity. Returning the same `schema` reference when the filter
+    // is empty made Svelte 5 treat the derived as unchanged on each
+    // tick — so values stayed at "—" until a tab switch tore down and
+    // rebuilt the block. `.slice()` gives a new reference each tick.
     const filteredSchema = $derived.by(() => {
         // eslint-disable-next-line @typescript-eslint/no-unused-expressions
         sigValuesTick;
         const f = signalFilter.trim().toLowerCase();
-        if (f.length === 0) return schema;
+        if (f.length === 0) return schema.slice();
         return schema.filter(
             (s) =>
                 s.signalName.toLowerCase().includes(f) ||
@@ -273,7 +287,7 @@
             const max = settings.busMonitor.maxRows;
             const next = liveFrames.concat(batch);
             if (next.length > max) {
-                droppedFrames += next.length - max;
+                trimmedFrames += next.length - max;
                 liveFrames = next.slice(next.length - max);
             } else {
                 liveFrames = next;
@@ -423,7 +437,7 @@
         idStatsView = [];
         queued = [];
         totalFrames = 0;
-        droppedFrames = 0;
+        trimmedFrames = 0;
         sigValues.clear();
         sigValuesTick++;
     }
@@ -538,9 +552,12 @@
             </span>
             <span class="stat">frames&nbsp;<strong>{totalFrames}</strong></span>
             <span class="stat">unique&nbsp;IDs&nbsp;<strong>{idStats.size}</strong></span>
-            {#if droppedFrames > 0}
-                <span class="stat dropped" title="Oldest rows trimmed because the buffer exceeded maxRows">
-                    dropped&nbsp;<strong>{droppedFrames}</strong>
+            {#if trimmedFrames > 0 && settings.busMonitor.activeTab === 'live'}
+                <span
+                    class="stat trimmed"
+                    title="Older rows scrolled out of the Live-frames view to stay under maxRows ({settings.busMonitor.maxRows}). Not lost — the Signals decode, By-ID view, and Save… capture all see every frame."
+                >
+                    trimmed&nbsp;<strong>{trimmedFrames}</strong>
                 </span>
             {/if}
             {#if captureActive}
@@ -757,8 +774,10 @@
         color: var(--text);
         font-weight: 600;
     }
-    .stat.dropped strong {
-        color: var(--danger);
+    /* Trimmed = Live-frames scrollback eviction; neutral/muted, not
+       an alarm — it's bookkeeping, not data loss. */
+    .stat.trimmed strong {
+        color: var(--text-muted);
     }
     .stat.capturing strong {
         color: var(--danger);
