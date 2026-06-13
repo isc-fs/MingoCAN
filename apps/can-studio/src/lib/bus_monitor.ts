@@ -39,6 +39,7 @@ export interface BusMonitorFrame {
 export type BusMonitorStatus =
     | { kind: 'started' }
     | { kind: 'stopped' }
+    | { kind: 'disconnected' }
     | { kind: 'error'; message: string };
 
 // ---- Wrappers ----

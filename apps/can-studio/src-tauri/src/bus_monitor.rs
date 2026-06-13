@@ -32,7 +32,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use can_flasher::transport::open_backend;
+use can_flasher::transport::{open_backend, TransportError};
 
 use crate::dbc::{decode, snapshot_lookup, DbcState};
 use crate::flash::parse_interface;
@@ -126,7 +126,14 @@ pub struct BusMonitorFrame {
 pub enum BusMonitorStatus {
     Started,
     Stopped,
-    Error { message: String },
+    /// The adapter went away mid-session (USB unplugged / driver
+    /// unloaded). Distinct from `Error` so the UI can show a calm
+    /// "adapter disconnected" and re-offer Start, rather than a red
+    /// failure.
+    Disconnected,
+    Error {
+        message: String,
+    },
 }
 
 /// Capture-state events — emitted whenever capture starts, stops,
@@ -263,6 +270,17 @@ pub async fn bus_monitor_start(
                                     progress_since_last = 0;
                                 }
                             }
+                        }
+                        Err(TransportError::Disconnected) => {
+                            // The adapter was removed mid-session (its
+                            // reader signalled hardware-gone). Emit a
+                            // calm Disconnected status and stop — the
+                            // UI returns to idle so the operator can
+                            // re-plug and Start again.
+                            warn!("bus_monitor: adapter disconnected; stopping");
+                            let _ = app_for_task
+                                .emit(STATUS_EVENT, &BusMonitorStatus::Disconnected);
+                            return;
                         }
                         Err(err) => {
                             // An empty poll window — no frame arrived

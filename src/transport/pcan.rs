@@ -80,6 +80,12 @@ const PCAN_BAUD_10K: u16 = 0x672F;
 // Status / return codes (bitmasks).
 const PCAN_ERROR_OK: u32 = 0x00000;
 const PCAN_ERROR_QRCVEMPTY: u32 = 0x00020;
+// Hardware-gone codes: the channel's adapter is no longer usable
+// (USB unplugged, driver unloaded). Distinct from the transient bus
+// states (BUSLIGHT/BUSHEAVY/BUSOFF) which recover on their own — these
+// mean "stop reading, the device is gone".
+const PCAN_ERROR_NODRIVER: u32 = 0x00200;
+const PCAN_ERROR_ILLHW: u32 = 0x01400;
 
 // Message-type byte for 11-bit standard data frames.
 const PCAN_MESSAGE_STANDARD: u8 = 0x00;
@@ -459,6 +465,21 @@ fn reader_loop(
             PCAN_ERROR_QRCVEMPTY => {
                 // No message — park briefly so we don't spin a core.
                 thread::sleep(RX_POLL_INTERVAL);
+            }
+            PCAN_ERROR_ILLHW | PCAN_ERROR_NODRIVER => {
+                // The adapter is gone (USB unplugged / driver
+                // unloaded). Stop the reader: returning drops `tx`, so
+                // the async `recv()` resolves to `Ok(None)` →
+                // `TransportError::Disconnected`, which the caller
+                // surfaces as a clean "adapter disconnected" instead
+                // of spinning here re-calling into a driver whose
+                // device just vanished.
+                warn!(
+                    code = format!("0x{rc:05X}"),
+                    text = %api.error_text(rc),
+                    "pcan reader: adapter removed/unavailable; stopping reader"
+                );
+                return;
             }
             other => {
                 warn!(
