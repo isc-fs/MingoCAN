@@ -173,14 +173,22 @@
     });
 
     // Filtered signal schema — case-insensitive substring across
-    // signal name / message name / unit. Touches the values tick so
-    // the table re-renders as values arrive without re-filtering the
-    // (static) schema needlessly.
+    // signal name / message name / unit. Reads the values tick so the
+    // table re-renders as decoded values stream in.
+    //
+    // It MUST return a fresh array every recompute: the live values
+    // live in a plain (non-reactive) Map that the row template reads
+    // via `formatValue`, so the only thing that re-runs the {#each}
+    // (and thus re-reads the Map) is a change in this derived's
+    // identity. Returning the same `schema` reference when the filter
+    // is empty made Svelte 5 treat the derived as unchanged on each
+    // tick — so values stayed at "—" until a tab switch tore down and
+    // rebuilt the block. `.slice()` gives a new reference each tick.
     const filteredSchema = $derived.by(() => {
         // eslint-disable-next-line @typescript-eslint/no-unused-expressions
         sigValuesTick;
         const f = signalFilter.trim().toLowerCase();
-        if (f.length === 0) return schema;
+        if (f.length === 0) return schema.slice();
         return schema.filter(
             (s) =>
                 s.signalName.toLowerCase().includes(f) ||
