@@ -63,8 +63,10 @@ export interface BusMonitorSettings {
     /** Max rows to retain in the Live frames buffer before dropping
      *  the oldest. Keeps the DOM bounded under heavy traffic. */
     maxRows: number;
-    /** Which tab to land on after a restart. */
-    activeTab: 'live' | 'byId';
+    /** Which view mode to land on after a restart. `signals` is the
+     *  DBC-decoded table (the default); `byId` / `live` are the raw
+     *  frame views. */
+    activeTab: 'signals' | 'live' | 'byId';
 }
 
 export interface DbcSettings {
@@ -116,7 +118,7 @@ export function defaultSettings(): Settings {
         busMonitor: {
             idFilter: '',
             maxRows: 5000,
-            activeTab: 'byId',
+            activeTab: 'signals',
         },
         dbc: {
             paths: {},
@@ -223,9 +225,10 @@ export function registerDbcAutoloadEffect(
                 await handlers.load(path);
             } catch (err) {
                 // Auto-load failures are surfaced via the
-                // `dbc:status` event the SignalsView listens to; we
-                // intentionally don't bubble them up here because
-                // there's no view to render them in at app root.
+                // `dbc:status` event the Bus monitor's Signals mode
+                // listens to; we intentionally don't bubble them up
+                // here because there's no view to render them at app
+                // root.
                 if (gen === dbcLoadGen) {
                     console.warn('DBC auto-load failed:', err);
                 }

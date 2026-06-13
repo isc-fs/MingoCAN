@@ -11,16 +11,27 @@
         row tracks count + rolling Hz + latest data + last-seen
         timestamp. The "what's actually on this bus?" view.
 
-    Both modes honour an ID filter (comma-separated hex prefixes,
-    "0x" optional). Pause stops appending to the visible buffers
-    but keeps the backend stream running — resume just starts
-    showing new frames again, no reconnection.
+    Three view modes, toggled by the tab strip:
+
+      - "Signals"     — the DBC-decoded table (default). One row per
+        signal defined in the loaded DBC, with its live physical
+        value. Needs a DBC loaded (Settings → DBC) and the monitor
+        running for live values; shows the schema with placeholder
+        values otherwise.
+      - "By ID"       — raw aggregated rows, one per unique ID.
+      - "Live frames" — raw candump-style scrolling log.
+
+    The "By ID" / "Live frames" raw modes honour an ID filter
+    (comma-separated hex prefixes, "0x" optional). Pause stops
+    appending to the visible buffers but keeps the backend stream
+    running — resume just starts showing new frames again, no
+    reconnection.
 
     Adapter selection comes from the central `settings.adapter`
-    store (same as Flash / Diagnostics / Live data).
+    store (same as Flash / Diagnostics).
 -->
 <script lang="ts">
-    import { onDestroy } from 'svelte';
+    import { onDestroy, onMount } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
     import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 
@@ -38,6 +49,14 @@
         type BusMonitorFrame,
         type BusMonitorRequest,
     } from './bus_monitor';
+    import {
+        getDbcSignals,
+        getDbcStatus,
+        onDbcStatus,
+        onDecodedSignals,
+        type DbcSummary,
+        type SignalSchema,
+    } from './dbc';
     import { settings } from './settings.svelte';
 
     // ---- Adapter gate ----
@@ -95,6 +114,83 @@
     let capturePath = $state<string | null>(null);
     let captureFrames = $state<number>(0);
     let captureError = $state<string | null>(null);
+
+    // ---- DBC decode (Signals mode) ----
+    //
+    // The decoded-signals stream is emitted by the same backend
+    // monitor when a DBC is loaded. We subscribe persistently (on
+    // mount, not on Start) so the schema table is visible the moment
+    // a DBC is loaded; live values flow only while the monitor runs.
+    let dbcSummary = $state<DbcSummary | null>(null);
+    let schema = $state<SignalSchema[]>([]);
+    // Live values keyed by signalKey. Plain Map for fast point
+    // updates; promoted to a render tick via rAF so we don't re-render
+    // the table on every incoming signal.
+    const sigValues = new Map<string, number>();
+    let sigValuesTick = $state<number>(0);
+    let signalFilter = $state<string>('');
+    let unlistenDbcStatus: UnlistenFn | null = null;
+    let unlistenDecoded: UnlistenFn | null = null;
+    let sigRafPending = false;
+
+    onMount(async () => {
+        unlistenDbcStatus = await onDbcStatus(async (evt) => {
+            if (evt.kind === 'loaded') {
+                dbcSummary = {
+                    path: evt.path,
+                    messageCount: evt.messageCount,
+                    signalCount: evt.signalCount,
+                };
+                schema = await getDbcSignals();
+                sigValues.clear();
+                sigValuesTick++;
+            } else if (evt.kind === 'unloaded') {
+                dbcSummary = null;
+                schema = [];
+                sigValues.clear();
+                sigValuesTick++;
+            }
+        });
+        unlistenDecoded = await onDecodedSignals((decoded) => {
+            for (const sig of decoded) sigValues.set(sig.signalKey, sig.value);
+            if (!sigRafPending) {
+                sigRafPending = true;
+                requestAnimationFrame(() => {
+                    sigRafPending = false;
+                    sigValuesTick++;
+                });
+            }
+        });
+        // Cold-start: reflect a DBC already loaded before mount.
+        dbcSummary = await getDbcStatus();
+        if (dbcSummary !== null) schema = await getDbcSignals();
+    });
+
+    // Filtered signal schema — case-insensitive substring across
+    // signal name / message name / unit. Touches the values tick so
+    // the table re-renders as values arrive without re-filtering the
+    // (static) schema needlessly.
+    const filteredSchema = $derived.by(() => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+        sigValuesTick;
+        const f = signalFilter.trim().toLowerCase();
+        if (f.length === 0) return schema;
+        return schema.filter(
+            (s) =>
+                s.signalName.toLowerCase().includes(f) ||
+                s.messageName.toLowerCase().includes(f) ||
+                s.unit.toLowerCase().includes(f),
+        );
+    });
+
+    function formatValue(key: string): string {
+        const v = sigValues.get(key);
+        if (v === undefined) return '—';
+        if (Math.abs(v) >= 1000) return v.toFixed(0);
+        if (Math.abs(v) >= 10) return v.toFixed(1);
+        if (Math.abs(v) >= 1) return v.toFixed(2);
+        return v.toFixed(4);
+    }
 
     // ---- ID filter ----
 
@@ -328,9 +424,13 @@
         queued = [];
         totalFrames = 0;
         droppedFrames = 0;
+        sigValues.clear();
+        sigValuesTick++;
     }
 
     onDestroy(async () => {
+        if (unlistenDbcStatus !== null) unlistenDbcStatus();
+        if (unlistenDecoded !== null) unlistenDecoded();
         if (status !== 'idle') await stop();
     });
 </script>
@@ -340,10 +440,11 @@
         <div>
             <h2>Bus monitor</h2>
             <p class="muted">
-                Live capture of every frame on the selected CAN bus.
-                Two views: <em>By&nbsp;ID</em> for the at-a-glance picture
-                (one row per unique ID, rolling Hz, latest payload) and
-                <em>Live frames</em> for the candump-style scrolling log.
+                Live capture of the selected CAN bus. Defaults to
+                <em>Signals</em> — the DBC-decoded table of named values
+                (load a DBC in <em>Settings&nbsp;→&nbsp;DBC&nbsp;files</em>).
+                Toggle to <em>By&nbsp;ID</em> or <em>Live&nbsp;frames</em> for
+                the raw view of an undocumented bus.
             </p>
         </div>
     </header>
@@ -409,14 +510,25 @@
         </div>
 
         <div class="filter">
-            <label for="idfilter">Filter by ID</label>
-            <input
-                id="idfilter"
-                class="input mono"
-                type="text"
-                placeholder="e.g. 0x1A, 0x200"
-                bind:value={settings.busMonitor.idFilter}
-            />
+            {#if settings.busMonitor.activeTab === 'signals'}
+                <label for="sigfilter">Filter</label>
+                <input
+                    id="sigfilter"
+                    class="input mono"
+                    type="text"
+                    placeholder="signal / message / unit"
+                    bind:value={signalFilter}
+                />
+            {:else}
+                <label for="idfilter">Filter by ID</label>
+                <input
+                    id="idfilter"
+                    class="input mono"
+                    type="text"
+                    placeholder="e.g. 0x1A, 0x200"
+                    bind:value={settings.busMonitor.idFilter}
+                />
+            {/if}
         </div>
 
         <div class="stats">
@@ -452,6 +564,14 @@
         <button
             type="button"
             class="tab"
+            class:active={settings.busMonitor.activeTab === 'signals'}
+            onclick={() => (settings.busMonitor.activeTab = 'signals')}
+        >
+            Signals ({schema.length})
+        </button>
+        <button
+            type="button"
+            class="tab"
             class:active={settings.busMonitor.activeTab === 'byId'}
             onclick={() => (settings.busMonitor.activeTab = 'byId')}
         >
@@ -467,7 +587,59 @@
         </button>
     </div>
 
-    {#if settings.busMonitor.activeTab === 'byId'}
+    {#if settings.busMonitor.activeTab === 'signals'}
+        {#if dbcSummary === null}
+            <div class="empty-state">
+                <strong>No DBC loaded for this adapter.</strong>
+                <p>
+                    Pick a <code>.dbc</code> file in
+                    <em>Settings&nbsp;→&nbsp;DBC&nbsp;files</em> and switch
+                    back here. The signal list populates the moment a DBC
+                    is loaded; live values stream in once you click
+                    <strong>Start</strong>. To watch an undocumented bus,
+                    use the <em>By&nbsp;ID</em> or <em>Live&nbsp;frames</em>
+                    tabs instead.
+                </p>
+            </div>
+        {:else}
+            <div class="table-wrap">
+                <table class="signal-table">
+                    <thead>
+                        <tr>
+                            <th class="col-message">Message</th>
+                            <th class="col-name">Signal</th>
+                            <th class="col-value">Value</th>
+                            <th class="col-unit">Unit</th>
+                            <th class="col-range">Range</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {#each filteredSchema as sig (sig.signalKey)}
+                            <tr class:has-value={sigValues.has(sig.signalKey)}>
+                                <td class="col-message mono">
+                                    <span class="msg-name">{sig.messageName}</span>
+                                    <span class="msg-id mono">0x{sig.messageId.toString(16).toUpperCase().padStart(3, '0')}</span>
+                                </td>
+                                <td class="col-name">{sig.signalName}</td>
+                                <td class="col-value mono">{formatValue(sig.signalKey)}</td>
+                                <td class="col-unit">{sig.unit}</td>
+                                <td class="col-range mono">{sig.min}–{sig.max}</td>
+                            </tr>
+                        {/each}
+                        {#if filteredSchema.length === 0}
+                            <tr>
+                                <td colspan="5" class="empty">
+                                    {signalFilter.length > 0
+                                        ? 'No signals match the filter.'
+                                        : 'DBC loaded but has no signals.'}
+                                </td>
+                            </tr>
+                        {/if}
+                    </tbody>
+                </table>
+            </div>
+        {/if}
+    {:else if settings.busMonitor.activeTab === 'byId'}
         <div class="table-wrap">
             <table class="frame-table by-id">
                 <thead>
@@ -720,5 +892,89 @@
         padding: var(--space-5);
         text-align: center;
         color: var(--text-muted);
+    }
+
+    /* ---- Signals (decoded) mode ---- */
+
+    /* Empty-state — shown in Signals mode when no DBC is loaded.
+       Dashed border signals "no data here yet, point at a DBC". */
+    .empty-state {
+        padding: var(--space-5);
+        border: 1px dashed var(--border-strong);
+        background: var(--surface);
+        border-radius: var(--radius-lg);
+        color: var(--text-muted);
+    }
+    .empty-state strong {
+        color: var(--text);
+    }
+    .empty-state p {
+        margin: var(--space-2) 0 0;
+    }
+    .empty-state code {
+        font-family: var(--font-mono);
+        padding: 1px var(--space-1);
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: var(--radius-sm);
+    }
+
+    /* Decoded-signal table — shares .table-wrap chrome with the raw
+       frame tables; the column layout is signal-specific. */
+    .signal-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: var(--text-sm);
+    }
+    .signal-table thead {
+        position: sticky;
+        top: 0;
+        background: var(--surface);
+        z-index: 1;
+    }
+    .signal-table th,
+    .signal-table td {
+        padding: var(--space-2) var(--space-3);
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+    }
+    .signal-table th {
+        font-weight: 500;
+        font-size: var(--text-xs);
+        color: var(--text-muted);
+    }
+    .col-message {
+        width: 180px;
+        display: flex;
+        gap: var(--space-2);
+        align-items: baseline;
+    }
+    .col-message .msg-name {
+        font-weight: 500;
+    }
+    .col-message .msg-id {
+        color: var(--text-muted);
+        font-size: var(--text-xs);
+    }
+    .col-name {
+        width: 220px;
+    }
+    .col-value {
+        width: 100px;
+        text-align: right;
+        color: var(--text-muted);
+    }
+    /* Live row — green value cell once this signal has streamed at
+       least once during the current monitor session. */
+    tr.has-value .col-value {
+        color: var(--success);
+        font-weight: 600;
+    }
+    .col-unit {
+        width: 80px;
+        color: var(--text-muted);
+    }
+    .col-range {
+        color: var(--text-muted);
+        font-size: var(--text-xs);
     }
 </style>
