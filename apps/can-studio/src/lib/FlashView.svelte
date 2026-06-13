@@ -9,14 +9,10 @@
 <script lang="ts">
     import { onDestroy, tick } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
-    import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
     import {
         onFlashEvent,
-        readCmakePresets,
-        runBuildOnly,
         runFlash,
-        type CmakePresetInfo,
         type FlashEvent,
         type FlashRequest,
         type JsonReport,
@@ -28,37 +24,21 @@
     } from './provision';
     import { settings } from './settings.svelte';
 
-    // Static fallback templates — shown alongside any CMake presets
-    // we discover, so projects without a CMakePresets.json still
-    // get one-click fills for the most common build systems.
-    interface BuildTemplate {
-        label: string;
-        command: string;
-        note: string;
+    // The Flash tab exposes exactly one build choice — Release vs.
+    // Debug. The build command, working directory, and artifact path
+    // are "set once" in Settings; each may contain a `{profile}`
+    // placeholder we substitute with the chosen profile here.
+    //
+    // CMake's `--config` wants a capitalized name (`Release`/`Debug`),
+    // and multi-config generators nest their output under the same
+    // capitalized directory, so we substitute the capitalized form
+    // into both the command and the artifact path.
+    function profileLabel(): string {
+        return settings.flash.buildProfile === 'debug' ? 'Debug' : 'Release';
     }
-    const STATIC_TEMPLATES: BuildTemplate[] = [
-        {
-            label: 'CMake out-of-tree (configure + build)',
-            command: 'cmake -S . -B build && cmake --build build',
-            note: 'Configures into ./build and compiles. Needs a toolchain file passed via -D… for cross-compiling.',
-        },
-        {
-            label: 'CMake out-of-tree with arm-none-eabi toolchain',
-            command:
-                'cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake && cmake --build build',
-            note: 'STM32CubeMX-style: points CMake at the bundled ARM GCC toolchain file before configuring.',
-        },
-        {
-            label: 'Plain Make',
-            command: 'make',
-            note: "For projects with a top-level Makefile (no CMake).",
-        },
-        {
-            label: 'Zephyr west build',
-            command: 'west build -t flash-elf',
-            note: 'Zephyr RTOS projects driven by the west meta-tool.',
-        },
-    ];
+    function applyProfile(text: string): string {
+        return text.replaceAll('{profile}', profileLabel());
+    }
 
     const adapterReady = $derived(
         settings.adapter.interface !== null &&
@@ -126,77 +106,6 @@
         | { kind: 'error'; message: string }
     >({ kind: 'idle' });
 
-    // CMake build presets discovered from <cwd>/CMakePresets.json,
-    // refreshed whenever the build cwd changes. Empty when there's
-    // no presets file (or it's invalid) — the templates dropdown
-    // still shows the static fallback list.
-    let cmakePresets = $state<CmakePresetInfo[]>([]);
-    let templatesOpen = $state<boolean>(false);
-
-    // Run the discovery whenever build cwd changes. Debounced via a
-    // microtask so rapid input doesn't spam the backend; cancellable
-    // via a generation counter so a stale response can't clobber a
-    // fresh one.
-    let presetsGen = 0;
-    $effect(() => {
-        const cwd = settings.flash.buildCwd.trim();
-        const gen = ++presetsGen;
-        if (cwd.length === 0) {
-            cmakePresets = [];
-            return;
-        }
-        readCmakePresets(cwd)
-            .then((list) => {
-                if (gen === presetsGen) cmakePresets = list;
-            })
-            .catch(() => {
-                if (gen === presetsGen) cmakePresets = [];
-            });
-    });
-
-    function pickTemplate(template: BuildTemplate): void {
-        settings.flash.buildCommand = template.command;
-        templatesOpen = false;
-    }
-
-    function pickPreset(preset: CmakePresetInfo): void {
-        settings.flash.buildCommand = preset.command;
-        if (
-            preset.artifactHint !== null &&
-            settings.flash.artifactPath.trim().length === 0
-        ) {
-            // The hint is a directory (the configure preset's
-            // binaryDir). Combine it with the cwd basename — the
-            // STM32CubeMX/CMake convention is `<binaryDir>/<project>.elf`,
-            // and we still don't have an authoritative way to know
-            // the .elf name without compiling. Operators can fix it
-            // post-build via the auto-fill in the build-only path.
-            const cwd = settings.flash.buildCwd.trim().replace(/\/+$/, '');
-            const sep = cwd.includes('\\') ? '\\' : '/';
-            const basename = cwd.split(sep).pop() ?? '';
-            if (basename.length > 0) {
-                const dir = preset.artifactHint.replace(/[\\/]+$/, '');
-                settings.flash.artifactPath = `${dir}${sep}${basename}.elf`;
-            }
-        }
-        templatesOpen = false;
-    }
-
-    // Close the dropdown when clicking anywhere outside it. Bound
-    // to window so we don't have to thread refs through children.
-    function onWindowClick(e: MouseEvent): void {
-        if (!templatesOpen) return;
-        const target = e.target as HTMLElement | null;
-        if (target?.closest('.templates-dropdown') !== null) return;
-        if (target?.closest('.templates-trigger') !== null) return;
-        templatesOpen = false;
-    }
-    $effect(() => {
-        if (typeof window === 'undefined') return;
-        window.addEventListener('click', onWindowClick);
-        return () => window.removeEventListener('click', onWindowClick);
-    });
-
     let unlisten: UnlistenFn | null = null;
 
     // Log scroll behaviour — terminal-style follow-tail. When the
@@ -225,54 +134,20 @@
         followTail = true;
     }
 
-    // STM32-CMake convention: out-of-tree build under <cwd>/build/,
-    // with the .elf named after the CMake `project()` directive,
-    // which by convention matches the project root's basename. We
-    // can't introspect CMakeLists.txt from here, so we guess from
-    // the cwd basename — operators can override by typing.
-    function guessArtifactFromCwd(cwd: string): string {
-        const trimmed = cwd.trim().replace(/\/+$/, '');
-        if (trimmed.length === 0) return '';
-        const sep = trimmed.includes('\\') ? '\\' : '/';
-        const basename = trimmed.split(sep).pop() ?? '';
-        if (basename.length === 0) return '';
-        return `${trimmed}${sep}build${sep}${basename}.elf`;
-    }
-
-    // For "Build & Flash" the artifact only needs to exist *after*
-    // the build step (it's an output, not an input). If the user
-    // hasn't typed one but has a build cwd, derive a sensible
-    // default and stash it in settings — they can fix it after the
-    // first build if our guess was wrong.
-    function ensureArtifactPath(): string {
-        const current = settings.flash.artifactPath.trim();
-        if (current.length > 0) return current;
-        const derived = guessArtifactFromCwd(settings.flash.buildCwd);
-        if (derived.length > 0) {
-            settings.flash.artifactPath = derived;
-            return derived;
-        }
-        return '';
-    }
-
     async function start(opts: { skipBuild: boolean }): Promise<void> {
         if (running) return;
         if (!adapterReady) {
             error = 'Pick an adapter in the Adapters view first.';
             return;
         }
-        // For "Flash (skip build)" the artifact must exist already.
-        // For "Build & Flash" we can derive an expected path from
-        // the build cwd, since the build will materialise it.
-        const artifactPath = opts.skipBuild
-            ? settings.flash.artifactPath.trim()
-            : ensureArtifactPath();
-        if (artifactPath.length === 0) {
-            error = opts.skipBuild
-                ? 'Set a firmware artifact path first.'
-                : 'Set a firmware artifact path (or a build working directory so we can derive one).';
+        // Artifact + build command live in Settings; here we only
+        // resolve the chosen profile into the `{profile}` placeholder.
+        const artifactRaw = settings.flash.artifactPath.trim();
+        if (artifactRaw.length === 0) {
+            error = 'Set a firmware artifact path in Settings first.';
             return;
         }
+        const artifactPath = applyProfile(artifactRaw);
 
         running = true;
         resetLog();
@@ -312,7 +187,7 @@
             const buildCmd = opts.skipBuild
                 ? null
                 : settings.flash.buildCommand.trim().length > 0
-                    ? settings.flash.buildCommand
+                    ? applyProfile(settings.flash.buildCommand)
                     : null;
             const buildCwd =
                 settings.flash.buildCwd.trim().length > 0
@@ -390,58 +265,6 @@
         }
     }
 
-    // Build-only — no adapter required, no firmware load, no flash.
-    // Designed for the bootstrap case where `build/` doesn't exist
-    // yet and the operator needs to run the configure+compile step
-    // once before there's any .elf to point Flash at.
-    async function buildOnly(): Promise<void> {
-        if (running) return;
-        const cmd = settings.flash.buildCommand.trim();
-        if (cmd.length === 0) {
-            error = 'Set a build command first.';
-            return;
-        }
-
-        running = true;
-        resetLog();
-        progressMessage = 'starting build…';
-        result = null;
-        error = null;
-        lastOutcome = null;
-
-        unlisten = await onFlashEvent((event) => {
-            log = [...log, formatLogLine(event)];
-            void maybeFollowTail();
-        });
-
-        try {
-            const buildCwd =
-                settings.flash.buildCwd.trim().length > 0
-                    ? settings.flash.buildCwd
-                    : null;
-            await runBuildOnly(cmd, buildCwd);
-            progressMessage = 'build done';
-            lastOutcome = 'success';
-            // Best-effort: if the operator hasn't pointed Flash at
-            // an artifact yet, derive one from the cwd so the next
-            // click on Build & Flash / Flash skip-build finds it.
-            if (settings.flash.artifactPath.trim().length === 0) {
-                const derived = guessArtifactFromCwd(settings.flash.buildCwd);
-                if (derived.length > 0) settings.flash.artifactPath = derived;
-            }
-        } catch (err) {
-            error = err instanceof Error ? err.message : String(err);
-            progressMessage = 'failed';
-            lastOutcome = 'failure';
-        } finally {
-            running = false;
-            if (unlisten !== null) {
-                unlisten();
-                unlisten = null;
-            }
-        }
-    }
-
     onDestroy(() => {
         if (unlisten !== null) unlisten();
     });
@@ -489,57 +312,6 @@
         }
     }
 
-    // Best-effort: when the user has already typed a path into
-    // the field, seed the picker there so they don't have to
-    // re-navigate the tree from $HOME every time.
-    function defaultPathForArtifact(): string | undefined {
-        const a = settings.flash.artifactPath.trim();
-        if (a.length > 0) return a;
-        const cwd = settings.flash.buildCwd.trim();
-        return cwd.length > 0 ? cwd : undefined;
-    }
-
-    function defaultPathForBuildCwd(): string | undefined {
-        const cwd = settings.flash.buildCwd.trim();
-        if (cwd.length > 0) return cwd;
-        const a = settings.flash.artifactPath.trim();
-        return a.length > 0 ? a : undefined;
-    }
-
-    async function browseForArtifact(): Promise<void> {
-        const picked = await openDialog({
-            title: 'Pick a firmware artifact',
-            multiple: false,
-            directory: false,
-            defaultPath: defaultPathForArtifact(),
-            filters: [
-                { name: 'Firmware', extensions: ['elf', 'hex', 'bin'] },
-                { name: 'All files', extensions: ['*'] },
-            ],
-        });
-        if (typeof picked === 'string' && picked.length > 0) {
-            settings.flash.artifactPath = picked;
-        }
-    }
-
-    async function browseForBuildCwd(): Promise<void> {
-        // On macOS the system folder picker shows files greyed
-        // out — that's the platform-native UX, not a bug. We
-        // make sure `directory: true` is set so only folders
-        // are *selectable*, and `canCreateDirectories` lets the
-        // operator make a fresh `build/` from inside the dialog.
-        const picked = await openDialog({
-            title: 'Pick a build working directory',
-            multiple: false,
-            directory: true,
-            canCreateDirectories: true,
-            defaultPath: defaultPathForBuildCwd(),
-        });
-        if (typeof picked === 'string' && picked.length > 0) {
-            settings.flash.buildCwd = picked;
-        }
-    }
-
     function formatLogLine(event: FlashEvent): string {
         switch (event.kind) {
             case 'build_line':
@@ -581,123 +353,33 @@
 
     <div class="card form">
         <div class="field">
-            <label for="artifact">Firmware artifact (file)</label>
-            <div class="input-with-button">
-                <input
-                    id="artifact"
-                    class="input mono"
-                    type="text"
-                    placeholder="/abs/path/to/firmware.elf"
-                    bind:value={settings.flash.artifactPath}
-                />
-                <button type="button" class="btn btn-sm" onclick={browseForArtifact}>
-                    Browse…
-                </button>
-            </div>
-            <p class="hint">
-                Path to the <code>.elf</code> / <code>.hex</code> / <code>.bin</code>
-                the build produces. You can type the <em>expected</em> output
-                path before the build has ever run — Browse… only works on
-                existing files. For first-time setup, leave this blank, set
-                a build cwd + command, then click <strong>Build only</strong>;
-                we'll auto-fill an STM32-style guess after the build lands.
-            </p>
-        </div>
-
-        <div class="field">
-            <label for="buildcmd">Build command</label>
-            <div class="input-with-button templates-host">
-                <input
-                    id="buildcmd"
-                    class="input mono"
-                    type="text"
-                    placeholder="cmake --build build"
-                    bind:value={settings.flash.buildCommand}
-                />
+            <span class="field-label">Build profile</span>
+            <div class="segmented" role="radiogroup" aria-label="Build profile">
                 <button
                     type="button"
-                    class="btn btn-sm templates-trigger"
-                    onclick={() => (templatesOpen = !templatesOpen)}
-                    aria-expanded={templatesOpen}
-                    title="Pick a build command template — auto-detects CMake presets in your build cwd"
+                    class="seg"
+                    class:active={settings.flash.buildProfile === 'release'}
+                    role="radio"
+                    aria-checked={settings.flash.buildProfile === 'release'}
+                    onclick={() => (settings.flash.buildProfile = 'release')}
                 >
-                    Templates ▾
+                    Release
                 </button>
-                {#if templatesOpen}
-                    <div class="templates-dropdown" role="menu">
-                        {#if cmakePresets.length > 0}
-                            <div class="templates-section">
-                                <div class="templates-section-title">
-                                    Detected CMake presets
-                                </div>
-                                {#each cmakePresets as preset (preset.name)}
-                                    <button
-                                        type="button"
-                                        class="templates-item preset"
-                                        onclick={() => pickPreset(preset)}
-                                        role="menuitem"
-                                    >
-                                        <span class="templates-item-label">
-                                            {preset.name}
-                                        </span>
-                                        <span class="templates-item-cmd">
-                                            {preset.command}
-                                        </span>
-                                    </button>
-                                {/each}
-                            </div>
-                        {/if}
-                        <div class="templates-section">
-                            <div class="templates-section-title">
-                                Common templates
-                            </div>
-                            {#each STATIC_TEMPLATES as template (template.label)}
-                                <button
-                                    type="button"
-                                    class="templates-item"
-                                    onclick={() => pickTemplate(template)}
-                                    role="menuitem"
-                                    title={template.note}
-                                >
-                                    <span class="templates-item-label">
-                                        {template.label}
-                                    </span>
-                                    <span class="templates-item-cmd">
-                                        {template.command}
-                                    </span>
-                                </button>
-                            {/each}
-                        </div>
-                    </div>
-                {/if}
-            </div>
-            <p class="hint">
-                Shell command run from the build working directory.
-                Click <strong>Templates ▾</strong> to pick a preset
-                (auto-detected from your <code>CMakePresets.json</code>) or
-                a common pattern for non-preset projects.
-            </p>
-        </div>
-
-        <div class="field">
-            <label for="buildcwd">Build working directory (folder)</label>
-            <div class="input-with-button">
-                <input
-                    id="buildcwd"
-                    class="input mono"
-                    type="text"
-                    placeholder="(defaults to artifact's parent)"
-                    bind:value={settings.flash.buildCwd}
-                />
-                <button type="button" class="btn btn-sm" onclick={browseForBuildCwd}>
-                    Browse…
+                <button
+                    type="button"
+                    class="seg"
+                    class:active={settings.flash.buildProfile === 'debug'}
+                    role="radio"
+                    aria-checked={settings.flash.buildProfile === 'debug'}
+                    onclick={() => (settings.flash.buildProfile = 'debug')}
+                >
+                    Debug
                 </button>
             </div>
             <p class="hint">
-                Folder the build command runs in — usually your CMake
-                project root. The macOS folder picker greys out files
-                (only folders are selectable) and offers a New Folder
-                button if you need to create one.
+                Substituted for <code>{'{profile}'}</code> in the build
+                command + artifact path. Configure those once in
+                <strong>Settings → Firmware build</strong>.
             </p>
         </div>
 
@@ -790,15 +472,6 @@
             onclick={() => start({ skipBuild: true })}
         >
             Flash (skip build)
-        </button>
-        <button
-            type="button"
-            class="btn"
-            disabled={running}
-            onclick={buildOnly}
-            title="Run the build step only — useful before the first flash, when `build/` doesn't exist yet so the .elf can't be picked."
-        >
-            Build only
         </button>
     </div>
 
@@ -937,9 +610,9 @@
        .toggle, .btn (+variants), .banner (+variants), .input, .small,
        .muted, .mono. This file's local styles cover the bits that
        are genuinely Flash-specific: the form's stack rhythm + grid,
-       the build-templates dropdown, the running-progress badge with
-       its status icon, the indeterminate progress bar, and the log
-       window with its copy-row header. */
+       the Release/Debug segmented control, the running-progress badge
+       with its status icon, the indeterminate progress bar, and the
+       log window with its copy-row header. */
 
     /* Form card — tighter gap than the default .stack (10px vs.
        12px) so a long field stack stays compact enough to read at
@@ -977,82 +650,47 @@
         font-weight: 600;
     }
 
-    /* Input + adjacent button row. The input flexes to fill, the
-       button hugs its content. */
-    .input-with-button {
-        display: flex;
-        gap: var(--space-2);
-    }
-    .input-with-button .input {
-        flex: 1;
+    /* Static field label for the segmented control — matches the
+       muted caption look the design system's <label> elements get
+       via `.field > label` above, but as a non-interactive span. */
+    .field-label {
+        font-size: var(--text-sm);
+        color: var(--text-muted);
     }
 
-    /* Build-templates dropdown — anchored to the templates trigger
-       button. Owns its own surface so it sits cleanly above the
-       form regardless of card background. */
-    .templates-host {
-        position: relative;
-    }
-    .templates-dropdown {
-        position: absolute;
-        top: calc(100% + var(--space-1));
-        right: 0;
-        z-index: 10;
-        min-width: 360px;
-        max-width: min(560px, calc(100vw - 60px));
-        background: var(--surface-elev);
+    /* Release/Debug segmented control — two pill buttons sharing a
+       track, the active one filled with the accent. Replaces the old
+       build-command editor: the only build choice on the Flash tab. */
+    .segmented {
+        display: inline-flex;
+        gap: 2px;
+        padding: 2px;
+        background: var(--bg);
         border: 1px solid var(--border);
         border-radius: var(--radius-md);
-        box-shadow: var(--shadow-md);
-        padding: var(--space-2) 0;
-        max-height: 360px;
-        overflow: auto;
+        align-self: flex-start;
     }
-    .templates-section + .templates-section {
-        border-top: 1px solid var(--border);
-        margin-top: var(--space-1);
-        padding-top: var(--space-1);
-    }
-    .templates-section-title {
-        padding: var(--space-2) var(--space-3) var(--space-1);
-        font-size: var(--text-xs);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        color: var(--text-muted);
-    }
-    .templates-item {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        width: 100%;
-        text-align: left;
-        background: transparent;
+    .seg {
+        appearance: none;
         border: none;
-        padding: var(--space-2) var(--space-3);
-        cursor: pointer;
-        color: var(--text);
-        border-radius: 0;
-        font: inherit;
-    }
-    .templates-item:hover {
-        background: var(--hover);
-        color: var(--text);
-    }
-    .templates-item.preset .templates-item-label::before {
-        content: '◆ ';
-        color: var(--accent);
-    }
-    .templates-item-label {
-        font-size: var(--text-sm);
-        font-weight: 500;
-    }
-    .templates-item-cmd {
-        font-family: var(--font-mono);
-        font-size: var(--text-xs);
+        background: transparent;
         color: var(--text-muted);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        font: inherit;
+        font-size: var(--text-sm);
+        padding: var(--space-1) var(--space-4);
+        border-radius: calc(var(--radius-md) - 2px);
+        cursor: pointer;
+        transition:
+            background var(--motion-base),
+            color var(--motion-base);
+    }
+    .seg:hover {
+        color: var(--text);
+    }
+    .seg.active {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        font-weight: 600;
     }
 
     /* Three-up grid for bitrate / node-id / timeout. Drops to a
