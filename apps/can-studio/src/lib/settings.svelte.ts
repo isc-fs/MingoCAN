@@ -18,7 +18,6 @@ import type { InterfaceType } from './types';
 export interface Settings {
     adapter: AdapterSettings;
     flash: FlashSettings;
-    liveData: LiveDataSettings;
     busMonitor: BusMonitorSettings;
     dbc: DbcSettings;
 }
@@ -38,19 +37,23 @@ export interface AdapterSettings {
 }
 
 export interface FlashSettings {
+    /** Path to the built firmware. May contain `{profile}`, which the
+     *  Flash tab substitutes with the chosen build profile (e.g.
+     *  `build/{profile}/firmware.elf`). */
     artifactPath: string;
+    /** Shell build command, run before flashing. May contain
+     *  `{profile}` (e.g. `cmake --build build --config {profile}`).
+     *  Configured once in Settings, not shown on the Flash tab. */
     buildCommand: string;
     buildCwd: string;
+    /** Which build to produce/flash — the only build choice on the
+     *  Flash tab. Substituted into `buildCommand` + `artifactPath`. */
+    buildProfile: 'release' | 'debug';
     diff: boolean;
     dryRun: boolean;
     verifyAfter: boolean;
     finalCommit: boolean;
     jump: boolean;
-}
-
-export interface LiveDataSettings {
-    rateHz: number;
-    windowSeconds: number;
 }
 
 export interface BusMonitorSettings {
@@ -60,8 +63,10 @@ export interface BusMonitorSettings {
     /** Max rows to retain in the Live frames buffer before dropping
      *  the oldest. Keeps the DOM bounded under heavy traffic. */
     maxRows: number;
-    /** Which tab to land on after a restart. */
-    activeTab: 'live' | 'byId';
+    /** Which view mode to land on after a restart. `signals` is the
+     *  DBC-decoded table (the default); `byId` / `live` are the raw
+     *  frame views. */
+    activeTab: 'signals' | 'live' | 'byId';
 }
 
 export interface DbcSettings {
@@ -100,23 +105,20 @@ export function defaultSettings(): Settings {
             timeoutMs: 500,
         },
         flash: {
-            artifactPath: '',
-            buildCommand: 'cmake --build build',
+            artifactPath: 'build/{profile}/firmware.elf',
+            buildCommand: 'cmake --build build --config {profile}',
             buildCwd: '',
+            buildProfile: 'release',
             diff: true,
             dryRun: false,
             verifyAfter: true,
             finalCommit: true,
             jump: true,
         },
-        liveData: {
-            rateHz: 10,
-            windowSeconds: 60,
-        },
         busMonitor: {
             idFilter: '',
             maxRows: 5000,
-            activeTab: 'byId',
+            activeTab: 'signals',
         },
         dbc: {
             paths: {},
@@ -223,9 +225,10 @@ export function registerDbcAutoloadEffect(
                 await handlers.load(path);
             } catch (err) {
                 // Auto-load failures are surfaced via the
-                // `dbc:status` event the SignalsView listens to; we
-                // intentionally don't bubble them up here because
-                // there's no view to render them in at app root.
+                // `dbc:status` event the Bus monitor's Signals mode
+                // listens to; we intentionally don't bubble them up
+                // here because there's no view to render them at app
+                // root.
                 if (gen === dbcLoadGen) {
                     console.warn('DBC auto-load failed:', err);
                 }

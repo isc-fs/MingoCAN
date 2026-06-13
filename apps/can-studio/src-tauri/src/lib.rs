@@ -6,14 +6,13 @@
 // `generate_context!` macro (which only works once per process).
 //
 // Tier 0a-d (current): `discover_adapters` + `flash` (streamed) +
-// `health` / `read_dtcs` / `clear_dtcs` + `live_data_start` /
-// `live_data_stop` (streamed snapshots).
+// `health` / `read_dtcs` / `clear_dtcs` + bus-monitor / pit-diag
+// streams.
 
 mod bus_monitor;
 mod dbc;
 mod diagnose;
 mod flash;
-mod live_data;
 mod pit_diag;
 mod provision;
 mod swd;
@@ -59,7 +58,6 @@ pub fn run() {
         // frontend (lib/updater.ts).
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(live_data::LiveDataState::default())
         .manage(bus_monitor::BusMonitorState::default())
         .manage(pit_diag::PitDiagState::default())
         .manage(dbc::DbcState::default())
@@ -72,8 +70,6 @@ pub fn run() {
             diagnose::health,
             diagnose::read_dtcs,
             diagnose::clear_dtcs,
-            live_data::live_data_start,
-            live_data::live_data_stop,
             bus_monitor::bus_monitor_start,
             bus_monitor::bus_monitor_stop,
             bus_monitor::bus_monitor_capture_start,

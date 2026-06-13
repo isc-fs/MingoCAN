@@ -24,9 +24,7 @@
     import FlashView from './lib/FlashView.svelte';
     import SwdFlashView from './lib/SwdFlashView.svelte';
     import DiagnosticsView from './lib/DiagnosticsView.svelte';
-    import LiveDataView from './lib/LiveDataView.svelte';
     import BusMonitorView from './lib/BusMonitorView.svelte';
-    import SignalsView from './lib/SignalsView.svelte';
     import PitDiagView from './lib/PitDiagView.svelte';
     import SettingsView from './lib/SettingsView.svelte';
 
@@ -72,12 +70,8 @@
             <SwdFlashView />
         {:else if activeView === 'diagnostics'}
             <DiagnosticsView />
-        {:else if activeView === 'liveData'}
-            <LiveDataView />
         {:else if activeView === 'busMonitor'}
             <BusMonitorView />
-        {:else if activeView === 'signals'}
-            <SignalsView />
         {:else if activeView === 'pitDiag'}
             <PitDiagView />
         {:else if activeView === 'settings'}

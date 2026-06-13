@@ -45,9 +45,22 @@
         pitDiagEnable,
         writeCellsInto,
         writeNtcsInto,
+        type PitDiagProfile,
         type PitDiagStatus,
     } from './pit_diag';
     import { settings } from './settings.svelte';
+
+    // Which ECU's pit-diag stream the view targets. Only AMS is wired
+    // end-to-end (arm handshake + 0x6C0..=0x6C8 frames). ECU / uDV are
+    // selectable so the view is "for the car", not AMS-only, but they
+    // render a placeholder until the firmware team defines a pit-diag
+    // stream + its frames in IFS08-DBCinator.
+    const PROFILES: { id: PitDiagProfile; label: string }[] = [
+        { id: 'ams', label: 'AMS' },
+        { id: 'ecu', label: 'ECU' },
+        { id: 'udv', label: 'uDV' },
+    ];
+    let profile = $state<PitDiagProfile>('ams');
 
     type ArmState =
         | { kind: 'idle' }
@@ -245,7 +258,7 @@
                     ? settings.adapter.channel
                     : null,
             bitrate: settings.adapter.bitrate,
-            profile: 'ams' as const,
+            profile,
         };
     }
 
@@ -304,6 +317,18 @@
             return;
         }
         armState = { kind: 'idle' };
+    }
+
+    // Switch the targeted ECU. If a stream is armed (only AMS can be,
+    // today), disarm it first — while `profile` still names the armed
+    // ECU — so the disable frame goes to the right node and the AMS
+    // doesn't keep streaming in the background behind the placeholder.
+    async function selectProfile(next: PitDiagProfile): Promise<void> {
+        if (next === profile) return;
+        if (armState.kind === 'armed') {
+            await disarm();
+        }
+        profile = next;
     }
 
     onMount(async () => {
@@ -502,15 +527,22 @@
     <header>
         <div>
             <h2>Pit diag</h2>
-            <p class="muted">
-                AMS observer mode. Arming emits <code>0x7F0#DEADBEEF</code>;
-                the AMS replies on <code>0x7F1</code> and starts streaming
-                the diagnostic stream at 1 Hz ({AMS_EXPECTED_FRAMES_PER_SCAN}
-                frames/scan). Disarm sends the zero-payload frame;
-                firmware also clears the flag on reboot.
-            </p>
+            {#if profile === 'ams'}
+                <p class="muted">
+                    AMS observer mode. Arming emits <code>0x7F0#DEADBEEF</code>;
+                    the AMS replies on <code>0x7F1</code> and starts streaming
+                    the diagnostic stream at 1 Hz ({AMS_EXPECTED_FRAMES_PER_SCAN}
+                    frames/scan). Disarm sends the zero-payload frame;
+                    firmware also clears the flag on reboot.
+                </p>
+            {:else}
+                <p class="muted">
+                    Per-ECU diagnostic observer. Select an ECU to arm its
+                    pit-diag stream.
+                </p>
+            {/if}
         </div>
-        {#if fwLabel !== null}
+        {#if profile === 'ams' && fwLabel !== null}
             <span
                 class="pill fw-chip mono"
                 title="From the 0x6C6 firmware-ID frame. Compare against the build you flashed."
@@ -520,6 +552,24 @@
         {/if}
     </header>
 
+    <!-- ECU profile selector — AMS is wired end-to-end; ECU / uDV are
+         selectable but render a placeholder until they grow a pit-diag
+         stream + DBCinator frames. -->
+    <div class="profile-tabs" role="radiogroup" aria-label="ECU profile">
+        {#each PROFILES as p (p.id)}
+            <button
+                type="button"
+                class="profile-tab"
+                class:active={profile === p.id}
+                role="radio"
+                aria-checked={profile === p.id}
+                onclick={() => selectProfile(p.id)}
+            >
+                {p.label}
+            </button>
+        {/each}
+    </div>
+
     {#if !adapterReady}
         <div class="banner banner-warning">
             <strong>No adapter selected.</strong> Pick one in the
@@ -528,6 +578,30 @@
         </div>
     {/if}
 
+    {#if profile !== 'ams'}
+        <!-- ECU / uDV placeholder. No arm handshake or frame contract
+             exists for these yet, so we don't offer to arm — surfacing
+             a clear "why" beats a button that errors. -->
+        <div class="card placeholder-card">
+            <h3>{profile === 'ecu' ? 'ECU' : 'uDV'} pit-diag isn't available yet</h3>
+            <p class="muted">
+                Only the AMS exposes a pit-diag arm handshake
+                (<code>0x7F0</code>) and a decoded frame stream
+                (<code>0x6C0..=0x6C8</code>) today. The
+                {profile === 'ecu' ? 'ECU' : 'uDV'} has no pit-diag
+                protocol or frames defined in IFS08-DBCinator yet, so
+                there's nothing to arm or decode.
+            </p>
+            <p class="muted">
+                Once the firmware team ships a pit-diag stream and
+                publishes its frames in the DBC, this panel grows the
+                same live grids you see under <strong>AMS</strong>. Until
+                then, switch to <strong>AMS</strong> above, or use the
+                <strong>Bus monitor</strong> / <strong>Signals</strong>
+                views to watch raw or DBC-decoded traffic from any node.
+            </p>
+        </div>
+    {:else}
     <!-- Controls row -->
     <div class="toolbar card card-tight">
         {#if armState.kind === 'idle' || armState.kind === 'error'}
@@ -914,6 +988,7 @@
             {/each}
         </div>
     </section>
+    {/if}
 </div>
 
 <style>
@@ -923,6 +998,55 @@
        the design system: the toolbar layout, the FSM/poll-timing
        diag grid + LEDs, the pack-spread bar, and the cell-V / NTC
        tile grids. */
+
+    /* ECU profile selector — AMS / ECU / uDV pill tabs sharing a
+       track, the active one filled with the accent. */
+    .profile-tabs {
+        display: inline-flex;
+        gap: 2px;
+        padding: 2px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        align-self: flex-start;
+    }
+    .profile-tab {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        font: inherit;
+        font-size: var(--text-sm);
+        padding: var(--space-1) var(--space-4);
+        border-radius: calc(var(--radius-md) - 2px);
+        cursor: pointer;
+        transition:
+            background var(--motion-base),
+            color var(--motion-base);
+    }
+    .profile-tab:hover {
+        color: var(--text);
+    }
+    .profile-tab.active {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        font-weight: 600;
+    }
+
+    /* Placeholder card for the not-yet-wired ECU / uDV profiles. */
+    .placeholder-card {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+    }
+    .placeholder-card h3 {
+        margin: 0;
+    }
+    .placeholder-card p {
+        margin: 0;
+        max-width: 70ch;
+        line-height: 1.6;
+    }
 
     /* Toolbar — controls + live stats. Built on .card .card-tight. */
     .toolbar {

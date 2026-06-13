@@ -366,11 +366,14 @@ pub async fn pit_diag_enable(
     state: State<'_, PitDiagState>,
     request: PitDiagRequest,
 ) -> Result<(), String> {
-    // Profile gate — slice 1 only knows AMS. Future profiles plug
-    // in here once VCU/UDV IDs land.
+    // Profile gate — only AMS has a pit-diag arm handshake + frame
+    // stream today. ECU / uDV are selectable in the UI but have no
+    // firmware protocol or DBCinator frames defined yet, so we reject
+    // them with a clean, typed message the view renders as its
+    // "not available yet" placeholder rather than attempting to arm.
     if request.profile != "ams" {
         return Err(format!(
-            "unknown pit-diag profile '{}': only 'ams' is supported in slice 1",
+            "pit-diag is not implemented for profile '{}' yet — only 'ams' has an arm handshake and frame stream",
             request.profile
         ));
     }
@@ -421,7 +424,10 @@ pub async fn pit_diag_enable(
             }
             Err(err) => {
                 let msg = err.to_string().to_lowercase();
-                if msg.contains("timeout") || msg.contains("would block") {
+                if msg.contains("timed out")
+                    || msg.contains("timeout")
+                    || msg.contains("would block")
+                {
                     continue; // poll cycle expired without a frame
                 }
                 return Err(format!("waiting for ACK: {err}"));
@@ -483,7 +489,7 @@ pub async fn pit_diag_enable(
                             // Timeouts are benign — quiet bus during the
                             // poll window. Don't spam the frontend.
                             let msg = err.to_string().to_lowercase();
-                            if msg.contains("timeout") || msg.contains("would block") {
+                            if msg.contains("timed out") || msg.contains("timeout") || msg.contains("would block") {
                                 continue;
                             }
                             let _ = app_for_task.emit(
