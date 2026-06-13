@@ -32,7 +32,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use can_flasher::transport::open_backend;
+use can_flasher::transport::{open_backend, TransportError};
 
 use crate::dbc::{decode, snapshot_lookup, DbcState};
 use crate::flash::parse_interface;
@@ -126,7 +126,14 @@ pub struct BusMonitorFrame {
 pub enum BusMonitorStatus {
     Started,
     Stopped,
-    Error { message: String },
+    /// The adapter went away mid-session (USB unplugged / driver
+    /// unloaded). Distinct from `Error` so the UI can show a calm
+    /// "adapter disconnected" and re-offer Start, rather than a red
+    /// failure.
+    Disconnected,
+    Error {
+        message: String,
+    },
 }
 
 /// Capture-state events — emitted whenever capture starts, stops,
@@ -252,6 +259,15 @@ pub async fn bus_monitor_start(
                                     || last_progress_emit.elapsed()
                                         >= Duration::from_millis(500)
                                 {
+                                    // Flush the capture buffer on the
+                                    // same cadence as the progress
+                                    // emit. The OS still has the file
+                                    // even if we later abort (e.g. a
+                                    // driver crash on unplug), so an
+                                    // unexpected kill loses at most this
+                                    // ~100-frame / 500ms window instead
+                                    // of the whole 64 KB BufWriter tail.
+                                    flush_capture(&capture_for_task).await;
                                     let _ = app_for_task.emit(
                                         CAPTURE_EVENT,
                                         &BusMonitorCaptureEvent::Progress {
@@ -263,6 +279,23 @@ pub async fn bus_monitor_start(
                                     progress_since_last = 0;
                                 }
                             }
+                        }
+                        Err(TransportError::Disconnected) => {
+                            // The adapter was removed mid-session (its
+                            // reader signalled hardware-gone). Emit a
+                            // calm Disconnected status and stop — the
+                            // UI returns to idle so the operator can
+                            // re-plug and Start again.
+                            warn!("bus_monitor: adapter disconnected; stopping");
+                            // Finalize any capture first so the
+                            // recording up to the unplug is preserved —
+                            // the BufWriter holds up to 64 KB unflushed,
+                            // and the task is about to return without
+                            // the normal stop-command path running.
+                            close_capture(&app_for_task, &capture_for_task).await;
+                            let _ = app_for_task
+                                .emit(STATUS_EVENT, &BusMonitorStatus::Disconnected);
+                            return;
                         }
                         Err(err) => {
                             // An empty poll window — no frame arrived
@@ -433,6 +466,19 @@ async fn write_capture_line(
         path: writer.path.display().to_string(),
         frames: writer.frames,
     })
+}
+
+/// Flush the active capture's buffer to the OS without closing it.
+/// Called periodically while recording so an unexpected process death
+/// (e.g. a driver crash on unplug) loses at most the frames since the
+/// last flush, not the whole BufWriter tail. No-op if nothing is open.
+async fn flush_capture(capture: &SharedCapture) {
+    let mut slot = capture.lock().await;
+    if let Some(writer) = slot.as_mut() {
+        if let Err(err) = writer.writer.flush().await {
+            warn!(?err, "bus_monitor: periodic capture flush failed");
+        }
+    }
 }
 
 /// Flush and close the active capture, emitting a Stopped event
