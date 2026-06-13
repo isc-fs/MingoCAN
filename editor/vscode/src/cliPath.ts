@@ -39,6 +39,24 @@ export const DEFAULT_BARE_NAME = 'can-flasher';
 let cached: { configured: string; resolved: string } | null = null;
 
 /**
+ * Path to the extension-managed, version-matched binary (downloaded
+ * on activation by `cliManager.ensureManagedCli`). When set, it takes
+ * precedence over the well-known-path probe — but NOT over an
+ * operator-pinned custom `iscFs.canFlasherPath`, which is always
+ * honoured verbatim. `null` until a managed binary is in place.
+ */
+let managedPath: string | null = null;
+
+/**
+ * Record (or clear) the managed binary path. Invalidates the
+ * resolution cache so the next `resolveCanFlasherPath` re-decides.
+ */
+export function setManagedCliPath(resolved: string | null): void {
+    managedPath = resolved;
+    cached = null;
+}
+
+/**
  * Pick the binary path to hand to `spawn`. See module-level
  * comment for the precedence rules.
  */
@@ -66,6 +84,14 @@ function resolveUncached(configured: string): string {
     // from our default — all signal intent.
     if (configured !== DEFAULT_BARE_NAME) {
         return configured;
+    }
+
+    // Rule 1.5: a version-matched binary the extension downloaded
+    // takes precedence over PATH probing. This is what keeps the
+    // extension in lockstep with the CLI the same way the desktop
+    // app is (it compiles the library in) — see cliManager.ts.
+    if (managedPath !== null) {
+        return managedPath;
     }
 
     // Rule 2: probe well-known paths in order of likelihood.
