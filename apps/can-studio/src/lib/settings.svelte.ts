@@ -18,7 +18,6 @@ import type { InterfaceType } from './types';
 export interface Settings {
     adapter: AdapterSettings;
     flash: FlashSettings;
-    liveData: LiveDataSettings;
     busMonitor: BusMonitorSettings;
     dbc: DbcSettings;
 }
@@ -38,19 +37,23 @@ export interface AdapterSettings {
 }
 
 export interface FlashSettings {
+    /** Path to the built firmware. May contain `{profile}`, which the
+     *  Flash tab substitutes with the chosen build profile (e.g.
+     *  `build/{profile}/firmware.elf`). */
     artifactPath: string;
+    /** Shell build command, run before flashing. May contain
+     *  `{profile}` (e.g. `cmake --build build --config {profile}`).
+     *  Configured once in Settings, not shown on the Flash tab. */
     buildCommand: string;
     buildCwd: string;
+    /** Which build to produce/flash — the only build choice on the
+     *  Flash tab. Substituted into `buildCommand` + `artifactPath`. */
+    buildProfile: 'release' | 'debug';
     diff: boolean;
     dryRun: boolean;
     verifyAfter: boolean;
     finalCommit: boolean;
     jump: boolean;
-}
-
-export interface LiveDataSettings {
-    rateHz: number;
-    windowSeconds: number;
 }
 
 export interface BusMonitorSettings {
@@ -100,18 +103,15 @@ export function defaultSettings(): Settings {
             timeoutMs: 500,
         },
         flash: {
-            artifactPath: '',
-            buildCommand: 'cmake --build build',
+            artifactPath: 'build/{profile}/firmware.elf',
+            buildCommand: 'cmake --build build --config {profile}',
             buildCwd: '',
+            buildProfile: 'release',
             diff: true,
             dryRun: false,
             verifyAfter: true,
             finalCommit: true,
             jump: true,
-        },
-        liveData: {
-            rateHz: 10,
-            windowSeconds: 60,
         },
         busMonitor: {
             idFilter: '',

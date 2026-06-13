@@ -270,38 +270,45 @@
         </div>
     </section>
 
-    <!-- Live-data defaults -->
+    <!-- Firmware build (drives the Flash tab's Release/Debug) -->
     <section class="card">
         <div class="card-header">
-            <h3>Live-data defaults</h3>
+            <h3>Firmware build</h3>
         </div>
         <p class="muted small section-hint">
-            Initial values for the Live-data view. Editable per-session there
-            too; this is the persisted default.
+            How the Flash tab builds firmware. The <strong>Release/Debug</strong>
+            choice on the Flash tab substitutes <code>{'{profile}'}</code> below
+            (as <code>Release</code> / <code>Debug</code>) — set this once.
         </p>
-        <div class="grid-two">
-            <div class="field">
-                <label for="rateHz">Rate (Hz)</label>
-                <input
-                    id="rateHz"
-                    class="input mono"
-                    type="number"
-                    min="1"
-                    max="50"
-                    bind:value={settings.liveData.rateHz}
-                />
-            </div>
-            <div class="field">
-                <label for="windowSeconds">Window (s)</label>
-                <input
-                    id="windowSeconds"
-                    class="input mono"
-                    type="number"
-                    min="5"
-                    max="600"
-                    bind:value={settings.liveData.windowSeconds}
-                />
-            </div>
+        <div class="field">
+            <label for="buildCommand">Build command</label>
+            <input
+                id="buildCommand"
+                class="input mono"
+                type="text"
+                placeholder={'cmake --build build --config {profile}'}
+                bind:value={settings.flash.buildCommand}
+            />
+        </div>
+        <div class="field">
+            <label for="buildCwd">Build working directory</label>
+            <input
+                id="buildCwd"
+                class="input mono"
+                type="text"
+                placeholder="(your firmware project root)"
+                bind:value={settings.flash.buildCwd}
+            />
+        </div>
+        <div class="field">
+            <label for="artifactPath">Built firmware path</label>
+            <input
+                id="artifactPath"
+                class="input mono"
+                type="text"
+                placeholder={'build/{profile}/firmware.elf'}
+                bind:value={settings.flash.artifactPath}
+            />
         </div>
     </section>
 
@@ -485,21 +492,15 @@
         font-size: var(--text-sm);
     }
 
-    /* Form grids — three-up for bus params, two-up for live-data.
-       Collapse to single column on narrow widths. */
+    /* Form grids — three-up for bus params. Collapse to single
+       column on narrow widths. */
     .grid-three {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         gap: var(--space-3);
     }
-    .grid-two {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: var(--space-3);
-    }
     @media (max-width: 720px) {
-        .grid-three,
-        .grid-two {
+        .grid-three {
             grid-template-columns: 1fr;
         }
     }
