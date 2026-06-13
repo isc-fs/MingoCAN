@@ -265,18 +265,21 @@ pub async fn bus_monitor_start(
                             }
                         }
                         Err(err) => {
-                            // Timeouts are the common case — no
-                            // frames on the bus during the poll
-                            // window. They're not errors. Most
-                            // transports surface these as a
-                            // distinct error kind, but the trait
-                            // is a generic Result — we treat any
-                            // string containing "timeout" / "wait"
-                            // as benign so we don't spam the
-                            // frontend with phantom errors.
+                            // An empty poll window — no frame arrived
+                            // within `poll_timeout` — is the COMMON
+                            // case on any real bus (AMS telemetry is
+                            // ~500 ms apart, the poll is ~50 ms), not an
+                            // error. `TransportError::Timeout` displays
+                            // as "timed out … after Nms" — note the
+                            // SPACE, so a bare `contains("timeout")`
+                            // misses it and every idle poll was surfaced
+                            // as a fatal error that stopped the monitor.
+                            // Match both spellings.
                             let msg = err.to_string();
-                            let benign = msg.to_lowercase().contains("timeout")
-                                || msg.to_lowercase().contains("would block");
+                            let lower = msg.to_lowercase();
+                            let benign = lower.contains("timed out")
+                                || lower.contains("timeout")
+                                || lower.contains("would block");
                             if !benign {
                                 let _ = app_for_task.emit(
                                     STATUS_EVENT,
