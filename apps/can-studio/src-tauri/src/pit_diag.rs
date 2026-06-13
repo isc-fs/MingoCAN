@@ -421,7 +421,10 @@ pub async fn pit_diag_enable(
             }
             Err(err) => {
                 let msg = err.to_string().to_lowercase();
-                if msg.contains("timeout") || msg.contains("would block") {
+                if msg.contains("timed out")
+                    || msg.contains("timeout")
+                    || msg.contains("would block")
+                {
                     continue; // poll cycle expired without a frame
                 }
                 return Err(format!("waiting for ACK: {err}"));
@@ -483,7 +486,7 @@ pub async fn pit_diag_enable(
                             // Timeouts are benign — quiet bus during the
                             // poll window. Don't spam the frontend.
                             let msg = err.to_string().to_lowercase();
-                            if msg.contains("timeout") || msg.contains("would block") {
+                            if msg.contains("timed out") || msg.contains("timeout") || msg.contains("would block") {
                                 continue;
                             }
                             let _ = app_for_task.emit(
