@@ -18,7 +18,13 @@
 import * as vscode from 'vscode';
 
 import { startAdapterPresenceService } from './adapterPresence';
-import { clearCanFlasherPathCache } from './cliPath';
+import {
+    clearCanFlasherPathCache,
+    DEFAULT_BARE_NAME,
+    resolveCanFlasherPath,
+    setManagedCliPath,
+} from './cliPath';
+import { cliVersion, ensureManagedCli } from './cliManager';
 import { readConfig } from './config';
 import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
 import { runFlash } from './flash';
@@ -32,6 +38,15 @@ import { getOutputChannel, showOutputChannel } from './output';
 import { formatNodeId } from './discover';
 
 export function activate(context: vscode.ExtensionContext): void {
+    // Keep the can-flasher binary in lockstep with this extension's
+    // version: download the matching CLI on demand (preferred over a
+    // possibly-stale PATH install) and warn on version skew. Async +
+    // best-effort — never blocks activation or any command. See
+    // cliManager.ts for the rationale (the desktop app stays in sync
+    // by compiling the library in; the extension shells out, so it
+    // has to manage its own version-matched binary).
+    void bootstrapCli(context);
+
     // ---- Tier A (flash) ----
     context.subscriptions.push(
         vscode.commands.registerCommand('iscFs.flash', () =>
@@ -136,8 +151,105 @@ export function activate(context: vscode.ExtensionContext): void {
             if (event.affectsConfiguration('iscFs.canFlasherPath')) {
                 clearCanFlasherPathCache();
             }
+            // Re-run CLI resolution when the operator pins a different
+            // path or toggles auto-download, so the change takes effect
+            // without a window reload.
+            if (
+                event.affectsConfiguration('iscFs.canFlasherPath') ||
+                event.affectsConfiguration('iscFs.cliAutoDownload')
+            ) {
+                void bootstrapCli(context);
+            }
         }),
     );
+}
+
+// ---- CLI version-sync bootstrap ----
+
+let skewWarned = false;
+
+/**
+ * Ensure the extension runs a can-flasher whose version matches its
+ * own, and warn the operator when it can't. Precedence:
+ *
+ *   1. Operator pinned `iscFs.canFlasherPath` → honoured verbatim;
+ *      we only skew-check it (never silently override their choice).
+ *   2. `iscFs.cliAutoDownload` on (default) → download the matching
+ *      release binary and prefer it over PATH. Matches by
+ *      construction, so no skew warning.
+ *   3. Download unavailable (offline, unsupported platform, or
+ *      auto-download off) → fall back to the PATH probe and warn if
+ *      that binary's version disagrees with ours.
+ *
+ * Best-effort throughout — any failure leaves the previous PATH-based
+ * behaviour intact.
+ */
+async function bootstrapCli(context: vscode.ExtensionContext): Promise<void> {
+    const expected = (context.extension.packageJSON as { version?: string }).version;
+    if (typeof expected !== 'string') {
+        return;
+    }
+    const cfg = vscode.workspace.getConfiguration('iscFs');
+    const configured = cfg.get<string>('canFlasherPath', DEFAULT_BARE_NAME);
+    const autoDownload = cfg.get<boolean>('cliAutoDownload', true);
+
+    // Operator hasn't pinned a path and wants auto-download: fetch the
+    // version-matched binary and prefer it. On success it matches by
+    // construction, so skip the skew check.
+    if (configured === DEFAULT_BARE_NAME && autoDownload) {
+        const managed = await ensureManagedCli(context, expected);
+        if (managed !== null) {
+            setManagedCliPath(managed);
+            return;
+        }
+        // Download unavailable → clear any stale managed override so we
+        // fall back to PATH, then skew-check below.
+        setManagedCliPath(null);
+    }
+
+    // Skew-check whatever we'd actually run (pinned path, or PATH
+    // probe). A `null` version means the binary couldn't run — the
+    // ENOENT UX in cli.ts already handles the missing-binary case, so
+    // we only warn on a definite version mismatch.
+    const resolved = resolveCanFlasherPath(configured);
+    const actual = await cliVersion(resolved);
+    if (actual !== null && actual !== expected) {
+        warnSkew(expected, actual, configured !== DEFAULT_BARE_NAME);
+    }
+}
+
+/** One-shot (per session) version-skew warning with a remediation
+ *  action. Phrased around the concrete versions so the operator knows
+ *  exactly what to update. */
+function warnSkew(expected: string, actual: string, pinned: boolean): void {
+    if (skewWarned) {
+        return;
+    }
+    skewWarned = true;
+    const action = pinned ? 'Open settings' : 'How to update';
+    const tail = pinned
+        ? 'Point `iscFs.canFlasherPath` at a v' + expected + ' binary, or clear it to let the extension manage one.'
+        : 'Enable `iscFs.cliAutoDownload` to let the extension manage a matching binary, or update your CLI.';
+    void vscode.window
+        .showWarningMessage(
+            `ISC MingoCAN: the can-flasher CLI is v${actual}, but this extension expects v${expected}. ` +
+                `Flashing may hit bugs already fixed in v${expected}. ${tail}`,
+            action,
+        )
+        .then((choice) => {
+            if (choice === 'Open settings') {
+                void vscode.commands.executeCommand(
+                    'workbench.action.openSettings',
+                    'iscFs.canFlasherPath',
+                );
+            } else if (choice === 'How to update') {
+                void vscode.env.openExternal(
+                    vscode.Uri.parse(
+                        `https://github.com/isc-fs/can-flasher/releases/tag/v${expected}`,
+                    ),
+                );
+            }
+        });
 }
 
 export function deactivate(): void {
