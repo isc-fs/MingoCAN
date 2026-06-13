@@ -72,6 +72,9 @@
     type Status = 'idle' | 'starting' | 'running' | 'paused' | 'stopping' | 'error';
     let status = $state<Status>('idle');
     let error = $state<string | null>(null);
+    // Set when the adapter was unplugged mid-session — shows a calm
+    // notice (not a red error) and clears on the next Start.
+    let disconnected = $state<boolean>(false);
 
     // Live frame ring buffer. We append in batches (see flushQueued)
     // because Svelte 5 re-renders on every assignment — at 1kHz+
@@ -307,6 +310,7 @@
         if (status === 'running' || status === 'starting') return;
 
         error = null;
+        disconnected = false;
         status = 'starting';
         clearBuffers();
 
@@ -317,6 +321,13 @@
                     status = 'running';
                 } else if (s.kind === 'stopped') {
                     status = 'idle';
+                } else if (s.kind === 'disconnected') {
+                    // Backend already stopped its task — tear down our
+                    // listeners and return to idle so Start works again
+                    // once the adapter is re-plugged.
+                    disconnected = true;
+                    status = 'idle';
+                    void cleanupListeners();
                 } else if (s.kind === 'error') {
                     error = s.message;
                     status = 'error';
@@ -575,6 +586,14 @@
 
     {#if error !== null}
         <div class="banner banner-danger">{error}</div>
+    {/if}
+
+    {#if disconnected}
+        <div class="banner banner-warning">
+            <strong>Adapter disconnected.</strong> The CAN device was removed
+            mid-capture — monitoring stopped. Re-plug it and click
+            <strong>Start</strong> to resume.
+        </div>
     {/if}
 
     <div class="tabs">
