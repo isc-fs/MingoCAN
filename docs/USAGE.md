@@ -143,8 +143,17 @@ iteration; production deploy scripts typically add
 | `--no-verify-after` | Skip the post-write per-sector CRC check |
 | `--jump` *[default]* | Issue `CMD_JUMP` to the installed app after a successful flash |
 | `--no-jump` | Stay in bootloader mode after a successful flash |
+| `--enter-bootloader <auto\|always\|never>` *[default: auto]* | Get a board running its application into the bootloader before CONNECT. `auto`: try CONNECT, and only if it times out send the app reboot-to-BL trigger (`0x002`), wait, and retry. `always`: send it up front. `never`: don't — fail if the board isn't already in the bootloader. The trigger opens the board's HV relays, then resets it into the BL. |
 
 Full argument reference: `can-flasher flash --help`.
+
+> **Getting a running board into the bootloader.** `flash` talks the
+> bootloader protocol, so the target must be running its bootloader
+> (a board running its *application* won't answer `CMD_CONNECT`). With
+> `--enter-bootloader auto` (the default) the host does this for you:
+> on a CONNECT timeout it sends the app-level reboot-to-BL frame the
+> firmware listens for, waits for the bootloader, and retries. To do
+> it by hand, `can-flasher send-raw 0x002 B0 07 AD 11`.
 
 ---
 

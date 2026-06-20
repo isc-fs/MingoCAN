@@ -27,6 +27,8 @@ export interface FlashRequest {
     verifyAfter: boolean;
     finalCommit: boolean;
     jump: boolean;
+    /** Reboot a running app into the bootloader if CONNECT fails. */
+    enterBootloader: boolean;
 }
 
 export function defaultFlashRequest(
@@ -48,6 +50,7 @@ export function defaultFlashRequest(
         verifyAfter: true,
         finalCommit: true,
         jump: true,
+        enterBootloader: true,
     };
 }
 

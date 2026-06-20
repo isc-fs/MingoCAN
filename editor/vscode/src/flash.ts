@@ -62,6 +62,19 @@ export async function runFlash(options: FlashOptions): Promise<void> {
     const cwd = workspace.uri.fsPath;
     const cfg = readConfig();
 
+    // Flash requires a target node-id (the CLI refuses to guess which
+    // board to overwrite). When `iscFs.nodeId` is unset, prompt for it
+    // here — and remember it — instead of letting the CLI fail with a
+    // raw "node-id required" error the operator can't act on.
+    if (cfg.nodeId.trim().length === 0) {
+        const picked = await promptForNodeId();
+        if (picked === undefined) {
+            out.appendLine('[cancelled] flash aborted — no node-id provided');
+            return;
+        }
+        cfg.nodeId = picked;
+    }
+
     // Auto-fill an empty `iscFs.firmwareArtifact` with the default
     // glob from package.json. Operators carrying the setting forward
     // as an empty string (saved that way by older versions, or
@@ -174,6 +187,61 @@ export async function runFlash(options: FlashOptions): Promise<void> {
             await runFlashStep(cfg, artifact, cwd, progress, token);
         },
     );
+}
+
+// ---- Node-id prompt ----
+
+/**
+ * Ask the operator for the target node-id when `iscFs.nodeId` is
+ * unset. Validates against the CLI's accepted form (0x0–0xF, hex or
+ * decimal) and persists the answer to workspace settings so the next
+ * flash doesn't re-prompt. Returns the normalized string, or
+ * `undefined` if the operator cancelled.
+ */
+async function promptForNodeId(): Promise<string | undefined> {
+    const value = await vscode.window.showInputBox({
+        title: 'ISC MingoCAN: target node-id',
+        prompt: 'Flashing needs the bootloader node-id (0x0–0xF). Team scheme: AMS = 0x1, ECU = 0x2, uDV = 0x3.',
+        placeHolder: 'e.g. 0x1',
+        ignoreFocusOut: true,
+        validateInput: validateNodeId,
+    });
+    if (value === undefined) {
+        return undefined;
+    }
+    const normalized = value.trim();
+    // Remember it (workspace-scoped) so routine re-flashes don't
+    // re-prompt. The operator can change it in Settings or via
+    // "Flash this device…", which overrides per-run.
+    try {
+        await vscode.workspace
+            .getConfiguration('iscFs')
+            .update('nodeId', normalized, vscode.ConfigurationTarget.Workspace);
+    } catch {
+        // Non-fatal — use it for this run even if the write failed
+        // (e.g. no workspace settings file writable).
+    }
+    return normalized;
+}
+
+/** Mirrors `parse_node_id` in src/cli/mod.rs: 0x0–0xF, hex (`0x1`) or
+ *  decimal (`1`). Returns an error string for the input box, or null
+ *  when valid. */
+function validateNodeId(raw: string): string | null {
+    const t = raw.trim();
+    if (t.length === 0) {
+        return 'Enter a node-id (0x0–0xF).';
+    }
+    const isHex = /^0x[0-9a-fA-F]+$/.test(t);
+    const isDec = /^[0-9]+$/.test(t);
+    if (!isHex && !isDec) {
+        return 'Use hex (e.g. 0x1) or decimal (e.g. 1).';
+    }
+    const n = isHex ? parseInt(t.slice(2), 16) : parseInt(t, 10);
+    if (Number.isNaN(n) || n < 0 || n > 0xf) {
+        return 'Node-id must be 0x0–0xF (0–15).';
+    }
+    return null;
 }
 
 // ---- Stage helpers ----

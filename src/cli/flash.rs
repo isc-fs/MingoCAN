@@ -37,6 +37,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use super::{confirm_prompt, exit_err, ExitCodeHint, GlobalFlags};
+use crate::app_control::BootloaderEntry;
 use crate::firmware::{self, loader};
 use crate::flash::{FlashConfig, FlashEvent, FlashManager, FlashReport, SectorRole};
 use crate::protocol::commands::{cmd_jump, cmd_ob_apply_wrp, cmd_ob_read};
@@ -115,6 +116,15 @@ pub struct FlashArgs {
     /// otherwise auto-declines the prompt and aborts).
     #[arg(long = "yes", default_value_t = false)]
     pub yes: bool,
+
+    /// How to get a target running its *application* into the
+    /// bootloader before CONNECT. `auto` (default): try CONNECT, and
+    /// only if it times out send the app reboot-to-BL trigger, wait,
+    /// and retry. `always`: send the trigger up front. `never`: don't
+    /// — fail if the board isn't already in the bootloader. The
+    /// trigger opens the board's HV relays before it resets.
+    #[arg(long = "enter-bootloader", value_enum, default_value_t = BootloaderEntry::Auto)]
+    pub enter_bootloader: BootloaderEntry,
 }
 
 // ---- Entry point ----
@@ -181,9 +191,24 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
 
     let session = open_session(global, args.keepalive_ms)?;
     let (proto_major, proto_minor) = session
-        .connect()
+        .connect_entering_bootloader(
+            args.enter_bootloader,
+            Duration::from_millis(ENTER_BL_SETTLE_MS),
+        )
         .await
-        .map_err(|e| exit_err(ExitCodeHint::DeviceNotFound, format!("CONNECT failed: {e}")))?;
+        .map_err(|e| {
+            exit_err(
+                ExitCodeHint::DeviceNotFound,
+                format!(
+                    "CONNECT failed: {e}\n\
+                     The board has to be running the bootloader to flash. With \
+                     `--enter-bootloader auto` (default) the host already tried the \
+                     reboot-to-BL trigger; if it still didn't answer, check the \
+                     adapter/node-id, power-cycle the board, or burn the bootloader \
+                     via SWD."
+                ),
+            )
+        })?;
 
     // ---- 2b. Pre-flight confirmation (FMEA #271 G3) ----
     //
@@ -1008,6 +1033,12 @@ const _: () = assert!(FLASH_ERASE_FLOOR_MS >= 4_000);
 /// `--reset-wait-ms`.
 const WRP_RESET_SETTLE_MS: u64 = 2_000;
 
+/// How long to wait after sending the app reboot-to-BL trigger before
+/// re-CONNECTing. The app opens relays + drains TX (~10 ms) then
+/// resets; the bootloader's preamble then has to come up. Generous so
+/// a slow boot doesn't race the retry.
+const ENTER_BL_SETTLE_MS: u64 = 2_000;
+
 fn open_session(global: &GlobalFlags, keepalive_ms: u32) -> Result<Session> {
     // FMEA #271 G2: never silently guess which physical board to
     // overwrite. A missing `--node-id` used to resolve to `0x3` (the
@@ -1151,6 +1182,7 @@ mod tests {
             keepalive_ms: 5000,
             profile: false,
             yes: true,
+            enter_bootloader: BootloaderEntry::Auto,
         };
         let cfg = build_flash_config(&args);
         assert!(!cfg.diff, "--no-diff should win");
@@ -1175,6 +1207,7 @@ mod tests {
             keepalive_ms: 5000,
             profile: false,
             yes: true,
+            enter_bootloader: BootloaderEntry::Auto,
         };
         let cfg = build_flash_config(&args);
         assert!(cfg.dry_run);
