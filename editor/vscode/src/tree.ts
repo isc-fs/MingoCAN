@@ -161,8 +161,8 @@ export class DeviceTreeProvider implements vscode.TreeDataProvider<IscFsTreeNode
             if (element.children.length === 0) {
                 return [
                     new StatusNode(
-                        '(no devices)',
-                        'No bootloader-mode devices on the bus',
+                        '(no devices in bootloader mode)',
+                        'Discover only sees devices in the bootloader. A board running its application firmware won’t appear here — reset it into the bootloader to discover/flash it.',
                     ),
                 ];
             }
