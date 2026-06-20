@@ -31,6 +31,20 @@ export async function fetchDevices(cfg: Config, cwd: string): Promise<DiscoverRo
     // configured adapter settings + a generous discover-window.
     const argv = [...buildGlobalArgv(cfg), 'discover', '--timeout-ms', '500'];
     const result = await runJson<DiscoverRow[]>(cfg.canFlasherPath, argv, cwd);
+    // `discover` exits 0 even when no bootloaders reply (an empty list
+    // is a valid result), so a NON-zero exit is a genuine failure —
+    // bad adapter / channel / bitrate, serial permissions, a missing
+    // CLI, etc. Throw so the caller renders it as an error node rather
+    // than a misleading "(no devices)". The empty-but-successful case
+    // falls through to `[]`.
+    if (result.exitCode !== 0) {
+        const detail =
+            result.stderr.split('\n').find((l) => l.trim().length > 0) ?? '';
+        throw new Error(
+            `discover failed (exit ${result.exitCode ?? 'killed'})` +
+                (detail.length > 0 ? `: ${detail}` : ''),
+        );
+    }
     return result.value ?? [];
 }
 
