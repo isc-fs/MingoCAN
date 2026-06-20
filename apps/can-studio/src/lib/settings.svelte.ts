@@ -54,6 +54,8 @@ export interface FlashSettings {
     verifyAfter: boolean;
     finalCommit: boolean;
     jump: boolean;
+    /** Reboot a running app into the bootloader if CONNECT fails. */
+    enterBootloader: boolean;
 }
 
 export interface BusMonitorSettings {
@@ -114,6 +116,7 @@ export function defaultSettings(): Settings {
             verifyAfter: true,
             finalCommit: true,
             jump: true,
+            enterBootloader: true,
         },
         busMonitor: {
             idFilter: '',

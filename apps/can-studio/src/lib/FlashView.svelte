@@ -230,6 +230,7 @@
                 verifyAfter: settings.flash.verifyAfter,
                 finalCommit: settings.flash.finalCommit,
                 jump: settings.flash.jump,
+                enterBootloader: settings.flash.enterBootloader,
             };
             const report = await runFlash(payload);
             result = report;
@@ -465,6 +466,10 @@
             <label class="toggle"><input type="checkbox" bind:checked={settings.flash.verifyAfter} /> Verify each sector</label>
             <label class="toggle"><input type="checkbox" bind:checked={settings.flash.finalCommit} /> Final CMD_FLASH_VERIFY commit</label>
             <label class="toggle"><input type="checkbox" bind:checked={settings.flash.jump} /> Jump to app after flash</label>
+            <label
+                class="toggle"
+                title="If the board is running its application, send the reboot-to-bootloader trigger (opens HV relays + resets into the BL) so it can be flashed without a manual reset."
+            ><input type="checkbox" bind:checked={settings.flash.enterBootloader} /> Enter bootloader if needed</label>
             <label class="toggle"><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
             <!--
                 Provision-after-flash auto-detects the role from
