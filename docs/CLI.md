@@ -229,6 +229,29 @@ over SWD, then the node ID goes into NVM over CAN, written by the now-running
 bootloader. `swd-flash --provision <role>` chains them, which is why it is
 incompatible with `--no-reset`.
 
+### `swd-flash --seed-node-id <role|0xN>` — commission with the probe alone
+
+*Experimental; requires the `swd` feature and bootloader seed support.*
+
+Writes the node ID over the **debug probe** while burning the bootloader — no
+CAN adapter, no boot round-trip. Instead of asking the running bootloader to
+write its NVM over CAN (`--provision`), it stages a small *provisioning seed*
+(magic + node-id + complement) at a reserved flash address that the bootloader
+adopts on its first boot, then reads it back to verify.
+
+```bash
+can-flasher swd-flash CAN_BL.elf --seed-node-id ams
+```
+
+- **Requires bootloader seed support**
+  ([stm32-can-bootloader#183](https://github.com/isc-fs/stm32-can-bootloader/issues/183)).
+  On a bootloader without it the seed is inert — use `--provision` (over CAN)
+  instead.
+- Mutually exclusive with `--provision` (the two write the node ID by different
+  paths).
+- Erases only the reserved seed sector, so the bootloader in sector 0 is left
+  intact.
+
 ## `logs` — pull microSD car-data logs
 
 Boards write car data to a microSD card; LOGFS pulls those files off over CAN.

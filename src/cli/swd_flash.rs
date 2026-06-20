@@ -104,6 +104,19 @@ pub struct SwdFlashArgs {
     /// must boot the bootloader to be provisioned).
     #[arg(long)]
     pub provision: Option<String>,
+
+    /// **Experimental.** Seed the board's node-id over SWD during the
+    /// burn — no CAN, no boot needed. Accepts a role (`ecu`/`ams`/`udv`)
+    /// or a node-id (`0x1`..`0xE`). Writes a provisioning seed the
+    /// bootloader adopts on first boot. Unlike `--provision` this needs
+    /// no CAN adapter, but **requires bootloader seed support**
+    /// (stm32-can-bootloader#183) and a fresh sector 7 — it's the
+    /// fresh-board commissioning path (it erases sector 7, wiping any
+    /// existing NVM/app-metadata). Re-provision an existing board with
+    /// `--provision` over CAN instead. Mutually exclusive with
+    /// `--provision`.
+    #[arg(long = "seed-node-id", conflicts_with = "provision")]
+    pub seed_node_id: Option<String>,
 }
 
 /// Auto-provision (`--provision`) needs the board running the new
@@ -118,6 +131,27 @@ fn check_provision_reset_combo(provision: bool, no_reset: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Resolve `--seed-node-id`: a role / firmware path (`ams`/`ecu`/`udv`)
+/// or a raw node-id (`0x1`..`0xE` / `1`..`14`).
+fn resolve_seed_node_id(raw: &str) -> Result<u8> {
+    if let Some((id, _src)) = super::provision::resolve_role_or_path(raw) {
+        return Ok(id);
+    }
+    let t = raw.trim();
+    let parsed = if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u8::from_str_radix(hex, 16)
+    } else {
+        t.parse::<u8>()
+    };
+    match parsed {
+        Ok(n) if (0x1..=0x0E).contains(&n) => Ok(n),
+        _ => Err(exit_err(
+            ExitCodeHint::InputFileError,
+            format!("--seed-node-id {raw:?}: expected a role (ecu/ams/udv) or a node-id 0x1..=0xE"),
+        )),
+    }
 }
 
 pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
@@ -144,6 +178,14 @@ pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
     request.verify = !args.no_verify;
     request.reset_after = !args.no_reset;
     request.sector_erase_only = args.sector_erase;
+    if let Some(ref raw) = args.seed_node_id {
+        let id = resolve_seed_node_id(raw)?;
+        request.seed_node_id = Some(id);
+        println!(
+            "Will seed node-id 0x{id:X} over SWD (experimental; requires bootloader \
+             seed support — stm32-can-bootloader#183)."
+        );
+    }
 
     // probe-rs is blocking; run on the blocking pool so the tokio
     // runtime stays responsive (matters for future Studio / VS
@@ -185,6 +227,13 @@ pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
             "warning: --no-verify was set; probe-rs did not read back the flash. \
              A silent bit-error here can ship a half-corrupt bootloader. \
              Re-run without --no-verify before declaring the chip good."
+        );
+    }
+    if let Some(id) = report.seeded_node_id {
+        println!(
+            "    ↳ provisioning seed written over SWD for node-id 0x{id:X} \
+             (the bootloader adopts it on boot, if it supports seeding — \
+             stm32-can-bootloader#183)."
         );
     }
 

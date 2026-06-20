@@ -109,6 +109,17 @@ pub struct SwdFlashRequest {
     /// Option bytes live in their own bank on STM32H7, so
     /// chip-erase of user flash doesn't touch them.
     pub sector_erase_only: bool,
+    /// **Experimental.** When `Some(id)`, after the burn write a
+    /// provisioning seed (see [`crate::provision_seed`]) so the freshly
+    /// booted bootloader adopts node-id `id` with no CAN round-trip.
+    /// Requires bootloader seed support
+    /// ([stm32-can-bootloader#183]); inert on a BL without it. Needs a
+    /// fresh/erased sector 7 (the default chip-erase), so this is a
+    /// fresh-board commissioning path — re-provision an existing board
+    /// over CAN instead.
+    ///
+    /// [stm32-can-bootloader#183]: https://github.com/isc-fs/stm32-can-bootloader/issues/183
+    pub seed_node_id: Option<u8>,
 }
 
 impl SwdFlashRequest {
@@ -124,6 +135,7 @@ impl SwdFlashRequest {
             verify: true,
             reset_after: true,
             sector_erase_only: false,
+            seed_node_id: None,
         }
     }
 }
@@ -241,6 +253,9 @@ pub struct SwdFlashReport {
     /// A low value here is one of the failure modes worth catching
     /// — a brown-out mid-write corrupts flash silently.
     pub target_voltage_v: Option<f32>,
+    /// The node-id seeded over SWD (see [`SwdFlashRequest::seed_node_id`]),
+    /// or `None` when seeding wasn't requested.
+    pub seeded_node_id: Option<u8>,
 }
 
 impl From<ProgressOperation> for SwdOperation {
@@ -541,6 +556,21 @@ where
         );
     }
 
+    // ---- Provisioning seed (experimental, opt-in) --------------------
+    //
+    // Write BEFORE the reset so the seed is in place when the BL boots
+    // and consumes it. Sector-erase only (do_chip_erase = false) so we
+    // touch sector 7 alone and leave the freshly-written BL in sector 0
+    // intact. Requires a fresh sector 7 (chip-erase burn) — see
+    // SwdFlashRequest::seed_node_id.
+    let seeded_node_id = if let Some(id) = request.seed_node_id {
+        info!(node_id = format!("0x{id:X}"), "writing provisioning seed");
+        write_provision_seed(&mut session, id)?;
+        Some(id)
+    } else {
+        None
+    };
+
     // ---- Reset --------------------------------------------------------
     if request.reset_after {
         info!("resetting target");
@@ -566,7 +596,56 @@ where
         crc32: source_crc32,
         size_bytes: image_size as u64,
         target_voltage_v,
+        seeded_node_id,
     })
+}
+
+/// Write the [`crate::provision_seed`] record at the reserved flash
+/// address over SWD. Sector-erase only (preserves the bootloader in
+/// sector 0), then a probe-rs verify + an independent readback so a
+/// bad write surfaces here rather than as a silently-unprovisioned
+/// board. The board's bootloader adopts the node-id on its next boot.
+fn write_provision_seed(session: &mut Session, node_id: u8) -> Result<(), SwdError> {
+    let record = crate::provision_seed::build_seed_record(node_id)
+        .map_err(|e| SwdError::ProbeRs(format!("building provisioning seed: {e}")))?;
+
+    // probe-rs programs flash from a file; stage the 32-byte record in
+    // a temp .bin and download it at the reserved address.
+    let mut tmp = std::env::temp_dir();
+    tmp.push(format!("cf-provision-seed-{node_id:02x}.bin"));
+    std::fs::write(&tmp, record)
+        .map_err(|e| SwdError::ProbeRs(format!("staging seed temp file: {e}")))?;
+
+    let mut options = DownloadOptions::default();
+    // NEVER chip-erase here — that would wipe the bootloader we just
+    // wrote. Sector-erase only touches sector 7.
+    options.do_chip_erase = false;
+    options.verify = true;
+    let format = Format::Bin(BinOptions {
+        base_address: Some(crate::provision_seed::SEED_ADDR),
+        skip: 0,
+    });
+    let result = download_file_with_options(session, &tmp, format, options)
+        .map_err(|e| SwdError::ProbeRs(format!("writing provisioning seed: {e}")));
+    let _ = std::fs::remove_file(&tmp);
+    result?;
+
+    // Independent readback: the seed is small and the cost is trivial,
+    // and an unprovisioned board is an easy-to-miss failure.
+    let mut readback = [0u8; crate::provision_seed::SEED_LEN];
+    {
+        let mut core = session
+            .core(0)
+            .map_err(|e| SwdError::ProbeRs(format!("get core for seed readback: {e}")))?;
+        core.read(crate::provision_seed::SEED_ADDR, &mut readback)
+            .map_err(|e| SwdError::ProbeRs(format!("seed readback: {e}")))?;
+    }
+    match crate::provision_seed::parse_seed_record(&readback) {
+        Some(id) if id == node_id => Ok(()),
+        _ => Err(SwdError::ProbeRs(format!(
+            "provisioning seed readback didn't match (wanted node-id 0x{node_id:X})"
+        ))),
+    }
 }
 
 /// Inputs to [`erase_chip`] — the same probe + chip selection as
