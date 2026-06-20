@@ -66,6 +66,16 @@ pub struct FlashRequest {
     pub final_commit: bool,
     /// Jump to the application after a successful flash.
     pub jump: bool,
+    /// When true (default), if the target doesn't answer CONNECT,
+    /// send the app reboot-to-bootloader trigger, wait, and retry —
+    /// so a board running its application can be flashed without a
+    /// manual reset. The trigger opens the board's HV relays first.
+    #[serde(default = "default_true")]
+    pub enter_bootloader: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ---- Events emitted to frontend ----
@@ -190,10 +200,15 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
         },
     );
 
-    // ---- 4. Connect ----
+    // ---- 4. Connect (auto-entering the bootloader if needed) ----
 
+    let entry = if request.enter_bootloader {
+        can_flasher::app_control::BootloaderEntry::Auto
+    } else {
+        can_flasher::app_control::BootloaderEntry::Never
+    };
     let _proto = session
-        .connect()
+        .connect_entering_bootloader(entry, Duration::from_millis(2_000))
         .await
         .map_err(|e| format!("CONNECT failed: {e}"))?;
 

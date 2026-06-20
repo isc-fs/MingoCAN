@@ -88,6 +88,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
 
+use crate::app_control::{BootloaderEntry, REBOOT_TO_BL_ID, REBOOT_TO_BL_PAYLOAD};
 use crate::protocol::commands::{
     cmd_connect, cmd_disconnect, cmd_get_health, PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR,
 };
@@ -366,6 +367,51 @@ impl Session {
                 Response::Discover { .. } => "unexpected DISCOVER during CONNECT",
                 _ => "unexpected response during CONNECT",
             })),
+        }
+    }
+
+    /// Send one raw classic-CAN frame, bypassing the bootloader
+    /// protocol entirely (no ISO-TP, no node-id encoding). For
+    /// app-level signals a *running application* listens for — e.g.
+    /// the reboot-to-bootloader trigger. The session need not be
+    /// connected (the frame goes straight out on the backend).
+    pub async fn send_app_frame(&self, id: u16, data: &[u8]) -> Result<(), SessionError> {
+        let frame = CanFrame::new(id, data)?;
+        self.inner.backend.send(frame).await?;
+        Ok(())
+    }
+
+    /// CONNECT, transparently rebooting a *running application* into
+    /// the bootloader when needed (see [`BootloaderEntry`]).
+    ///
+    /// On `Auto`, a first CONNECT timeout is taken to mean "no
+    /// bootloader answered" — the app-level reboot-to-BL frame is
+    /// sent, we wait `settle` for the bootloader to come up, then
+    /// retry CONNECT once. `Always` sends the trigger up front;
+    /// `Never` is a plain [`connect`](Self::connect).
+    pub async fn connect_entering_bootloader(
+        &self,
+        entry: BootloaderEntry,
+        settle: Duration,
+    ) -> Result<(u8, u8), SessionError> {
+        match entry {
+            BootloaderEntry::Never => self.connect().await,
+            BootloaderEntry::Always => {
+                self.send_app_frame(REBOOT_TO_BL_ID, &REBOOT_TO_BL_PAYLOAD)
+                    .await?;
+                tokio::time::sleep(settle).await;
+                self.connect().await
+            }
+            BootloaderEntry::Auto => match self.connect().await {
+                Ok(v) => Ok(v),
+                Err(SessionError::CommandTimeout { .. }) => {
+                    self.send_app_frame(REBOOT_TO_BL_ID, &REBOOT_TO_BL_PAYLOAD)
+                        .await?;
+                    tokio::time::sleep(settle).await;
+                    self.connect().await
+                }
+                Err(e) => Err(e),
+            },
         }
     }
 
