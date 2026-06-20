@@ -9,6 +9,7 @@
 <script lang="ts">
     import { onDestroy, tick } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
+    import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
     import {
         onFlashEvent,
@@ -38,6 +39,24 @@
     }
     function applyProfile(text: string): string {
         return text.replaceAll('{profile}', profileLabel());
+    }
+
+    // Build working directory — the folder the build command runs in
+    // (usually the CMake project root). Lives on the Flash tab (not
+    // just Settings) because it's the one build field that changes as
+    // you hop between projects on the bench.
+    async function browseForBuildCwd(): Promise<void> {
+        const current = settings.flash.buildCwd.trim();
+        const picked = await openDialog({
+            title: 'Pick the build working directory',
+            multiple: false,
+            directory: true,
+            canCreateDirectories: true,
+            defaultPath: current.length > 0 ? current : undefined,
+        });
+        if (typeof picked === 'string' && picked.length > 0) {
+            settings.flash.buildCwd = picked;
+        }
     }
 
     const adapterReady = $derived(
@@ -383,6 +402,27 @@
             </p>
         </div>
 
+        <div class="field">
+            <label for="buildcwd">Build directory</label>
+            <div class="dir-row">
+                <input
+                    id="buildcwd"
+                    class="input mono"
+                    type="text"
+                    placeholder="(defaults to the artifact's parent)"
+                    bind:value={settings.flash.buildCwd}
+                />
+                <button type="button" class="btn btn-sm" onclick={browseForBuildCwd}>
+                    Browse…
+                </button>
+            </div>
+            <p class="hint">
+                Folder the build command runs in — usually your project
+                root. The build command + artifact path themselves stay in
+                <strong>Settings → Firmware build</strong>.
+            </p>
+        </div>
+
         <div class="row-three">
             <div class="field">
                 <label for="bitrate">Bitrate (bps)</label>
@@ -691,6 +731,16 @@
         background: var(--accent);
         color: var(--accent-contrast, #fff);
         font-weight: 600;
+    }
+
+    /* Build-directory row — text input flexes to fill, Browse… button
+       hugs its content. */
+    .dir-row {
+        display: flex;
+        gap: var(--space-2);
+    }
+    .dir-row .input {
+        flex: 1;
     }
 
     /* Three-up grid for bitrate / node-id / timeout. Drops to a
