@@ -9,7 +9,7 @@
 <script lang="ts">
     import { onDestroy, tick } from 'svelte';
     import type { UnlistenFn } from '@tauri-apps/api/event';
-    import { open as openDialog } from '@tauri-apps/plugin-dialog';
+    import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
 
     import {
         onFlashEvent,
@@ -109,15 +109,14 @@
 
     // ---- Provision-after-flash ---------------------------------
     // When the artifact filename matches a role (`ams.elf` /
-    // `ecu.hex` / `udv.bin` etc.) we offer to write the matching
-    // node-id NVM key + reset the board after a successful flash.
-    // The toggle is operator-controlled — auto-checked when a
-    // role gets detected so the common case is one-click, but
-    // never magically fires without the operator's consent.
+    // `ecu.hex` / `udv.bin` etc.) we offer to commission the board —
+    // write the matching node-id NVM key + reset it. Rather than a
+    // pre-checked box that's easy to miss, a successful flash pops a
+    // confirm dialog naming the role + node-id, so commissioning is
+    // an explicit, unmissable choice and never fires silently.
     const detectedRole = $derived<Role | null>(
         inferRoleFromArtifact(settings.flash.artifactPath.trim()),
     );
-    let provisionAfterFlash = $state<boolean>(true);
     let provisionState = $state<
         | { kind: 'idle' }
         | { kind: 'running' }
@@ -237,15 +236,29 @@
             progressMessage = `done in ${report.duration_ms} ms`;
             lastOutcome = 'success';
 
-            // Provision-after-flash hook. Skipped when the operator
-            // unchecked the box, when there's no detectable role
-            // from the artifact name, or when the adapter isn't
-            // backed by an interface we can drive. Failures here
-            // don't roll back the flash — surface the error and
-            // let the operator re-run `provision` standalone if
-            // they need to retry.
+            // Provision-after-flash hook. When the artifact name
+            // resolves to a role, pop a confirm dialog asking whether
+            // to commission the board as that role (write node-id +
+            // reset). No role detected → nothing to ask. Failures
+            // here don't roll back the flash — surface the error and
+            // let the operator re-run later if they need to retry.
             const role = detectedRole;
-            if (provisionAfterFlash && role !== null) {
+            const wantsProvision =
+                role !== null &&
+                (await ask(
+                    `Flashed ${role.name.toUpperCase()} firmware.\n\n` +
+                        `Commission this board as ${role.name.toUpperCase()}? ` +
+                        `This writes node-id 0x${role.nodeId
+                            .toString(16)
+                            .toUpperCase()} to NVM and resets the board.`,
+                    {
+                        title: 'ISC MingoCAN — Commission board',
+                        kind: 'info',
+                        okLabel: `Commission as ${role.name.toUpperCase()}`,
+                        cancelLabel: 'Skip',
+                    },
+                ));
+            if (role !== null && wantsProvision) {
                 provisionState = { kind: 'running' };
                 try {
                     await provisionNodeId({
@@ -471,34 +484,22 @@
                 title="If the board is running its application, send the reboot-to-bootloader trigger (opens HV relays + resets into the BL) so it can be flashed without a manual reset."
             ><input type="checkbox" bind:checked={settings.flash.enterBootloader} /> Enter bootloader if needed</label>
             <label class="toggle"><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
-            <!--
-                Provision-after-flash auto-detects the role from
-                the artifact's basename. We always render the
-                checkbox so its presence isn't a surprise, but
-                disable + dim it when no role is recoverable from
-                the filename. Tooltip explains the requirement.
-            -->
-            <label
-                class="toggle"
-                class:provision-disabled={detectedRole === null}
-                title={detectedRole === null
-                    ? 'Artifact filename must match a role (ams.elf / ecu.hex / udv.bin) to enable.'
-                    : `After flash: write node-id 0x${detectedRole.nodeId
-                          .toString(16)
-                          .padStart(2, '0')} to NVM and reset.`}
-            >
-                <input
-                    type="checkbox"
-                    bind:checked={provisionAfterFlash}
-                    disabled={detectedRole === null}
-                />
-                Provision as
-                <strong>
-                    {detectedRole === null ? '—' : detectedRole.name.toUpperCase()}
-                </strong>
-                after flash
-            </label>
         </div>
+        {#if detectedRole !== null}
+            <!--
+                When the artifact name resolves to a role, a confirm
+                dialog after the flash asks whether to commission the
+                board (write node-id + reset) — so this is just a
+                heads-up that the prompt will appear, not a control.
+            -->
+            <p class="provision-hint">
+                <code class="mono">{detectedRole.name.toUpperCase()}</code>
+                firmware detected — after a successful flash you'll be asked
+                whether to commission this board as
+                <strong>{detectedRole.name.toUpperCase()}</strong>
+                (node-id 0x{detectedRole.nodeId.toString(16).toUpperCase()}).
+            </p>
+        {/if}
     </div>
 
     <div class="actions">
@@ -772,9 +773,23 @@
         gap: var(--space-4);
         margin-top: var(--space-1);
     }
-    .opts .toggle.provision-disabled {
-        opacity: 0.45;
-        cursor: help;
+    /* Commission heads-up — shown under the toggles when the
+       artifact name resolves to a role; the actual choice is the
+       post-flash confirm dialog. */
+    .provision-hint {
+        margin: var(--space-2) 0 0;
+        font-size: var(--text-xs);
+        color: var(--text-muted);
+        line-height: 1.5;
+    }
+    .provision-hint code {
+        padding: 0 4px;
+        border-radius: var(--radius-sm);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+    }
+    .provision-hint strong {
+        color: var(--text);
     }
 
     /* Buttons row under the form — gap matches the form's internal
