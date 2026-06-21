@@ -464,10 +464,14 @@ jobs:
           cd isk
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- mingocan/latest.json; then
+          # Stage first, THEN check — `git diff` ignores untracked
+          # files, so on the very first publish (new mingocan/latest.json)
+          # the old `git diff --quiet` saw "no change" and skipped the
+          # commit. `git diff --cached --quiet` sees the staged add.
+          git add mingocan/latest.json
+          if git diff --cached --quiet; then
             echo "manifest unchanged — nothing to commit"
           else
-            git add mingocan/latest.json
             git commit -m "mingocan: publish ${TAG}"
             git push origin HEAD:main
           fi
