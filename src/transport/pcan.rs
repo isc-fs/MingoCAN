@@ -1,4 +1,5 @@
-//! PCAN-Basic SDK backend — PEAK System adapters on Windows and macOS.
+//! PCAN runtime-library backend — PEAK adapters on Windows (via PEAK's
+//! PCAN-Basic) and macOS (via the third-party MacCAN `libPCBUSB`).
 //!
 //! Linux users go through [`super::socketcan::SocketCanBackend`]
 //! instead, because the `peak_usb` kernel module exposes PCAN devices
@@ -217,13 +218,24 @@ impl PcanApi {
     }
 }
 
+/// Platform-correct download pointer for the PCAN runtime library,
+/// surfaced in "missing" / "incomplete install" errors. This module is
+/// cfg-gated to `windows | macos`, so these two arms cover every build:
+/// PEAK's PCAN-Basic on Windows, the third-party MacCAN `libPCBUSB` on
+/// macOS (PEAK does not ship a macOS driver).
+#[cfg(target_os = "windows")]
+const PCAN_DOWNLOAD_URL: &str =
+    "https://www.peak-system.com/products/software/development-packages/pcan-basic/";
+#[cfg(target_os = "macos")]
+const PCAN_DOWNLOAD_URL: &str = "https://github.com/mac-can/PCBUSB-Library";
+
 fn missing_symbol(name: &'static str, err: libloading::Error) -> TransportError {
     TransportError::AdapterMissing {
         name: "pcan",
         reason: format!(
-            "PCAN-Basic library is missing required symbol `{name}`: {err}. \
-             Is this an older / partial PCAN-Basic install? Try reinstalling \
-             from https://www.peak-system.com/Software-APIs.305.0.html"
+            "PCAN library is missing required symbol `{name}`: {err}. \
+             Is this an older / partial install? Try reinstalling \
+             from {PCAN_DOWNLOAD_URL}"
         ),
     }
 }
@@ -404,11 +416,11 @@ fn load_library() -> Result<Library> {
     Err(TransportError::AdapterMissing {
         name: "pcan",
         reason: format!(
-            "PCAN-Basic library `{lib_name}` not found. Searched: \
+            "PCAN library `{lib_name}` not found. Searched: \
              PCAN_LIB_PATH env var, default path ({default_path}), \
-             executable directory. Download and install the SDK from \
-             https://www.peak-system.com/Software-APIs.305.0.html \
-             — or set PCAN_LIB_PATH to an existing install."
+             executable directory. Download and install it from \
+             {PCAN_DOWNLOAD_URL} — or set PCAN_LIB_PATH to an existing \
+             install."
         ),
     })
 }

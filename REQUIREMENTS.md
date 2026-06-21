@@ -67,10 +67,11 @@ behaviour.
 ### PCAN (PEAK System)
 
 PEAK adapters are recommended when hardware timestamps, high bus
-loads, or multi-channel operation are required. PEAK provides the
-PCAN-Basic SDK (shared library) for Windows and macOS, and a kernel
-module (`peak_usb`) for Linux that exposes a native SocketCAN
-interface.
+loads, or multi-channel operation are required. The flasher loads a
+PCAN shared library at runtime: PEAK's own PCAN-Basic on Windows, the
+free third-party MacCAN `libPCBUSB` on macOS (PEAK does not ship a
+macOS driver themselves), and on Linux the `peak_usb` kernel module
+exposes a native SocketCAN interface (no shared library needed).
 
 | Model | Notes |
 |---|---|
@@ -84,8 +85,8 @@ interface.
 | OS | What to do |
 |---|---|
 | Linux | Install `peak_usb` kernel module via `sudo apt install libpcan-dev peak-linux-driver`. Device appears as a SocketCAN interface (`can0`, `can1`). |
-| macOS | Install PCAN-Basic for Mac from peak-system.com. The `.dylib` lands at `/usr/local/lib/libPCBUSB.dylib`. |
-| Windows | Install PCAN-Basic from peak-system.com. `PCANBasic.dll` lands in `System32`. |
+| macOS | Install the free MacCAN `libPCBUSB` driver (user-space, no kext) from [github.com/mac-can/PCBUSB-Library](https://github.com/mac-can/PCBUSB-Library/releases). The `.dylib` lands at `/usr/local/lib/libPCBUSB.dylib`. |
+| Windows | Install [PCAN-Basic](https://www.peak-system.com/products/software/development-packages/pcan-basic/) from PEAK. `PCANBasic.dll` lands on the system DLL path. |
 
 **Channel naming on PCAN** (used with `--channel`):
 
@@ -295,7 +296,9 @@ runtime via `libloading`. Library path resolution order:
 
 If the library cannot be found, the error message must include:
 - The paths searched
-- Download URL: `https://www.peak-system.com/Software-APIs.305.0.html`
+- A platform-correct download URL — PCAN-Basic on Windows
+  (`https://www.peak-system.com/products/software/development-packages/pcan-basic/`),
+  MacCAN `libPCBUSB` on macOS (`https://github.com/mac-can/PCBUSB-Library`)
 - The `PCAN_LIB_PATH` override variable
 
 Initialisation sequence:

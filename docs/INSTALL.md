@@ -74,13 +74,40 @@ sudo ip link add dev vcan0 type vcan
 sudo ip link set up vcan0
 ```
 
-### PCAN-Basic (Windows / macOS)
+### PCAN (Windows / macOS)
 
-Download and install the PCAN-Basic SDK from
-[peak-system.com/Software-APIs.305.0.html](https://www.peak-system.com/Software-APIs.305.0.html).
-The flasher loads the shared library at runtime; on Linux PCAN
-adapters appear under SocketCAN via the `peak_usb` kernel module so
-the SDK isn't needed there.
+The flasher loads the PCAN shared library at runtime — but the library,
+and where you get it, differs per OS.
+
+**macOS.** PEAK does **not** ship a macOS driver themselves; macOS
+support for PCAN-USB is the free third-party **MacCAN `libPCBUSB`**
+library, which PEAK officially points to. It's a pure user-space driver
+— no kext, no SIP changes, universal arm64 + Intel, macOS 10.13+.
+
+1. Download the latest universal build from the MacCAN releases —
+   [github.com/mac-can/PCBUSB-Library/releases](https://github.com/mac-can/PCBUSB-Library/releases)
+   (e.g. `macOS_Library_for_PCANUSB_vX.Y.tar.gz`). Background and install
+   notes: [mac-can.github.io/drivers/libPCBUSB.html](https://mac-can.github.io/drivers/libPCBUSB.html).
+2. Extract it and run the bundled `install.sh` with `sudo` — it installs
+   `libPCBUSB.dylib` into `/usr/local/lib`, exactly where the flasher
+   looks by default. Manual fallback: `sudo cp libPCBUSB.*.dylib /usr/local/lib/`.
+3. Gatekeeper quarantines unsigned downloads. If the flasher reports the
+   library is missing even after install, clear the attribute:
+   `sudo xattr -dr com.apple.quarantine /usr/local/lib/libPCBUSB.dylib`
+   (or approve it under System Settings → Privacy & Security).
+
+**Windows.** Install **PCAN-Basic** from PEAK:
+[peak-system.com/.../pcan-basic](https://www.peak-system.com/products/software/development-packages/pcan-basic/).
+The installer drops `PCANBasic.dll` onto the system DLL path.
+
+**Linux.** Nothing from here is needed — PCAN adapters appear under
+SocketCAN via the `peak_usb` kernel module, so use `--interface
+socketcan` (or `--interface pcan`, which delegates to it). See the
+SocketCAN section above.
+
+If the library lives somewhere non-standard, point the flasher at it
+with the `PCAN_LIB_PATH` environment variable. Confirm the adapter is
+seen with `can-flasher adapters`.
 
 ### ST-LINK + SWD (optional, `--features swd`)
 
