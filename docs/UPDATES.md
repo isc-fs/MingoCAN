@@ -7,13 +7,20 @@ install it in place, then relaunch. It uses the official
 ## How it works
 
 1. On launch (and from **Settings → Updates → Check for updates**) the
-   app fetches the update manifest from the endpoint in
+   app fetches the update manifest from the endpoints in
    `apps/can-studio/src-tauri/tauri.conf.json` →
-   `plugins.updater.endpoints`:
+   `plugins.updater.endpoints` (tried in order):
 
    ```
+   https://raw.githubusercontent.com/isc-fs/iskapps/main/mingocan/latest.json
    https://github.com/isc-fs/can-flasher/releases/latest/download/latest.json
    ```
+
+   The first is the **iskApps** "pit garage" ([isc-fs/iskapps](https://github.com/isc-fs/iskapps)) —
+   the team's public download + auto-update channel shared with the
+   other desktop apps (Wario Charger etc.). The second is the
+   can-flasher release, kept during the transition so installs built
+   before the iskApps endpoint existed keep updating.
 
 2. `latest.json` (published per release by CI) lists the latest version
    plus a per-platform signed bundle URL. If it's newer than the running
@@ -33,6 +40,24 @@ Platform self-update support:
 | macOS | `.app.tar.gz` (from the `.dmg`) | unsigned — see caveat below |
 | Windows | `.nsis.zip` (from the `.exe`) | |
 | Linux | `.AppImage.tar.gz` | **AppImage only** — the `.deb`/`.rpm` are owned by apt/dnf and can't self-update; run the AppImage build to get auto-update on Linux |
+
+## iskApps mirror — `ISKAPPS_TOKEN` secret (required)
+
+The `publish-iskapps` job in `release.yml` re-hosts each release's
+Studio installers to [isc-fs/iskapps](https://github.com/isc-fs/iskapps)
+as a `mingocan-vX.Y.Z` release and commits `mingocan/latest.json`
+(the same manifest, with its `url`s rewritten to the iskApps assets —
+signatures unchanged, so the baked-in pubkey still verifies).
+
+Actions' built-in `GITHUB_TOKEN` is scoped to can-flasher and **can't
+write to iskApps**, so this needs a cross-repo token:
+
+- Create a fine-grained PAT (or GitHub App installation token) with
+  **`contents: write`** on `isc-fs/iskapps`.
+- Add it to can-flasher as the repo secret **`ISKAPPS_TOKEN`**.
+
+When the secret is absent the job no-ops (logs a warning, exits 0), so
+the release still succeeds — only the iskApps mirror is skipped.
 
 ## One-time activation (required before the next release tag)
 

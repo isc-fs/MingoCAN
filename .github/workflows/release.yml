@@ -389,6 +389,89 @@ jobs:
           releaseDraft: false
           prerelease: false
 
+  # ---- Mirror MingoCAN to the iskApps "pit garage" ------------
+  #
+  # iskApps (isc-fs/iskapps) is the team's public download + auto-
+  # update channel for all desktop apps (Wario Charger etc.). This
+  # job re-hosts the Studio installers there as a `mingocan-vX.Y.Z`
+  # release and commits `mingocan/latest.json` (the Tauri updater
+  # manifest, with its `url`s rewritten to the iskApps assets — the
+  # signatures are unchanged since the bundles are byte-identical).
+  # The app's updater polls that manifest (see tauri.conf.json
+  # endpoints); we also keep publishing to the can-flasher release so
+  # already-installed builds with the old endpoint don't lose updates.
+  #
+  # Needs a cross-repo token: GITHUB_TOKEN can't write to iskApps.
+  # Add `ISKAPPS_TOKEN` (a PAT or GitHub App token with `contents:
+  # write` on isc-fs/iskapps) as a repo secret. When it's absent the
+  # job no-ops (logs + exits 0) so the release still succeeds.
+  publish-iskapps:
+    name: mirror MingoCAN to iskApps
+    needs: [create-release, studio-build]
+    if: github.ref_type == 'tag' && needs.studio-build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-host installers + publish manifest
+        env:
+          TAG: ${{ github.ref_name }}
+          CF_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISKAPPS_TOKEN: ${{ secrets.ISKAPPS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ISKAPPS_TOKEN}" ]; then
+            echo "::warning::ISKAPPS_TOKEN not set — skipping iskApps mirror. \
+            Add a PAT/App token with contents:write on isc-fs/iskapps to enable."
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          APP_TAG="mingocan-${TAG}"
+
+          # 1. Pull the Studio bundles + manifest the studio-build job
+          #    just attached to the can-flasher release.
+          mkdir -p dist && cd dist
+          GH_TOKEN="${CF_TOKEN}" gh release download "${TAG}" \
+            --repo isc-fs/can-flasher \
+            --pattern 'ISC*' --pattern 'latest.json'
+          ls -la
+
+          # 2. Create (or update) the iskApps release and upload the
+          #    installers + signed updater bundles (everything but the
+          #    manifest, which lives in the repo tree).
+          UPLOADS=$(ls | grep -v '^latest.json$')
+          if GH_TOKEN="${ISKAPPS_TOKEN}" gh release view "${APP_TAG}" --repo isc-fs/iskapps >/dev/null 2>&1; then
+            GH_TOKEN="${ISKAPPS_TOKEN}" gh release upload "${APP_TAG}" $UPLOADS --repo isc-fs/iskapps --clobber
+          else
+            GH_TOKEN="${ISKAPPS_TOKEN}" gh release create "${APP_TAG}" $UPLOADS \
+              --repo isc-fs/iskapps \
+              --title "ISC MingoCAN ${TAG}" \
+              --notes "ISC MingoCAN ${VERSION} — flash, monitor, and debug CAN on the team's STM32 ECUs. Grab the installer for your platform below."
+          fi
+
+          # 3. Rewrite the manifest's URLs to the iskApps release
+          #    (signatures stay — same bytes, just re-hosted) and
+          #    commit it to iskApps `main` as mingocan/latest.json.
+          BASE="https://github.com/isc-fs/iskapps/releases/download/${APP_TAG}/"
+          jq --arg base "$BASE" \
+            '.platforms |= map_values(.url = ($base + (.url | split("/") | last)))' \
+            latest.json > latest.rewritten.json
+          mv latest.rewritten.json latest.json
+          cat latest.json
+
+          cd ..
+          git clone --depth 1 "https://x-access-token:${ISKAPPS_TOKEN}@github.com/isc-fs/iskapps.git" isk
+          mkdir -p isk/mingocan
+          cp dist/latest.json isk/mingocan/latest.json
+          cd isk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- mingocan/latest.json; then
+            echo "manifest unchanged — nothing to commit"
+          else
+            git add mingocan/latest.json
+            git commit -m "mingocan: publish ${TAG}"
+            git push origin HEAD:main
+          fi
+
   # ---- Inline dev → main sync ---------------------------------
   #
   # Same logic as the pre-consolidation release.yml. Fast-forwards
