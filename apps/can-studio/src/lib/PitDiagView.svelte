@@ -150,6 +150,91 @@
     let crash = $state<CrashSnapshot | null>(null);
     let fw = $state<FwSnapshot | null>(null);
 
+    // ---- ECU pit-diag snapshots (0x700..=0x705) ----
+    // The ECU stream is small and unrelated to the AMS one: five
+    // frames at 10 Hz. Each arrives independently; keep the latest.
+    interface EcuStatusSnapshot {
+        fsmState: string;
+        invState: string;
+        ev23: boolean;
+        t1189: boolean;
+        rtdsActive: boolean;
+        okPrecharge: boolean;
+        startButton: boolean;
+        torquePct: number;
+        vCellMinMv: number;
+        torqueCmd: number;
+    }
+    interface EcuPedalsSnapshot {
+        apps1Raw: number;
+        apps2Raw: number;
+        brakeRaw: number;
+        apps1Pct: number;
+        apps2Pct: number;
+    }
+    interface EcuBrakeSnapshot {
+        brakePressureDbar: number;
+        brakePct: number;
+    }
+    interface EcuInverterSnapshot {
+        dcBusVoltage: number;
+        invRpm: number;
+        invError: number;
+    }
+    interface EcuFwSnapshot {
+        versionMajor: number;
+        versionMinor: number;
+        versionPatch: number;
+        gitHash: number[];
+    }
+
+    let ecuStatus = $state<EcuStatusSnapshot | null>(null);
+    let ecuPedals = $state<EcuPedalsSnapshot | null>(null);
+    let ecuBrake = $state<EcuBrakeSnapshot | null>(null);
+    let ecuInverter = $state<EcuInverterSnapshot | null>(null);
+    let ecuFw = $state<EcuFwSnapshot | null>(null);
+
+    // APPS plausibility: FSAE T11.8.9 trips at >10% disagreement
+    // between the two pedal channels. Surface the live delta so the
+    // operator can sanity-check the pedal calibration on the bench.
+    const appsDelta = $derived(
+        ecuPedals === null
+            ? null
+            : Math.abs(ecuPedals.apps1Pct - ecuPedals.apps2Pct),
+    );
+    const appsImplausible = $derived(appsDelta !== null && appsDelta > 10);
+
+    // ECU FSM state → pill tone. "active" is the good driving state;
+    // "amsError"/unknown are bad; the rest are transitions.
+    function ecuFsmTone(state: string): 'success' | 'warning' | 'danger' | 'info' {
+        if (state === 'active') return 'success';
+        if (state === 'amsError' || state.startsWith('unknown')) return 'danger';
+        return 'info';
+    }
+    // Inverter state → tone. "ready" good, "standby" neutral.
+    function ecuInvTone(state: string): 'success' | 'info' | 'danger' {
+        if (state === 'ready') return 'success';
+        if (state.startsWith('unknown')) return 'danger';
+        return 'info';
+    }
+
+    // ECU firmware header chip — "ECU v1.6.2 · a1b2c3d4".
+    const ecuFwLabel = $derived(
+        ecuFw === null
+            ? null
+            : `ECU v${ecuFw.versionMajor}.${ecuFw.versionMinor}.${ecuFw.versionPatch}` +
+                  ` · ${ecuFw.gitHash.map((b) => b.toString(16).padStart(2, '0')).join('')}`,
+    );
+
+    // True once any ECU frame has landed — gates the panels vs the
+    // "arm to begin" hint.
+    const ecuHasData = $derived(
+        ecuStatus !== null ||
+            ecuPedals !== null ||
+            ecuBrake !== null ||
+            ecuInverter !== null,
+    );
+
     // Is cell `idx` discharging? Mirrors BalanceState::is_discharging
     // in the library: low 64 from dccLo (BigInt), 64..=94 from dccHi.
     function isDischarging(idx: number): boolean {
@@ -290,6 +375,11 @@
         boot = null;
         crash = null;
         fw = null;
+        ecuStatus = null;
+        ecuPedals = null;
+        ecuBrake = null;
+        ecuInverter = null;
+        ecuFw = null;
         framesThisScan = 0;
         lastScanFrames = 0;
         try {
@@ -319,10 +409,10 @@
         armState = { kind: 'idle' };
     }
 
-    // Switch the targeted ECU. If a stream is armed (only AMS can be,
-    // today), disarm it first — while `profile` still names the armed
-    // ECU — so the disable frame goes to the right node and the AMS
-    // doesn't keep streaming in the background behind the placeholder.
+    // Switch the targeted ECU. If a stream is armed, disarm it first —
+    // while `profile` still names the armed node — so the disable frame
+    // goes to the right ID (AMS 0x7F0 vs ECU 0x7E0) and that node
+    // doesn't keep streaming in the background behind the new view.
     async function selectProfile(next: PitDiagProfile): Promise<void> {
         if (next === profile) return;
         if (armState.kind === 'armed') {
@@ -412,6 +502,51 @@
                     versionPatch: event.versionPatch,
                     gitHash: event.gitHash,
                     blNodeId: event.blNodeId,
+                };
+                framesThisScan += 1;
+                // ---- ECU profile frames (0x700..=0x705) ----
+            } else if (event.kind === 'ecuStatus') {
+                ecuStatus = {
+                    fsmState: event.fsmState,
+                    invState: event.invState,
+                    ev23: event.ev23,
+                    t1189: event.t1189,
+                    rtdsActive: event.rtdsActive,
+                    okPrecharge: event.okPrecharge,
+                    startButton: event.startButton,
+                    torquePct: event.torquePct,
+                    vCellMinMv: event.vCellMinMv,
+                    torqueCmd: event.torqueCmd,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuPedals') {
+                ecuPedals = {
+                    apps1Raw: event.apps1Raw,
+                    apps2Raw: event.apps2Raw,
+                    brakeRaw: event.brakeRaw,
+                    apps1Pct: event.apps1Pct,
+                    apps2Pct: event.apps2Pct,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuBrake') {
+                ecuBrake = {
+                    brakePressureDbar: event.brakePressureDbar,
+                    brakePct: event.brakePct,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuInverter') {
+                ecuInverter = {
+                    dcBusVoltage: event.dcBusVoltage,
+                    invRpm: event.invRpm,
+                    invError: event.invError,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuFwInfo') {
+                ecuFw = {
+                    versionMajor: event.versionMajor,
+                    versionMinor: event.versionMinor,
+                    versionPatch: event.versionPatch,
+                    gitHash: event.gitHash,
                 };
                 framesThisScan += 1;
             }
@@ -535,6 +670,14 @@
                     frames/scan). Disarm sends the zero-payload frame;
                     firmware also clears the flag on reboot.
                 </p>
+            {:else if profile === 'ecu'}
+                <p class="muted">
+                    ECU observer mode. Arming emits <code>0x7E0#DEADBEEF</code>;
+                    the ECU replies on <code>0x7E1</code> and streams APPS,
+                    brake, FSM, and inverter telemetry at 10 Hz
+                    (<code>0x700..=0x705</code>). Disarm sends the zero-payload
+                    frame; firmware also clears the flag on reboot.
+                </p>
             {:else}
                 <p class="muted">
                     Per-ECU diagnostic observer. Select an ECU to arm its
@@ -548,6 +691,13 @@
                 title="From the 0x6C6 firmware-ID frame. Compare against the build you flashed."
             >
                 {fwLabel}
+            </span>
+        {:else if profile === 'ecu' && ecuFwLabel !== null}
+            <span
+                class="pill fw-chip mono"
+                title="From the 0x703 firmware-ID frame. Compare against the build you flashed."
+            >
+                {ecuFwLabel}
             </span>
         {/if}
     </header>
@@ -578,29 +728,225 @@
         </div>
     {/if}
 
-    {#if profile !== 'ams'}
-        <!-- ECU / uDV placeholder. No arm handshake or frame contract
-             exists for these yet, so we don't offer to arm — surfacing
-             a clear "why" beats a button that errors. -->
+    {#if profile === 'udv'}
+        <!-- uDV placeholder. No arm handshake or frame contract exists
+             for it yet, so we don't offer to arm — surfacing a clear
+             "why" beats a button that errors. -->
         <div class="card placeholder-card">
-            <h3>{profile === 'ecu' ? 'ECU' : 'uDV'} pit-diag isn't available yet</h3>
+            <h3>uDV pit-diag isn't available yet</h3>
             <p class="muted">
-                Only the AMS exposes a pit-diag arm handshake
-                (<code>0x7F0</code>) and a decoded frame stream
-                (<code>0x6C0..=0x6C8</code>) today. The
-                {profile === 'ecu' ? 'ECU' : 'uDV'} has no pit-diag
-                protocol or frames defined in IFS08-DBCinator yet, so
-                there's nothing to arm or decode.
+                The AMS (<code>0x7F0</code> / <code>0x6C0..=0x6C8</code>)
+                and the ECU (<code>0x7E0</code> / <code>0x700..=0x705</code>)
+                each expose a pit-diag arm handshake + decoded stream. The
+                uDV has no pit-diag protocol or frames defined in
+                IFS08-DBCinator yet, so there's nothing to arm or decode.
             </p>
             <p class="muted">
-                Once the firmware team ships a pit-diag stream and
-                publishes its frames in the DBC, this panel grows the
-                same live grids you see under <strong>AMS</strong>. Until
-                then, switch to <strong>AMS</strong> above, or use the
+                Once the firmware team ships a uDV pit-diag stream and
+                publishes its frames, this panel grows live readouts like
+                the <strong>AMS</strong> and <strong>ECU</strong> tabs.
+                Until then, switch profiles above, or use the
                 <strong>Bus monitor</strong> / <strong>Signals</strong>
                 views to watch raw or DBC-decoded traffic from any node.
             </p>
         </div>
+    {:else if profile === 'ecu'}
+        <!-- ECU controls -->
+        <div class="toolbar card card-tight">
+            {#if armState.kind === 'idle' || armState.kind === 'error'}
+                <button
+                    type="button"
+                    class="btn btn-primary"
+                    disabled={!adapterReady}
+                    onclick={confirmArm}
+                >
+                    Enable ECU pit-diag
+                </button>
+            {:else if armState.kind === 'confirming'}
+                <div class="confirm">
+                    <span class="confirm-text">Arm ECU pit-diag stream?</span>
+                    <button type="button" class="btn btn-primary" onclick={arm}>
+                        Yes, arm
+                    </button>
+                    <button type="button" class="btn" onclick={cancelArm}>
+                        Cancel
+                    </button>
+                </div>
+            {:else if armState.kind === 'arming'}
+                <button type="button" class="btn" disabled>Arming…</button>
+            {:else if armState.kind === 'armed'}
+                <button type="button" class="btn btn-danger" onclick={disarm}>
+                    Disable
+                </button>
+                <span class="stat">
+                    <strong class="status-dot armed">●</strong>
+                    <span>armed</span>
+                </span>
+                <span class="stat">
+                    <span>frames / scan</span>
+                    <strong>{lastScanFrames}</strong>
+                </span>
+            {/if}
+        </div>
+
+        {#if armState.kind === 'error'}
+            <div class="banner banner-danger">
+                <strong>Arm failed:</strong>
+                {armState.message}
+            </div>
+        {/if}
+
+        {#if !ecuHasData}
+            <div class="card placeholder-card">
+                <h3>ECU pit-diag</h3>
+                <p class="muted">
+                    {#if armState.kind === 'armed'}
+                        Armed — waiting for the first frames from the ECU…
+                    {:else}
+                        Connect the ECU and hit
+                        <strong>Enable ECU pit-diag</strong>. Arming emits
+                        <code>0x7E0#DEADBEEF</code>; the ECU then streams APPS,
+                        brake, FSM, and inverter telemetry.
+                    {/if}
+                </p>
+            </div>
+        {:else}
+            <div class="ecu-grid">
+                <!-- Vehicle FSM / status (0x700) -->
+                <div class="card">
+                    <h3 class="card-h">Vehicle FSM</h3>
+                    {#if ecuStatus !== null}
+                        <div class="badge-row">
+                            <span class="pill pill-{ecuFsmTone(ecuStatus.fsmState)}">
+                                {ecuStatus.fsmState}
+                            </span>
+                            <span class="pill pill-{ecuInvTone(ecuStatus.invState)}">
+                                inv: {ecuStatus.invState}
+                            </span>
+                        </div>
+                        <div class="flags">
+                            <span class="flag" class:on={ecuStatus.ev23}>EV 2.3</span>
+                            <span class="flag" class:on={ecuStatus.t1189}>T11.8/9</span>
+                            <span class="flag" class:on={ecuStatus.rtdsActive}>RTDS</span>
+                            <span class="flag" class:on={ecuStatus.okPrecharge}>
+                                Precharge
+                            </span>
+                            <span class="flag" class:on={ecuStatus.startButton}>
+                                Start btn
+                            </span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>torque</span><strong>{ecuStatus.torquePct}%</strong>
+                            </span>
+                            <span class="stat">
+                                <span>torque cmd</span><strong>{ecuStatus.torqueCmd}</strong>
+                            </span>
+                            <span class="stat">
+                                <span>min cell</span>
+                                <strong>{(ecuStatus.vCellMinMv / 1000).toFixed(3)} V</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No status frame yet.</p>
+                    {/if}
+                </div>
+
+                <!-- Pedals / APPS (0x701) -->
+                <div class="card">
+                    <h3 class="card-h">Pedals (APPS)</h3>
+                    {#if ecuPedals !== null}
+                        <div class="meter-row">
+                            <span class="meter-label">APPS1</span>
+                            <div class="meter">
+                                <div
+                                    class="meter-fill"
+                                    style="width: {Math.min(ecuPedals.apps1Pct, 100)}%"
+                                ></div>
+                            </div>
+                            <span class="meter-val mono">{ecuPedals.apps1Pct}%</span>
+                            <span class="meter-raw muted mono">{ecuPedals.apps1Raw}</span>
+                        </div>
+                        <div class="meter-row">
+                            <span class="meter-label">APPS2</span>
+                            <div class="meter">
+                                <div
+                                    class="meter-fill"
+                                    style="width: {Math.min(ecuPedals.apps2Pct, 100)}%"
+                                ></div>
+                            </div>
+                            <span class="meter-val mono">{ecuPedals.apps2Pct}%</span>
+                            <span class="meter-raw muted mono">{ecuPedals.apps2Raw}</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat" class:bad={appsImplausible}>
+                                <span>APPS Δ</span>
+                                <strong>{appsDelta}%{appsImplausible ? ' ⚠' : ''}</strong>
+                            </span>
+                            <span class="stat">
+                                <span>brake raw</span>
+                                <strong class="mono">{ecuPedals.brakeRaw}</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No pedal frame yet.</p>
+                    {/if}
+                </div>
+
+                <!-- Brake (0x705) -->
+                <div class="card">
+                    <h3 class="card-h">Brake</h3>
+                    {#if ecuBrake !== null}
+                        <div class="meter-row">
+                            <span class="meter-label">Brake</span>
+                            <div class="meter">
+                                <div
+                                    class="meter-fill"
+                                    style="width: {Math.min(ecuBrake.brakePct, 100)}%"
+                                ></div>
+                            </div>
+                            <span class="meter-val mono">{ecuBrake.brakePct}%</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>pressure</span>
+                                <strong>{(ecuBrake.brakePressureDbar / 10).toFixed(1)} bar</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No brake frame yet.</p>
+                    {/if}
+                </div>
+
+                <!-- Inverter (0x702) -->
+                <div class="card">
+                    <h3 class="card-h">Inverter</h3>
+                    {#if ecuInverter !== null}
+                        <div class="reads">
+                            <span class="stat">
+                                <span>DC bus</span>
+                                <strong>{ecuInverter.dcBusVoltage} V</strong>
+                            </span>
+                            <span class="stat">
+                                <span>motor</span>
+                                <strong>{ecuInverter.invRpm} rpm</strong>
+                            </span>
+                            <span class="stat" class:bad={ecuInverter.invError !== 0}>
+                                <span>error</span>
+                                <strong class="mono">
+                                    0x{ecuInverter.invError
+                                        .toString(16)
+                                        .toUpperCase()
+                                        .padStart(2, '0')}
+                                </strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No inverter frame yet.</p>
+                    {/if}
+                </div>
+            </div>
+        {/if}
     {:else}
     <!-- Controls row -->
     <div class="toolbar card card-tight">
@@ -1320,5 +1666,89 @@
     .ntc-tile {
         height: 18px;
         font-size: 0.62rem;
+    }
+
+    /* ---- ECU pit-diag panels ---- */
+    .ecu-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: var(--space-3);
+    }
+    .card-h {
+        margin: 0 0 var(--space-2);
+        font-size: var(--text-sm);
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+    .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2);
+        margin-bottom: var(--space-2);
+    }
+    .flags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-1);
+        margin-bottom: var(--space-2);
+    }
+    /* Cockpit flag chip — dim by default, lit green when the bit is set. */
+    .flag {
+        font-size: var(--text-xs, 0.7rem);
+        font-family: var(--font-mono);
+        padding: 1px 6px;
+        border-radius: var(--radius-sm, 4px);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        background: var(--bg);
+    }
+    .flag.on {
+        border-color: var(--success);
+        color: var(--success);
+        background: var(--success-soft, transparent);
+    }
+    .reads {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-3);
+    }
+    /* A stat flagged out-of-spec (implausible APPS, inverter error). */
+    .stat.bad strong {
+        color: var(--danger);
+    }
+    .meter-row {
+        display: grid;
+        grid-template-columns: 3.2rem 1fr auto auto;
+        align-items: center;
+        gap: var(--space-2);
+        margin-bottom: var(--space-1);
+    }
+    .meter-label {
+        font-size: var(--text-sm);
+        color: var(--text-muted);
+    }
+    .meter {
+        height: 8px;
+        border-radius: 4px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        overflow: hidden;
+    }
+    .meter-fill {
+        height: 100%;
+        background: var(--accent);
+        transition: width 0.1s linear;
+    }
+    .meter-val {
+        font-size: var(--text-sm);
+        min-width: 3rem;
+        text-align: right;
+    }
+    .meter-raw {
+        font-size: var(--text-xs, 0.7rem);
+        min-width: 3rem;
+        text-align: right;
     }
 </style>

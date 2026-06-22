@@ -174,6 +174,62 @@ export type PitDiagEvent =
           firstIc: number;
           valid: number;
           counts: number[];
+      }
+    // ---- ECU profile (0x700..=0x705) ----
+    | {
+          /** ECU 0x700 — FSM / inverter state, cockpit flags, torque,
+           *  min cell-V. */
+          kind: 'ecuStatus';
+          /** FSM state name: "waitInvVdcConfig" | "precharge" |
+           *  "waitStartBrake" | "r2dDelay" | "waitInvStandby" |
+           *  "active" | "amsError" | "unknown(0xNN)". */
+          fsmState: string;
+          /** Inverter state: "standby" | "ready" | "unknown(0xNN)". */
+          invState: string;
+          /** APPS plausibility (EV 2.3) OK. */
+          ev23: boolean;
+          /** Brake/throttle plausibility (T11.8/9) OK. */
+          t1189: boolean;
+          /** Ready-to-drive sound active. */
+          rtdsActive: boolean;
+          /** Precharge complete. */
+          okPrecharge: boolean;
+          /** Start button pressed. */
+          startButton: boolean;
+          torquePct: number;
+          vCellMinMv: number;
+          torqueCmd: number;
+      }
+    | {
+          /** ECU 0x701 — APPS pedal channels + brake raw ADC. */
+          kind: 'ecuPedals';
+          apps1Raw: number;
+          apps2Raw: number;
+          brakeRaw: number;
+          apps1Pct: number;
+          apps2Pct: number;
+      }
+    | {
+          /** ECU 0x705 — physical brake. `brakePressureDbar` is
+           *  deci-bar; divide by 10 for bar. */
+          kind: 'ecuBrake';
+          brakePressureDbar: number;
+          brakePct: number;
+      }
+    | {
+          /** ECU 0x702 — inverter telemetry. `invRpm` is signed. */
+          kind: 'ecuInverter';
+          dcBusVoltage: number;
+          invRpm: number;
+          invError: number;
+      }
+    | {
+          /** ECU 0x703 — firmware identity. */
+          kind: 'ecuFwInfo';
+          versionMajor: number;
+          versionMinor: number;
+          versionPatch: number;
+          gitHash: number[];
       };
 
 // ---- Wrappers ----
