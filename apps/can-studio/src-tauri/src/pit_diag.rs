@@ -252,7 +252,18 @@ fn jump_reason_name(j: JumpReason) -> String {
 /// `PitDiagFrame` enum but with camelCase field names + a stable
 /// `kind` discriminator for the JS side.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+// `rename_all` renames the variant names (the `kind` tag values);
+// `rename_all_fields` is REQUIRED to also camelCase the *fields* of
+// each struct variant — container `rename_all` alone does not cascade
+// into variant fields, so without this the wire carries snake_case
+// (`frame_idx`, `fsm_state`, `apps1_raw`, …) while the whole frontend
+// reads camelCase, leaving every field `undefined`. That broke the
+// live decode for both AMS and ECU panels.
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PitDiagEvent {
     /// `payload[0]` from the 0x7F1 ACK frame. Mostly used during
     /// arm/disarm transitions; spurious ACKs on a quiet bus just
