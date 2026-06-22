@@ -76,9 +76,11 @@
     // Set when the adapter was unplugged mid-session — shows a calm
     // notice (not a red error) and clears on the next Start.
     let disconnected = $state<boolean>(false);
-    // Whether we've armed the AMS pit-diag stream from here. Optimistic
-    // (the AMS ACKs on 0x7F1 but we don't gate on it) — the frame count
-    // rising is the real confirmation. Reset whenever the monitor stops.
+    // Whether we've armed pit-diag from here. Sends both the AMS
+    // (0x7F0) and ECU (0x7E0) arm frames; whichever board is present
+    // responds. Optimistic (the board ACKs but we don't gate on it) —
+    // the frame count rising is the real confirmation. Reset whenever
+    // the monitor stops.
     let pitDiagArmed = $state<boolean>(false);
     let pitDiagBusy = $state<boolean>(false);
 
@@ -563,7 +565,7 @@
                 disabled={pitDiagBusy
                     || !(status === 'running' || status === 'paused')}
                 onclick={togglePitDiag}
-                title="Transmit the AMS pit-diag arm/disarm command (0x7F0) through this adapter, so the full diagnostic stream (cell voltages, NTCs, FSM…) flows in and the Signals decode fills in — no need to leave the monitor."
+                title="Transmit the pit-diag arm/disarm command through this adapter — both the AMS (0x7F0) and ECU (0x7E0), so whichever board is on the bus starts its diagnostic stream (cell voltages / NTCs / FSM for the AMS; APPS / brake / inverter for the ECU) and the Signals decode fills in — no need to leave the monitor."
             >
                 {pitDiagArmed ? '⏹ Disarm pit-diag' : '⚡ Arm pit-diag'}
             </button>

@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use can_flasher::pit_diag::build_arm_frame;
+use can_flasher::pit_diag::{build_arm_frame, ecu};
 use can_flasher::protocol::CanFrame;
 use can_flasher::transport::{open_backend, TransportError};
 
@@ -354,12 +354,16 @@ pub async fn bus_monitor_start(
     Ok(())
 }
 
-/// Arm (or disarm) the AMS pit-diag stream from inside the bus
-/// monitor — sends the `0x7F0` arm/disarm frame through the monitor's
-/// own adapter handle, so the operator doesn't have to stop the
-/// monitor and open a second session (which PCAN/SLCAN forbid). The
-/// monitor must be running. The decoded diagnostic frames then flow
-/// in like any other traffic and the Signals view fills in.
+/// Arm (or disarm) pit-diag from inside the bus monitor — sends BOTH
+/// the AMS (`0x7F0`) and ECU (`0x7E0`) arm/disarm frames through the
+/// monitor's own adapter handle, so whichever board is on the bus
+/// responds without the operator having to know which node it is (or
+/// to stop the monitor and open a second session, which PCAN/SLCAN
+/// forbid). The arm payload is identical for both (`DE AD BE EF`); only
+/// the ID differs, and a board harmlessly ignores the frame addressed
+/// to the other. The monitor must be running; the decoded diagnostic
+/// frames then flow in like any other traffic and the Signals view
+/// fills in.
 #[tauri::command]
 pub async fn bus_monitor_arm_pit_diag(
     state: State<'_, BusMonitorState>,
@@ -369,10 +373,16 @@ pub async fn bus_monitor_arm_pit_diag(
     let running = slot
         .as_ref()
         .ok_or("start the bus monitor before arming pit-diag")?;
+    let stopped = || "bus monitor stopped — restart it and try again".to_string();
     running
         .tx_frames
         .send(build_arm_frame(enable))
-        .map_err(|_| "bus monitor stopped — restart it and try again".to_string())
+        .map_err(|_| stopped())?;
+    running
+        .tx_frames
+        .send(ecu::build_arm_frame(enable))
+        .map_err(|_| stopped())?;
+    Ok(())
 }
 
 #[tauri::command]
