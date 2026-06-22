@@ -156,6 +156,22 @@ pub const AMS_PER_IC_PEC_LO_ID: u16 = 0x6C7;
 /// CAN ID of the per-IC PEC frame covering ICs 8..=9 (+ reserved).
 pub const AMS_PER_IC_PEC_HI_ID: u16 = 0x6C8;
 
+// ---- Always-on telemetry (NOT gated by the pit-diag arm) ----------
+//
+// These broadcast continuously while the AMS app runs, outside the
+// `0x6C0..=0x6C8` diagnostic block. The pit-diag reader already sees
+// every frame on the bus, so it decodes them too to round out the
+// "is the HV side safe" picture (relays, pack voltage/current) next
+// to the FSM status. Source: the matching `.def` files in
+// IFS08-CE-AMS (`relay_status` / `acu_currents` / `ams_pack`).
+
+/// `0x4A4` — contactor + AMS_OK GPIO read-backs (100 ms).
+pub const AMS_RELAY_STATUS_ID: u16 = 0x4A4;
+/// `0x135` — accumulator + DC-DC currents, deci-amps, BE signed (50 ms).
+pub const AMS_ACU_CURRENTS_ID: u16 = 0x135;
+/// `0x4A1` — pack voltage (mV) + filtered pack current (mA), LE (500 ms).
+pub const AMS_PACK_ID: u16 = 0x4A1;
+
 /// Number of monitor ICs in the pack: 2 per module × 5 modules.
 /// Chain index → module: IC `2m` = upper, IC `2m+1` = lower of
 /// module `m`.
@@ -506,6 +522,41 @@ pub struct FwIdFrame {
     pub bl_node_id: u8,
 }
 
+/// Decoded `0x4A4` — contactor + AMS_OK GPIO read-backs. These are
+/// what the firmware is DRIVING the relay coils to, not a confirmation
+/// the contactor physically closed (same caveat as `Relays::is_*_closed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelayStatusFrame {
+    /// AIR− (negative air) commanded closed.
+    pub air_negative: bool,
+    /// AIR+ (positive air) commanded closed.
+    pub air_positive: bool,
+    /// Precharge relay commanded closed.
+    pub precharge: bool,
+    /// AMS_OK (SDC output) asserted.
+    pub ams_ok: bool,
+}
+
+/// Decoded `0x135` — accumulator + DC-DC currents in **deci-amps**
+/// (wire value; ×0.1 = amps). Sign convention: `+` = discharge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AcuCurrentsFrame {
+    /// Accumulator current, deci-amps (×0.1 = A, + = discharge).
+    pub accu_da: i16,
+    /// DC-DC converter current, deci-amps.
+    pub dcdc_da: i16,
+}
+
+/// Decoded `0x4A1` — pack voltage (sum-of-cells, mV) + filtered pack
+/// current (mA, `+` discharge / `−` charge).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackFrame {
+    /// Pack voltage, millivolts (sum of all cells).
+    pub pack_voltage_mv: u32,
+    /// Filtered pack current, milliamps (+ discharge, − charge).
+    pub filtered_ma: i32,
+}
+
 /// A decoded pit-diag frame, dispatched by CAN ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PitDiagFrame {
@@ -535,6 +586,12 @@ pub enum PitDiagFrame {
     FwId(FwIdFrame),
     /// `0x6C7` / `0x6C8` — per-IC PEC error counts.
     PerIcPec(PerIcPecFrame),
+    /// `0x4A4` — always-on contactor / AMS_OK relay read-backs.
+    RelayStatus(RelayStatusFrame),
+    /// `0x135` — always-on accumulator + DC-DC currents.
+    AcuCurrents(AcuCurrentsFrame),
+    /// `0x4A1` — always-on pack voltage + filtered pack current.
+    Pack(PackFrame),
 }
 
 // ---- Encode / decode --------------------------------------------
@@ -737,6 +794,41 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
             first_ic,
             counts,
             valid,
+        }));
+    }
+
+    // ---- Always-on telemetry (outside the gated diag block) ----
+
+    // Relay status — 0x4A4, byte 0 carries four GPIO read-back bits.
+    if id == AMS_RELAY_STATUS_ID {
+        let b = payload.first().copied().unwrap_or(0);
+        return Some(PitDiagFrame::RelayStatus(RelayStatusFrame {
+            air_negative: (b & 0b0001) != 0,
+            air_positive: (b & 0b0010) != 0,
+            precharge: (b & 0b0100) != 0,
+            ams_ok: (b & 0b1000) != 0,
+        }));
+    }
+
+    // ACU currents — 0x135, two BE signed i16 deci-amps.
+    if id == AMS_ACU_CURRENTS_ID {
+        if payload.len() < 4 {
+            return None;
+        }
+        return Some(PitDiagFrame::AcuCurrents(AcuCurrentsFrame {
+            accu_da: i16::from_be_bytes([payload[0], payload[1]]),
+            dcdc_da: i16::from_be_bytes([payload[2], payload[3]]),
+        }));
+    }
+
+    // Pack voltage + filtered current — 0x4A1, LE u32 mV then LE i32 mA.
+    if id == AMS_PACK_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        return Some(PitDiagFrame::Pack(PackFrame {
+            pack_voltage_mv: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+            filtered_ma: i32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
         }));
     }
 
@@ -1226,6 +1318,54 @@ mod tests {
     fn unrelated_id_returns_none() {
         let frame = CanFrame::new(0x123, &[0; 8]).unwrap();
         assert_eq!(decode_frame(&frame), None);
+    }
+
+    #[test]
+    fn decodes_relay_status() {
+        // air_neg + precharge set (bits 0 and 2 => 0b0101).
+        let frame = CanFrame::new(AMS_RELAY_STATUS_ID, &[0b0101, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::RelayStatus(r) => {
+                assert!(r.air_negative && r.precharge);
+                assert!(!r.air_positive && !r.ams_ok);
+            }
+            other => panic!("expected RelayStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_acu_currents_signed_be() {
+        // accu = +1234 dA (123.4 A discharge), dcdc = -50 dA.
+        let accu = 1234i16.to_be_bytes();
+        let dcdc = (-50i16).to_be_bytes();
+        let frame =
+            CanFrame::new(AMS_ACU_CURRENTS_ID, &[accu[0], accu[1], dcdc[0], dcdc[1]]).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::AcuCurrents(c) => {
+                assert_eq!(c.accu_da, 1234);
+                assert_eq!(c.dcdc_da, -50);
+            }
+            other => panic!("expected AcuCurrents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_pack_le() {
+        // 400.000 V = 400_000 mV (LE u32), -12_345 mA charge (LE i32).
+        let v = 400_000u32.to_le_bytes();
+        let i = (-12_345i32).to_le_bytes();
+        let frame = CanFrame::new(
+            AMS_PACK_ID,
+            &[v[0], v[1], v[2], v[3], i[0], i[1], i[2], i[3]],
+        )
+        .unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::Pack(p) => {
+                assert_eq!(p.pack_voltage_mv, 400_000);
+                assert_eq!(p.filtered_ma, -12_345);
+            }
+            other => panic!("expected Pack, got {other:?}"),
+        }
     }
 
     #[test]

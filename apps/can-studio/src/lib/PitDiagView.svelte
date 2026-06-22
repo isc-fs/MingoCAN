@@ -150,6 +150,29 @@
     let crash = $state<CrashSnapshot | null>(null);
     let fw = $state<FwSnapshot | null>(null);
 
+    // ---- AMS always-on telemetry (0x4A4 / 0x135 / 0x4A1) ----
+    // Decoded alongside the gated diag block to round out the HV-state
+    // picture (relays + pack voltage/current) next to the FSM. These
+    // broadcast at their own cadence OUTSIDE the 58-frame pit-diag scan,
+    // so they are deliberately NOT counted toward the scan-rate check.
+    interface RelaySnapshot {
+        airNegative: boolean;
+        airPositive: boolean;
+        precharge: boolean;
+        amsOk: boolean;
+    }
+    interface PackSnapshot {
+        packVoltageMv: number;
+        filteredMa: number;
+    }
+    interface CurrentsSnapshot {
+        accuDa: number;
+        dcdcDa: number;
+    }
+    let relays = $state<RelaySnapshot | null>(null);
+    let pack = $state<PackSnapshot | null>(null);
+    let currents = $state<CurrentsSnapshot | null>(null);
+
     // ---- ECU pit-diag snapshots (0x700..=0x705) ----
     // The ECU stream is small and unrelated to the AMS one: five
     // frames at 10 Hz. Each arrives independently; keep the latest.
@@ -375,6 +398,9 @@
         boot = null;
         crash = null;
         fw = null;
+        relays = null;
+        pack = null;
+        currents = null;
         ecuStatus = null;
         ecuPedals = null;
         ecuBrake = null;
@@ -504,6 +530,21 @@
                     blNodeId: event.blNodeId,
                 };
                 framesThisScan += 1;
+                // ---- AMS always-on telemetry (NOT scan-counted) ----
+            } else if (event.kind === 'relayStatus') {
+                relays = {
+                    airNegative: event.airNegative,
+                    airPositive: event.airPositive,
+                    precharge: event.precharge,
+                    amsOk: event.amsOk,
+                };
+            } else if (event.kind === 'acuCurrents') {
+                currents = { accuDa: event.accuDa, dcdcDa: event.dcdcDa };
+            } else if (event.kind === 'pack') {
+                pack = {
+                    packVoltageMv: event.packVoltageMv,
+                    filteredMa: event.filteredMa,
+                };
                 // ---- ECU profile frames (0x700..=0x705) ----
             } else if (event.kind === 'ecuStatus') {
                 ecuStatus = {
@@ -1141,6 +1182,62 @@
         </div>
     {/if}
 
+    <!-- HV relays + pack current (always-on telemetry, not gated by the
+         arm: 0x4A4 contactors, 0x4A1 pack V/I, 0x135 accu/DC-DC currents) -->
+    {#if relays !== null || pack !== null || currents !== null}
+        <section class="card">
+            <div class="card-header">
+                <h3>HV relays &amp; current</h3>
+                <span class="muted small mono">0x4A4 / 0x4A1 / 0x135</span>
+            </div>
+            {#if relays !== null}
+                <div class="flags hv-relays">
+                    <span class="flag" class:on={relays.airNegative}>AIR−</span>
+                    <span class="flag" class:on={relays.airPositive}>AIR+</span>
+                    <span class="flag" class:on={relays.precharge}>Precharge</span>
+                    <span class="flag" class:on={relays.amsOk}>AMS_OK</span>
+                </div>
+            {/if}
+            {#if pack !== null || currents !== null}
+                <div class="diag-grid">
+                    {#if pack !== null}
+                        <div class="diag-cell">
+                            <span class="diag-label">Pack voltage</span>
+                            <span class="diag-value mono">
+                                {(pack.packVoltageMv / 1000).toFixed(2)} V
+                            </span>
+                        </div>
+                        <div class="diag-cell">
+                            <span class="diag-label">Pack current</span>
+                            <span class="diag-value mono">
+                                {(pack.filteredMa / 1000).toFixed(1)} A
+                            </span>
+                        </div>
+                    {/if}
+                    {#if currents !== null}
+                        <div class="diag-cell">
+                            <span class="diag-label">Accu current</span>
+                            <span class="diag-value mono">
+                                {(currents.accuDa / 10).toFixed(1)} A
+                            </span>
+                        </div>
+                        <div class="diag-cell">
+                            <span class="diag-label">DC-DC current</span>
+                            <span class="diag-value mono">
+                                {(currents.dcdcDa / 10).toFixed(1)} A
+                            </span>
+                        </div>
+                    {/if}
+                </div>
+            {/if}
+            <p class="muted small">
+                Relay bits are GPIO read-backs (what the firmware drives the
+                coils to), not a physical-closed confirmation. Current sign:
+                + discharge / − charge.
+            </p>
+        </section>
+    {/if}
+
     <!-- Per-IC PEC counts (0x6C7 / 0x6C8) -->
     {#if icPec.some((c) => c !== null)}
         <section class="card">
@@ -1693,6 +1790,9 @@
         flex-wrap: wrap;
         gap: var(--space-1);
         margin-bottom: var(--space-2);
+    }
+    .hv-relays {
+        margin-bottom: var(--space-3);
     }
     /* Cockpit flag chip — dim by default, lit green when the bit is set. */
     .flag {

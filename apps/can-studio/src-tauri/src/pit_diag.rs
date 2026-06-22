@@ -43,9 +43,10 @@ use can_flasher::pit_diag::ecu::{
     EcuPedalsFrame, EcuPitDiagFrame, EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::{
-    build_arm_frame, decode_frame, BalanceMaskAFrame, BalanceMaskBFrame, BootDiagFrame,
-    CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame, FwIdFrame, JumpReason, ModeLock,
-    NtcTempFrame, PerIcPecFrame, PitDiagFrame, PollTimingFrame, AMS_ACK_ID,
+    build_arm_frame, decode_frame, AcuCurrentsFrame, BalanceMaskAFrame, BalanceMaskBFrame,
+    BootDiagFrame, CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame, FwIdFrame, JumpReason,
+    ModeLock, NtcTempFrame, PackFrame, PerIcPecFrame, PitDiagFrame, PollTimingFrame,
+    RelayStatusFrame, AMS_ACK_ID,
 };
 use can_flasher::protocol::CanFrame;
 use can_flasher::transport::open_backend;
@@ -343,6 +344,20 @@ pub enum PitDiagEvent {
         valid: u8,
         counts: [u8; 8],
     },
+    /// `0x4A4` — always-on contactor / AMS_OK relay read-backs.
+    RelayStatus {
+        air_negative: bool,
+        air_positive: bool,
+        precharge: bool,
+        ams_ok: bool,
+    },
+    /// `0x135` — always-on accu + DC-DC currents, deci-amps (×0.1 = A).
+    AcuCurrents { accu_da: i16, dcdc_da: i16 },
+    /// `0x4A1` — always-on pack voltage (mV) + filtered current (mA).
+    Pack {
+        pack_voltage_mv: u32,
+        filtered_ma: i32,
+    },
 
     // ---- ECU profile (0x700..=0x705) ----
     /// ECU `0x700` — FSM / inverter state, cockpit flags, torque, min cell-V.
@@ -487,6 +502,27 @@ impl PitDiagEvent {
                 first_ic,
                 valid,
                 counts,
+            },
+            PitDiagFrame::RelayStatus(RelayStatusFrame {
+                air_negative,
+                air_positive,
+                precharge,
+                ams_ok,
+            }) => Self::RelayStatus {
+                air_negative,
+                air_positive,
+                precharge,
+                ams_ok,
+            },
+            PitDiagFrame::AcuCurrents(AcuCurrentsFrame { accu_da, dcdc_da }) => {
+                Self::AcuCurrents { accu_da, dcdc_da }
+            }
+            PitDiagFrame::Pack(PackFrame {
+                pack_voltage_mv,
+                filtered_ma,
+            }) => Self::Pack {
+                pack_voltage_mv,
+                filtered_ma,
             },
         }
     }
