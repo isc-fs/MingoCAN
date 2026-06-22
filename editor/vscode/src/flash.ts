@@ -413,6 +413,14 @@ async function runFlashStep(
 
 function flashFlags(cfg: Config): string[] {
     const out: string[] = [];
+    // `--yes` is REQUIRED: we spawn `can-flasher` with a piped (non-TTY)
+    // stdin, and the CLI's pre-flight gate (`confirm_prompt`, FMEA #271)
+    // reads stdin for a y/N — on a pipe that's EOF/blocking, so without
+    // `--yes` the flash stalls or fails closed at the prompt. In the GUI
+    // the operator's explicit "Build & Flash" action (plus the node-id
+    // prompt) IS the confirmation, so skipping the redundant CLI prompt
+    // is correct. Do NOT remove this without also feeding stdin.
+    out.push('--yes');
     if (cfg.requireWrp) out.push('--require-wrp');
     if (cfg.applyWrp) out.push('--apply-wrp');
     if (cfg.profile) out.push('--profile');
