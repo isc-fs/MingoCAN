@@ -1,12 +1,15 @@
-// AMS pit-diag observer — Tier 2.
+// Pit-diag observer — Tier 2.
 //
-// Wraps the `can_flasher::pit_diag` library module with a Tauri
-// command surface and a streaming task. Two commands:
+// Wraps the `can_flasher::pit_diag` library module(s) with a Tauri
+// command surface and a streaming task, generalized over a `Profile`:
+// AMS (0x7F0 arm / 0x6C0..=0x6C8 stream) and ECU (0x7E0 arm /
+// 0x700..=0x705 stream). uDV has no firmware protocol yet and is
+// rejected with a typed "not implemented" message. Two commands:
 //
-//   pit_diag_enable(request)   sends the arm frame (0x7F0#DEADBEEF),
-//                              waits for the ACK on 0x7F1, then
-//                              spawns a reader task that decodes
-//                              the 56-frame stream and emits
+//   pit_diag_enable(request)   sends the profile's arm frame, waits
+//                              for the ACK on the profile's ACK ID,
+//                              then spawns a reader task that decodes
+//                              that profile's stream and emits
 //                              `pit-diag:frame` events.
 //
 //   pit_diag_disable()         sends the disarm frame, waits briefly
@@ -35,11 +38,16 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use can_flasher::pit_diag::ecu::{
+    self, EcuBrakeFrame, EcuFsmState, EcuFwInfoFrame, EcuInvState, EcuInverterFrame,
+    EcuPedalsFrame, EcuPitDiagFrame, EcuStatusFrame, ECU_ACK_ID,
+};
 use can_flasher::pit_diag::{
     build_arm_frame, decode_frame, BalanceMaskAFrame, BalanceMaskBFrame, BootDiagFrame,
     CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame, FwIdFrame, JumpReason, ModeLock,
     NtcTempFrame, PerIcPecFrame, PitDiagFrame, PollTimingFrame, AMS_ACK_ID,
 };
+use can_flasher::protocol::CanFrame;
 use can_flasher::transport::open_backend;
 
 use crate::flash::parse_interface;
@@ -87,6 +95,80 @@ pub struct PitDiagRequest {
 
 fn default_profile() -> String {
     "ams".to_string()
+}
+
+/// The pit-diag profiles wired end-to-end. Each maps to a distinct
+/// firmware stream (different arm/ACK IDs + decoders), so the arm
+/// handshake and the streaming task are generalized over this enum.
+/// `uDV` has no firmware stream yet and is rejected before we get here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    Ams,
+    Ecu,
+}
+
+impl Profile {
+    /// Parse the request's profile string; `Err` carries the
+    /// UI-facing "not implemented" message for unsupported profiles.
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "ams" => Ok(Self::Ams),
+            "ecu" => Ok(Self::Ecu),
+            other => Err(format!(
+                "pit-diag is not implemented for profile '{other}' yet — only 'ams' and 'ecu' have an arm handshake and frame stream"
+            )),
+        }
+    }
+
+    /// CAN ID this profile ACKs arm/disarm commands on.
+    fn ack_id(self) -> u16 {
+        match self {
+            Self::Ams => AMS_ACK_ID,
+            Self::Ecu => ECU_ACK_ID,
+        }
+    }
+
+    /// Build the arm (or disarm) frame for this profile's firmware.
+    fn arm_frame(self, enable: bool) -> CanFrame {
+        match self {
+            Self::Ams => build_arm_frame(enable),
+            Self::Ecu => ecu::build_arm_frame(enable),
+        }
+    }
+
+    /// Decode a raw frame into a UI event for this profile, or `None`
+    /// if the frame isn't part of this profile's stream.
+    fn decode_event(self, frame: &CanFrame) -> Option<PitDiagEvent> {
+        match self {
+            Self::Ams => decode_frame(frame).map(PitDiagEvent::from_library),
+            Self::Ecu => ecu::decode_frame(frame).map(PitDiagEvent::from_ecu),
+        }
+    }
+}
+
+/// Display name for the ECU FSM state — camelCase so the frontend can
+/// switch on it; mirrors the firmware `VAL_` table for `0x700`.
+fn ecu_fsm_state_name(s: EcuFsmState) -> String {
+    match s {
+        EcuFsmState::WaitInvVdcConfig => "waitInvVdcConfig".into(),
+        EcuFsmState::Precharge => "precharge".into(),
+        EcuFsmState::WaitStartBrake => "waitStartBrake".into(),
+        EcuFsmState::R2dDelay => "r2dDelay".into(),
+        EcuFsmState::WaitInvStandby => "waitInvStandby".into(),
+        EcuFsmState::Active => "active".into(),
+        EcuFsmState::AmsError => "amsError".into(),
+        EcuFsmState::Unknown(b) => format!("unknown(0x{b:02X})"),
+    }
+}
+
+/// Display name for the ECU inverter state. camelCase; mirrors the
+/// firmware `VAL_` table.
+fn ecu_inv_state_name(s: EcuInvState) -> String {
+    match s {
+        EcuInvState::Standby => "standby".into(),
+        EcuInvState::Ready => "ready".into(),
+        EcuInvState::Unknown(b) => format!("unknown(0x{b:02X})"),
+    }
 }
 
 // ---- Streamed events --------------------------------------------
@@ -250,6 +332,47 @@ pub enum PitDiagEvent {
         valid: u8,
         counts: [u8; 8],
     },
+
+    // ---- ECU profile (0x700..=0x705) ----
+    /// ECU `0x700` — FSM / inverter state, cockpit flags, torque, min cell-V.
+    EcuStatus {
+        fsm_state: String,
+        inv_state: String,
+        ev_2_3: bool,
+        t11_8_9: bool,
+        rtds_active: bool,
+        ok_precharge: bool,
+        start_button: bool,
+        torque_pct: u8,
+        v_cell_min_mv: u16,
+        torque_cmd: i16,
+    },
+    /// ECU `0x701` — APPS pedal channels + brake raw ADC.
+    EcuPedals {
+        apps1_raw: u16,
+        apps2_raw: u16,
+        brake_raw: u16,
+        apps1_pct: u8,
+        apps2_pct: u8,
+    },
+    /// ECU `0x705` — physical brake pressure (deci-bar) + brake %.
+    EcuBrake {
+        brake_pressure_dbar: u16,
+        brake_pct: u8,
+    },
+    /// ECU `0x702` — inverter DC-bus voltage, RPM (signed), error code.
+    EcuInverter {
+        dc_bus_voltage: u16,
+        inv_rpm: i32,
+        inv_error: u8,
+    },
+    /// ECU `0x703` — firmware semver + git-hash prefix.
+    EcuFwInfo {
+        version_major: u8,
+        version_minor: u8,
+        version_patch: u8,
+        git_hash: [u8; 4],
+    },
 }
 
 impl PitDiagEvent {
@@ -356,6 +479,78 @@ impl PitDiagEvent {
             },
         }
     }
+
+    /// Map a decoded ECU library frame into a UI event. Mirrors
+    /// `from_library` for the `0x700..=0x705` stream; enum states are
+    /// stringified so the frontend switches on names, not numbers.
+    fn from_ecu(frame: EcuPitDiagFrame) -> Self {
+        match frame {
+            EcuPitDiagFrame::Ack { enabled } => Self::Ack { enabled },
+            EcuPitDiagFrame::Status(EcuStatusFrame {
+                fsm_state,
+                inv_state,
+                ev_2_3,
+                t11_8_9,
+                rtds_active,
+                ok_precharge,
+                start_button,
+                torque_pct,
+                v_cell_min_mv,
+                torque_cmd,
+            }) => Self::EcuStatus {
+                fsm_state: ecu_fsm_state_name(fsm_state),
+                inv_state: ecu_inv_state_name(inv_state),
+                ev_2_3,
+                t11_8_9,
+                rtds_active,
+                ok_precharge,
+                start_button,
+                torque_pct,
+                v_cell_min_mv,
+                torque_cmd,
+            },
+            EcuPitDiagFrame::Pedals(EcuPedalsFrame {
+                apps1_raw,
+                apps2_raw,
+                brake_raw,
+                apps1_pct,
+                apps2_pct,
+            }) => Self::EcuPedals {
+                apps1_raw,
+                apps2_raw,
+                brake_raw,
+                apps1_pct,
+                apps2_pct,
+            },
+            EcuPitDiagFrame::Brake(EcuBrakeFrame {
+                brake_pressure_dbar,
+                brake_pct,
+            }) => Self::EcuBrake {
+                brake_pressure_dbar,
+                brake_pct,
+            },
+            EcuPitDiagFrame::Inverter(EcuInverterFrame {
+                dc_bus_voltage,
+                inv_rpm,
+                inv_error,
+            }) => Self::EcuInverter {
+                dc_bus_voltage,
+                inv_rpm,
+                inv_error,
+            },
+            EcuPitDiagFrame::FwInfo(EcuFwInfoFrame {
+                fw_major,
+                fw_minor,
+                fw_patch,
+                git_hash,
+            }) => Self::EcuFwInfo {
+                version_major: fw_major,
+                version_minor: fw_minor,
+                version_patch: fw_patch,
+                git_hash,
+            },
+        }
+    }
 }
 
 // ---- Commands ---------------------------------------------------
@@ -366,17 +561,13 @@ pub async fn pit_diag_enable(
     state: State<'_, PitDiagState>,
     request: PitDiagRequest,
 ) -> Result<(), String> {
-    // Profile gate — only AMS has a pit-diag arm handshake + frame
-    // stream today. ECU / uDV are selectable in the UI but have no
-    // firmware protocol or DBCinator frames defined yet, so we reject
-    // them with a clean, typed message the view renders as its
-    // "not available yet" placeholder rather than attempting to arm.
-    if request.profile != "ams" {
-        return Err(format!(
-            "pit-diag is not implemented for profile '{}' yet — only 'ams' has an arm handshake and frame stream",
-            request.profile
-        ));
-    }
+    // Profile gate — AMS (0x7F0/0x6Cx) and ECU (0x7E0/0x70x) each have
+    // their own arm handshake + frame stream. uDV has no firmware
+    // protocol yet, so `parse` rejects it with a clean, typed message
+    // the view renders as its "not available yet" placeholder rather
+    // than attempting to arm.
+    let profile = Profile::parse(&request.profile)?;
+    let ack_id = profile.ack_id();
 
     // Idempotency — stop any prior session first. Mirrors bus_monitor.
     {
@@ -395,11 +586,11 @@ pub async fn pit_diag_enable(
         .map_err(|e| format!("opening backend: {e}"))?;
 
     // Send the arm frame and wait for the ACK before declaring
-    // success. If the AMS isn't on the bus or doesn't have the
+    // success. If the board isn't on the bus or doesn't have the
     // pit-diag firmware, this surfaces as a clean error in the UI
     // rather than a silent "armed but nothing arriving".
     backend
-        .send(build_arm_frame(true))
+        .send(profile.arm_frame(true))
         .await
         .map_err(|e| format!("sending arm frame: {e}"))?;
 
@@ -407,8 +598,8 @@ pub async fn pit_diag_enable(
     let mut acked_enabled = false;
     while started.elapsed() < ACK_TIMEOUT {
         match backend.recv(STREAM_POLL_TIMEOUT).await {
-            Ok(frame) if frame.id == AMS_ACK_ID => {
-                if let Some(PitDiagFrame::Ack { enabled }) = decode_frame(&frame) {
+            Ok(frame) if frame.id == ack_id => {
+                if let Some(PitDiagEvent::Ack { enabled }) = profile.decode_event(&frame) {
                     acked_enabled = enabled;
                     // Surface the ACK to the frontend immediately
                     // so an enabled=true ACK is visible before any
@@ -437,7 +628,7 @@ pub async fn pit_diag_enable(
 
     if !acked_enabled {
         return Err(format!(
-            "no ACK from AMS within {}ms — is it on the bus, with pit-diag firmware?",
+            "no ACK from the board within {}ms — is it on the bus, with pit-diag firmware?",
             ACK_TIMEOUT.as_millis()
         ));
     }
@@ -446,13 +637,13 @@ pub async fn pit_diag_enable(
     let stop_signal = Arc::new(Notify::new());
     let stop_for_task = stop_signal.clone();
     let app_for_task = app.clone();
-    let profile = request.profile.clone();
+    let profile_label = request.profile.clone();
 
     let task = tokio::spawn(async move {
         let _ = app_for_task.emit(
             STATUS_EVENT,
             &PitDiagStatus::Armed {
-                profile: profile.clone(),
+                profile: profile_label,
             },
         );
         let stop = stop_for_task.notified();
@@ -467,8 +658,7 @@ pub async fn pit_diag_enable(
                 result = backend.recv(STREAM_POLL_TIMEOUT) => {
                     match result {
                         Ok(frame) => {
-                            if let Some(record) = decode_frame(&frame) {
-                                let event = PitDiagEvent::from_library(record);
+                            if let Some(event) = profile.decode_event(&frame) {
                                 if let Err(err) = app_for_task.emit(FRAME_EVENT, &event) {
                                     warn!(?err, "pit_diag: emit failed; stopping");
                                     let _ = app_for_task.emit(
@@ -517,12 +707,14 @@ pub async fn pit_diag_disable(
 ) -> Result<(), String> {
     // Send the disarm frame regardless of whether we have a running
     // task — operators expect Disable to always emit the disarm so
-    // the AMS stops streaming, even after a tool restart left the
-    // flag set. Best-effort: a failed send still falls through to
-    // the task teardown.
+    // the board stops streaming, even after a tool restart left the
+    // flag set. Best-effort: a failed send (or an unknown profile)
+    // still falls through to the task teardown.
     let interface = parse_interface(&request.interface)?;
-    if let Ok(backend) = open_backend(interface, request.channel.as_deref(), request.bitrate) {
-        let _ = backend.send(build_arm_frame(false)).await;
+    if let Ok(profile) = Profile::parse(&request.profile) {
+        if let Ok(backend) = open_backend(interface, request.channel.as_deref(), request.bitrate) {
+            let _ = backend.send(profile.arm_frame(false)).await;
+        }
     }
 
     // ---- Tear down any running reader task ----

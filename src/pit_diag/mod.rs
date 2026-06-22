@@ -58,6 +58,11 @@
 
 use crate::protocol::CanFrame;
 
+/// ECU (VCU) pit-diag observer — a separate, smaller stream than the
+/// AMS one decoded in this module. Kept in its own submodule so the
+/// AMS-prefixed symbols here stay unambiguous.
+pub mod ecu;
+
 // ---- Wire-level constants ---------------------------------------
 
 /// CAN ID the AMS listens on for arm/disarm commands.
