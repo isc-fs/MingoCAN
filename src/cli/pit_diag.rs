@@ -375,6 +375,26 @@ fn print_record_human(ts_ms: u64, record: &PitDiagFrame) {
                 p.first_ic + p.valid,
             );
         }
+        PitDiagFrame::RelayStatus(r) => {
+            println!(
+                "{prefix} relay AIR-={} AIR+={} precharge={} AMS_OK={}",
+                r.air_negative as u8, r.air_positive as u8, r.precharge as u8, r.ams_ok as u8,
+            );
+        }
+        PitDiagFrame::AcuCurrents(c) => {
+            println!(
+                "{prefix} curr  accu={:.1}A dcdc={:.1}A",
+                f64::from(c.accu_da) * 0.1,
+                f64::from(c.dcdc_da) * 0.1,
+            );
+        }
+        PitDiagFrame::Pack(p) => {
+            println!(
+                "{prefix} pack  {:.3}V {:.1}A",
+                f64::from(p.pack_voltage_mv) / 1000.0,
+                f64::from(p.filtered_ma) / 1000.0,
+            );
+        }
     }
 }
 
@@ -483,6 +503,24 @@ fn print_record_json(ts_ms: u64, record: &PitDiagFrame) {
                     .map(u8::to_string)
                     .collect::<Vec<_>>()
                     .join(","),
+            );
+        }
+        PitDiagFrame::RelayStatus(r) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"relayStatus","airNegative":{},"airPositive":{},"precharge":{},"amsOk":{}}}"#,
+                r.air_negative, r.air_positive, r.precharge, r.ams_ok,
+            );
+        }
+        PitDiagFrame::AcuCurrents(c) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"acuCurrents","accuDa":{},"dcdcDa":{}}}"#,
+                c.accu_da, c.dcdc_da,
+            );
+        }
+        PitDiagFrame::Pack(p) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"pack","packVoltageMv":{},"filteredMa":{}}}"#,
+                p.pack_voltage_mv, p.filtered_ma,
             );
         }
     }

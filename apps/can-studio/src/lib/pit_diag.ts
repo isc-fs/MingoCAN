@@ -175,6 +175,30 @@ export type PitDiagEvent =
           valid: number;
           counts: number[];
       }
+    | {
+          /** 0x4A4 — always-on contactor / AMS_OK GPIO read-backs.
+           *  What the firmware is driving the coils to (not a closed
+           *  confirmation). */
+          kind: 'relayStatus';
+          airNegative: boolean;
+          airPositive: boolean;
+          precharge: boolean;
+          amsOk: boolean;
+      }
+    | {
+          /** 0x135 — accu + DC-DC currents in deci-amps (×0.1 = A,
+           *  + = discharge). */
+          kind: 'acuCurrents';
+          accuDa: number;
+          dcdcDa: number;
+      }
+    | {
+          /** 0x4A1 — pack voltage (mV) + filtered pack current (mA,
+           *  + discharge / − charge). */
+          kind: 'pack';
+          packVoltageMv: number;
+          filteredMa: number;
+      }
     // ---- ECU profile (0x700..=0x705) ----
     | {
           /** ECU 0x700 — FSM / inverter state, cockpit flags, torque,
