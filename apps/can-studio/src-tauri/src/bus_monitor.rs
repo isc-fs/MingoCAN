@@ -28,10 +28,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use can_flasher::pit_diag::build_arm_frame;
+use can_flasher::protocol::CanFrame;
 use can_flasher::transport::{open_backend, TransportError};
 
 use crate::dbc::{decode, snapshot_lookup, DbcState};
@@ -70,6 +72,12 @@ struct Running {
     /// Logical channel name we emit into the candump line (column
     /// 2). Falls back to "can0" when the operator didn't pick one.
     capture_channel: String,
+    /// TX side of the monitor's transmit channel. Commands push a
+    /// frame here and the monitor task sends it through the adapter
+    /// it already owns — so we can transmit (e.g. the pit-diag arm
+    /// frame) without opening a second handle on the same bus, which
+    /// PCAN/SLCAN don't allow.
+    tx_frames: mpsc::UnboundedSender<CanFrame>,
 }
 
 // ---- Request from frontend ----
@@ -189,6 +197,10 @@ pub async fn bus_monitor_start(
     let app_for_task = app.clone();
     let capture_for_task = state.capture.clone();
     let capture_channel_for_task = capture_channel.clone();
+    // TX path — commands (e.g. arm pit-diag) push frames here; the
+    // task sends them through `backend`, the same handle it receives
+    // on. One owner of the adapter, both directions.
+    let (tx_frames, mut tx_rx) = mpsc::unbounded_channel::<CanFrame>();
 
     let task = tokio::spawn(async move {
         let _ = app_for_task.emit(STATUS_EVENT, &BusMonitorStatus::Started);
@@ -204,6 +216,11 @@ pub async fn bus_monitor_start(
                 _ = &mut stop => {
                     let _ = app_for_task.emit(STATUS_EVENT, &BusMonitorStatus::Stopped);
                     return;
+                }
+                Some(frame) = tx_rx.recv() => {
+                    if let Err(err) = backend.send(frame).await {
+                        warn!(?err, "bus_monitor: TX failed");
+                    }
                 }
                 result = backend.recv(poll_timeout) => {
                     match result {
@@ -332,8 +349,30 @@ pub async fn bus_monitor_start(
         stop_signal,
         task,
         capture_channel,
+        tx_frames,
     });
     Ok(())
+}
+
+/// Arm (or disarm) the AMS pit-diag stream from inside the bus
+/// monitor — sends the `0x7F0` arm/disarm frame through the monitor's
+/// own adapter handle, so the operator doesn't have to stop the
+/// monitor and open a second session (which PCAN/SLCAN forbid). The
+/// monitor must be running. The decoded diagnostic frames then flow
+/// in like any other traffic and the Signals view fills in.
+#[tauri::command]
+pub async fn bus_monitor_arm_pit_diag(
+    state: State<'_, BusMonitorState>,
+    enable: bool,
+) -> Result<(), String> {
+    let slot = state.inner.lock().await;
+    let running = slot
+        .as_ref()
+        .ok_or("start the bus monitor before arming pit-diag")?;
+    running
+        .tx_frames
+        .send(build_arm_frame(enable))
+        .map_err(|_| "bus monitor stopped — restart it and try again".to_string())
 }
 
 #[tauri::command]

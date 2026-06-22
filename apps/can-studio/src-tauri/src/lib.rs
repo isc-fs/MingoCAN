@@ -74,6 +74,7 @@ pub fn run() {
             bus_monitor::bus_monitor_stop,
             bus_monitor::bus_monitor_capture_start,
             bus_monitor::bus_monitor_capture_stop,
+            bus_monitor::bus_monitor_arm_pit_diag,
             pit_diag::pit_diag_enable,
             pit_diag::pit_diag_disable,
             dbc::dbc_load,

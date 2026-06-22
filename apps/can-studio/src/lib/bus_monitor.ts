@@ -52,6 +52,17 @@ export function stopBusMonitor(): Promise<void> {
     return invoke<void>('bus_monitor_stop');
 }
 
+/**
+ * Arm (or disarm) the AMS pit-diag stream by transmitting the
+ * `0x7F0` command through the running monitor's own adapter — no
+ * second session, so it works while the monitor is capturing. Once
+ * armed, the AMS's diagnostic frames flow in and the decoded Signals
+ * fill in. Errors if the monitor isn't running.
+ */
+export function armPitDiag(enable: boolean): Promise<void> {
+    return invoke<void>('bus_monitor_arm_pit_diag', { enable });
+}
+
 export function onBusMonitorFrame(
     handler: (frame: BusMonitorFrame) => void,
 ): Promise<UnlistenFn> {

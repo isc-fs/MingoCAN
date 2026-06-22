@@ -37,6 +37,7 @@
 
     import {
         formatData,
+        armPitDiag,
         formatId,
         formatTs,
         onBusMonitorCapture,
@@ -75,6 +76,25 @@
     // Set when the adapter was unplugged mid-session — shows a calm
     // notice (not a red error) and clears on the next Start.
     let disconnected = $state<boolean>(false);
+    // Whether we've armed the AMS pit-diag stream from here. Optimistic
+    // (the AMS ACKs on 0x7F1 but we don't gate on it) — the frame count
+    // rising is the real confirmation. Reset whenever the monitor stops.
+    let pitDiagArmed = $state<boolean>(false);
+    let pitDiagBusy = $state<boolean>(false);
+
+    async function togglePitDiag(): Promise<void> {
+        if (pitDiagBusy) return;
+        pitDiagBusy = true;
+        const next = !pitDiagArmed;
+        try {
+            await armPitDiag(next);
+            pitDiagArmed = next;
+        } catch (err) {
+            error = err instanceof Error ? err.message : String(err);
+        } finally {
+            pitDiagBusy = false;
+        }
+    }
 
     // Live frame ring buffer. We append in batches (see flushQueued)
     // because Svelte 5 re-renders on every assignment — at 1kHz+
@@ -311,6 +331,7 @@
 
         error = null;
         disconnected = false;
+        pitDiagArmed = false;
         status = 'starting';
         clearBuffers();
 
@@ -321,12 +342,14 @@
                     status = 'running';
                 } else if (s.kind === 'stopped') {
                     status = 'idle';
+                    pitDiagArmed = false;
                 } else if (s.kind === 'disconnected') {
                     // Backend already stopped its task — tear down our
                     // listeners and return to idle so Start works again
                     // once the adapter is re-plugged.
                     disconnected = true;
                     status = 'idle';
+                    pitDiagArmed = false;
                     void cleanupListeners();
                 } else if (s.kind === 'error') {
                     error = s.message;
@@ -379,6 +402,7 @@
         }
         await cleanupListeners();
         status = 'idle';
+        pitDiagArmed = false;
     }
 
     async function cleanupListeners(): Promise<void> {
@@ -531,6 +555,17 @@
                     : 'Save every received frame to a candump-format file'}
             >
                 {captureActive ? '⏺ Stop saving' : 'Save…'}
+            </button>
+            <button
+                type="button"
+                class="btn pitdiag-btn"
+                class:active={pitDiagArmed}
+                disabled={pitDiagBusy
+                    || !(status === 'running' || status === 'paused')}
+                onclick={togglePitDiag}
+                title="Transmit the AMS pit-diag arm/disarm command (0x7F0) through this adapter, so the full diagnostic stream (cell voltages, NTCs, FSM…) flows in and the Signals decode fills in — no need to leave the monitor."
+            >
+                {pitDiagArmed ? '⏹ Disarm pit-diag' : '⚡ Arm pit-diag'}
             </button>
         </div>
 
@@ -839,6 +874,13 @@
         background: var(--danger-soft);
         border-color: var(--danger);
         color: var(--danger);
+    }
+
+    /* Armed pit-diag — accent outline so it reads as "actively
+       driving the bus" while armed. */
+    .btn.pitdiag-btn.active {
+        border-color: var(--accent);
+        color: var(--accent);
     }
 
     /* Tab strip — two flat buttons that sit above the table; the
