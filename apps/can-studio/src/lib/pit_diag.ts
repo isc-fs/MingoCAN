@@ -248,13 +248,42 @@ export type PitDiagEvent =
           invError: number;
       }
     | {
+          /** ECU 0x706 — inverter temperatures, °C. `205` = sensor
+           *  disconnected (raw 0xFF − 50). */
+          kind: 'ecuInverterTemps';
+          boardDegc: number;
+          pwrstgDegc: number;
+          motor1Degc: number;
+          motor2Degc: number;
+      }
+    | {
           /** ECU 0x703 — firmware identity. */
           kind: 'ecuFwInfo';
           versionMajor: number;
           versionMinor: number;
           versionPatch: number;
           gitHash: number[];
+      }
+    | {
+          /** ECU 0x704 — firmware health (1 Hz). */
+          kind: 'ecuHealth';
+          freeHeap: number;
+          minFreeHeap: number;
+          taskControl: boolean;
+          taskCanRx: boolean;
+          taskCanTx: boolean;
+          taskDiag: boolean;
+          /** "powerOn" | "pin" | "software" | "iwdg" | … */
+          resetCause: string;
+          uptimeS: number;
+          lastFault: number;
+          /** "none" | "hardFault" | "stackOverflow" | … */
+          lastFaultName: string;
       };
+
+/** The inverter-temperature value that means "sensor disconnected"
+ *  (raw 0xFF − 50). */
+export const ECU_INV_TEMP_DISCONNECTED_C = 205;
 
 // ---- Wrappers ----
 
