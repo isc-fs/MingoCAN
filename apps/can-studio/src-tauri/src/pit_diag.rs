@@ -39,8 +39,9 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use can_flasher::pit_diag::ecu::{
-    self, EcuBrakeFrame, EcuFsmState, EcuFwInfoFrame, EcuInvState, EcuInverterFrame,
-    EcuPedalsFrame, EcuPitDiagFrame, EcuStatusFrame, ECU_ACK_ID,
+    self, EcuBrakeFrame, EcuFsmState, EcuFwInfoFrame, EcuHealthFrame, EcuInvState,
+    EcuInverterFrame, EcuInverterTempsFrame, EcuPedalsFrame, EcuPitDiagFrame, EcuResetCause,
+    EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::{
     build_arm_frame, decode_frame, AcuCurrentsFrame, BalanceMaskAFrame, BalanceMaskBFrame,
@@ -169,6 +170,37 @@ fn ecu_inv_state_name(s: EcuInvState) -> String {
         EcuInvState::Standby => "standby".into(),
         EcuInvState::Ready => "ready".into(),
         EcuInvState::Unknown(b) => format!("unknown(0x{b:02X})"),
+    }
+}
+
+/// Display name for the ECU reset cause (`0x704`). camelCase; mirrors the
+/// firmware `ResetCause` `VAL_` table.
+fn ecu_reset_cause_name(c: EcuResetCause) -> String {
+    match c {
+        EcuResetCause::Unknown => "unknown".into(),
+        EcuResetCause::PowerOn => "powerOn".into(),
+        EcuResetCause::Pin => "pin".into(),
+        EcuResetCause::Software => "software".into(),
+        EcuResetCause::Iwdg => "iwdg".into(),
+        EcuResetCause::Wwdg => "wwdg".into(),
+        EcuResetCause::LowPower => "lowPower".into(),
+        EcuResetCause::Other(b) => format!("other(0x{b:02X})"),
+    }
+}
+
+/// Display name for the ECU last-fault sentinel (`0x704` byte 7). camelCase;
+/// mirrors the firmware `FaultCode` table (`0xF1..=0xF7`).
+fn ecu_last_fault_name(code: u8) -> String {
+    match code {
+        0x00 => "none".into(),
+        0xF1 => "hardFault".into(),
+        0xF2 => "memManage".into(),
+        0xF3 => "busFault".into(),
+        0xF4 => "usageFault".into(),
+        0xF5 => "stackOverflow".into(),
+        0xF6 => "mallocFailed".into(),
+        0xF7 => "assertFailed".into(),
+        other => format!("unknown(0x{other:02X})"),
     }
 }
 
@@ -392,12 +424,32 @@ pub enum PitDiagEvent {
         inv_rpm: i32,
         inv_error: u8,
     },
+    /// ECU `0x706` — inverter temperatures (°C; 205 = sensor disconnected).
+    EcuInverterTemps {
+        board_degc: i16,
+        pwrstg_degc: i16,
+        motor1_degc: i16,
+        motor2_degc: i16,
+    },
     /// ECU `0x703` — firmware semver + git-hash prefix.
     EcuFwInfo {
         version_major: u8,
         version_minor: u8,
         version_patch: u8,
         git_hash: [u8; 4],
+    },
+    /// ECU `0x704` — firmware health (heap, task liveness, reset cause, faults).
+    EcuHealth {
+        free_heap: u16,
+        min_free_heap: u16,
+        task_control: bool,
+        task_can_rx: bool,
+        task_can_tx: bool,
+        task_diag: bool,
+        reset_cause: String,
+        uptime_s: u8,
+        last_fault: u8,
+        last_fault_name: String,
     },
 }
 
@@ -585,6 +637,17 @@ impl PitDiagEvent {
                 inv_rpm,
                 inv_error,
             },
+            EcuPitDiagFrame::InverterTemps(EcuInverterTempsFrame {
+                board_degc,
+                pwrstg_degc,
+                motor1_degc,
+                motor2_degc,
+            }) => Self::EcuInverterTemps {
+                board_degc,
+                pwrstg_degc,
+                motor1_degc,
+                motor2_degc,
+            },
             EcuPitDiagFrame::FwInfo(EcuFwInfoFrame {
                 fw_major,
                 fw_minor,
@@ -595,6 +658,28 @@ impl PitDiagEvent {
                 version_minor: fw_minor,
                 version_patch: fw_patch,
                 git_hash,
+            },
+            EcuPitDiagFrame::Health(EcuHealthFrame {
+                free_heap,
+                min_free_heap,
+                task_control,
+                task_can_rx,
+                task_can_tx,
+                task_diag,
+                reset_cause,
+                uptime_s,
+                last_fault,
+            }) => Self::EcuHealth {
+                free_heap,
+                min_free_heap,
+                task_control,
+                task_can_rx,
+                task_can_tx,
+                task_diag,
+                reset_cause: ecu_reset_cause_name(reset_cause),
+                uptime_s,
+                last_fault,
+                last_fault_name: ecu_last_fault_name(last_fault),
             },
         }
     }
