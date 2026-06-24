@@ -39,6 +39,7 @@
         AMS_NTC_PER_MODULE,
         AMS_NUM_MODULES,
         AMS_NUM_NTCS,
+        ECU_INV_TEMP_DISCONNECTED_C,
         onPitDiagFrame,
         onPitDiagStatus,
         pitDiagDisable,
@@ -210,12 +211,32 @@
         versionPatch: number;
         gitHash: number[];
     }
+    interface EcuInvTempsSnapshot {
+        boardDegc: number;
+        pwrstgDegc: number;
+        motor1Degc: number;
+        motor2Degc: number;
+    }
+    interface EcuHealthSnapshot {
+        freeHeap: number;
+        minFreeHeap: number;
+        taskControl: boolean;
+        taskCanRx: boolean;
+        taskCanTx: boolean;
+        taskDiag: boolean;
+        resetCause: string;
+        uptimeS: number;
+        lastFault: number;
+        lastFaultName: string;
+    }
 
     let ecuStatus = $state<EcuStatusSnapshot | null>(null);
     let ecuPedals = $state<EcuPedalsSnapshot | null>(null);
     let ecuBrake = $state<EcuBrakeSnapshot | null>(null);
     let ecuInverter = $state<EcuInverterSnapshot | null>(null);
+    let ecuInvTemps = $state<EcuInvTempsSnapshot | null>(null);
     let ecuFw = $state<EcuFwSnapshot | null>(null);
+    let ecuHealth = $state<EcuHealthSnapshot | null>(null);
 
     // APPS plausibility: FSAE T11.8.9 trips at >10% disagreement
     // between the two pedal channels. Surface the live delta so the
@@ -239,6 +260,12 @@
         if (state === 'ready') return 'success';
         if (state.startsWith('unknown')) return 'danger';
         return 'info';
+    }
+
+    // Inverter-temp sentinel: 205 °C means the sensor is disconnected.
+    const INV_TEMP_NC = ECU_INV_TEMP_DISCONNECTED_C;
+    function fmtInvTemp(t: number): string {
+        return t === INV_TEMP_NC ? 'n/c' : `${t} °C`;
     }
 
     // ECU firmware header chip — "ECU v1.6.2 · a1b2c3d4".
@@ -405,7 +432,9 @@
         ecuPedals = null;
         ecuBrake = null;
         ecuInverter = null;
+        ecuInvTemps = null;
         ecuFw = null;
+        ecuHealth = null;
         framesThisScan = 0;
         lastScanFrames = 0;
         try {
@@ -582,6 +611,14 @@
                     invError: event.invError,
                 };
                 framesThisScan += 1;
+            } else if (event.kind === 'ecuInverterTemps') {
+                ecuInvTemps = {
+                    boardDegc: event.boardDegc,
+                    pwrstgDegc: event.pwrstgDegc,
+                    motor1Degc: event.motor1Degc,
+                    motor2Degc: event.motor2Degc,
+                };
+                framesThisScan += 1;
             } else if (event.kind === 'ecuFwInfo') {
                 ecuFw = {
                     versionMajor: event.versionMajor,
@@ -590,6 +627,21 @@
                     gitHash: event.gitHash,
                 };
                 framesThisScan += 1;
+            } else if (event.kind === 'ecuHealth') {
+                ecuHealth = {
+                    freeHeap: event.freeHeap,
+                    minFreeHeap: event.minFreeHeap,
+                    taskControl: event.taskControl,
+                    taskCanRx: event.taskCanRx,
+                    taskCanTx: event.taskCanTx,
+                    taskDiag: event.taskDiag,
+                    resetCause: event.resetCause,
+                    uptimeS: event.uptimeS,
+                    lastFault: event.lastFault,
+                    lastFaultName: event.lastFaultName,
+                };
+                // 0x704 is 1 Hz, not part of the 100 ms cyclic scan —
+                // don't count it toward frames/scan.
             }
             // Ack events come during arm/disarm; they're handled by
             // the status listener, not counted toward a scan window.
@@ -984,6 +1036,81 @@
                         </div>
                     {:else}
                         <p class="muted small">No inverter frame yet.</p>
+                    {/if}
+                    {#if ecuInvTemps !== null}
+                        <div class="reads reads-temps">
+                            <span
+                                class="stat"
+                                class:bad={ecuInvTemps.boardDegc === INV_TEMP_NC}
+                            >
+                                <span>board</span>
+                                <strong>{fmtInvTemp(ecuInvTemps.boardDegc)}</strong>
+                            </span>
+                            <span
+                                class="stat"
+                                class:bad={ecuInvTemps.pwrstgDegc === INV_TEMP_NC}
+                            >
+                                <span>pwr stage</span>
+                                <strong>{fmtInvTemp(ecuInvTemps.pwrstgDegc)}</strong>
+                            </span>
+                            <span
+                                class="stat"
+                                class:bad={ecuInvTemps.motor1Degc === INV_TEMP_NC}
+                            >
+                                <span>motor 1</span>
+                                <strong>{fmtInvTemp(ecuInvTemps.motor1Degc)}</strong>
+                            </span>
+                            <span
+                                class="stat"
+                                class:bad={ecuInvTemps.motor2Degc === INV_TEMP_NC}
+                            >
+                                <span>motor 2</span>
+                                <strong>{fmtInvTemp(ecuInvTemps.motor2Degc)}</strong>
+                            </span>
+                        </div>
+                    {/if}
+                </div>
+
+                <!-- Firmware health (0x704, 1 Hz) -->
+                <div class="card">
+                    <h3 class="card-h">Firmware health</h3>
+                    {#if ecuHealth !== null}
+                        <div class="flags">
+                            <span class="flag" class:on={ecuHealth.taskControl}>
+                                Control
+                            </span>
+                            <span class="flag" class:on={ecuHealth.taskCanRx}>CAN-RX</span>
+                            <span class="flag" class:on={ecuHealth.taskCanTx}>CAN-TX</span>
+                            <span class="flag" class:on={ecuHealth.taskDiag}>Diag</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>free heap</span>
+                                <strong class="mono">{ecuHealth.freeHeap} B</strong>
+                            </span>
+                            <span class="stat">
+                                <span>min heap</span>
+                                <strong class="mono">{ecuHealth.minFreeHeap} B</strong>
+                            </span>
+                            <span class="stat">
+                                <span>uptime</span><strong>{ecuHealth.uptimeS} s</strong>
+                            </span>
+                            <span class="stat">
+                                <span>reset</span>
+                                <strong
+                                    class:bad={ecuHealth.resetCause === 'iwdg' ||
+                                        ecuHealth.resetCause === 'wwdg'}
+                                >
+                                    {ecuHealth.resetCause}
+                                </strong>
+                            </span>
+                            <span class="stat" class:bad={ecuHealth.lastFault !== 0}>
+                                <span>last fault</span>
+                                <strong>{ecuHealth.lastFaultName}</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No health frame yet (arrives at 1 Hz).</p>
                     {/if}
                 </div>
             </div>
@@ -1813,6 +1940,12 @@
         display: flex;
         flex-wrap: wrap;
         gap: var(--space-3);
+    }
+    /* Inverter temps sit below the DC-bus/RPM/error reads. */
+    .reads-temps {
+        margin-top: var(--space-2);
+        padding-top: var(--space-2);
+        border-top: 1px solid var(--border);
     }
     /* A stat flagged out-of-spec (implausible APPS, inverter error). */
     .stat.bad strong {

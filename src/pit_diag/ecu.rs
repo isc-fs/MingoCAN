@@ -61,9 +61,20 @@ pub const ECU_INVERTER_ID: u16 = 0x702;
 pub const ECU_FWINFO_ID: u16 = 0x703;
 /// `0x705` — physical brake pressure + brake %.
 pub const ECU_BRAKE_ID: u16 = 0x705;
+/// `0x706` — inverter temperatures (board / power-stage / motor1 / motor2).
+pub const ECU_INVERTER_TEMPS_ID: u16 = 0x706;
+/// `0x704` — firmware health (heap, per-task liveness, reset cause, faults).
+/// Emitted at 1 Hz (slower than the 100 ms cyclic frames) from DiagTask.
+pub const ECU_HEALTH_ID: u16 = 0x704;
 
-/// Number of stream frames emitted per 100 ms scan when armed.
-pub const ECU_EXPECTED_FRAMES_PER_SCAN: usize = 5;
+/// Inverter temperature sentinel — raw `0xFF` (= 205 °C after the −50
+/// offset) means the NX/EMC inverter reports that sensor as disconnected.
+pub const ECU_INV_TEMP_DISCONNECTED_C: i16 = 205;
+
+/// Number of CYCLIC (100 ms) stream frames emitted per scan when armed:
+/// status / pedals / inverter / fwinfo / brake / inverter-temps. The
+/// `0x704` health frame is acyclic-ish (1 Hz) and not counted here.
+pub const ECU_EXPECTED_FRAMES_PER_SCAN: usize = 6;
 
 // ---- Enums -------------------------------------------------------
 
@@ -126,6 +137,45 @@ impl EcuInvState {
             3 => Self::Standby,
             4 => Self::Ready,
             other => Self::Unknown(other),
+        }
+    }
+}
+
+/// MCU reset cause (`0x704` byte 5). Mirrors the firmware `ecu::ResetCause`
+/// `VAL_` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EcuResetCause {
+    /// 0 — cause not determined.
+    Unknown,
+    /// 1 — power-on reset.
+    PowerOn,
+    /// 2 — NRST pin reset.
+    Pin,
+    /// 3 — software reset.
+    Software,
+    /// 4 — independent watchdog (the failure mode `0x704` exists to catch).
+    Iwdg,
+    /// 5 — window watchdog.
+    Wwdg,
+    /// 6 — low-power / brown-out reset.
+    LowPower,
+    /// Any value outside the known table.
+    Other(u8),
+}
+
+impl EcuResetCause {
+    /// Decode the raw reset-cause byte.
+    #[must_use]
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            0 => Self::Unknown,
+            1 => Self::PowerOn,
+            2 => Self::Pin,
+            3 => Self::Software,
+            4 => Self::Iwdg,
+            5 => Self::Wwdg,
+            6 => Self::LowPower,
+            other => Self::Other(other),
         }
     }
 }
@@ -208,6 +258,47 @@ pub struct EcuFwInfoFrame {
     pub git_hash: [u8; 4],
 }
 
+/// `0x706` — the NX/EMC inverter's four temperatures, forwarded from
+/// `0x464`. Each wire byte is `raw`; decoded `°C = raw − 50`. A value of
+/// [`ECU_INV_TEMP_DISCONNECTED_C`] (205 °C, raw `0xFF`) means that sensor
+/// is disconnected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuInverterTempsFrame {
+    /// Inverter control-board temperature, °C.
+    pub board_degc: i16,
+    /// Power-stage (IGBT) temperature, °C.
+    pub pwrstg_degc: i16,
+    /// Motor temperature sensor 1, °C.
+    pub motor1_degc: i16,
+    /// Motor temperature sensor 2, °C.
+    pub motor2_degc: i16,
+}
+
+/// `0x704` — firmware-health telemetry (parity with the AMS health diag).
+/// Emitted from DiagTask so it survives a ControlTask stall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuHealthFrame {
+    /// Current free heap, bytes (big-endian).
+    pub free_heap: u16,
+    /// Minimum free heap ever observed, bytes (big-endian).
+    pub min_free_heap: u16,
+    /// ControlTask stepped since the previous health frame.
+    pub task_control: bool,
+    /// CAN-RX task stepped.
+    pub task_can_rx: bool,
+    /// CAN-TX task stepped.
+    pub task_can_tx: bool,
+    /// DiagTask stepped.
+    pub task_diag: bool,
+    /// Cause of the most recent MCU reset.
+    pub reset_cause: EcuResetCause,
+    /// Seconds since boot (wraps at 255).
+    pub uptime_s: u8,
+    /// Sticky last-fault sentinel latched across the reset (`0x00` = none;
+    /// `0xF1..=0xF7` = HardFault…AssertFailed per the firmware table).
+    pub last_fault: u8,
+}
+
 /// A decoded ECU pit-diag frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EcuPitDiagFrame {
@@ -224,8 +315,12 @@ pub enum EcuPitDiagFrame {
     Brake(EcuBrakeFrame),
     /// `0x702` — inverter telemetry.
     Inverter(EcuInverterFrame),
+    /// `0x706` — inverter temperatures.
+    InverterTemps(EcuInverterTempsFrame),
     /// `0x703` — firmware identity.
     FwInfo(EcuFwInfoFrame),
+    /// `0x704` — firmware health.
+    Health(EcuHealthFrame),
 }
 
 // ---- Encode / decode ---------------------------------------------
@@ -316,6 +411,36 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 fw_minor: p[1],
                 fw_patch: p[2],
                 git_hash: [p[3], p[4], p[5], p[6]],
+            }))
+        }
+        ECU_INVERTER_TEMPS_ID => {
+            if p.len() < 4 {
+                return None;
+            }
+            // Each byte: °C = raw − 50.
+            let degc = |raw: u8| i16::from(raw) - 50;
+            Some(EcuPitDiagFrame::InverterTemps(EcuInverterTempsFrame {
+                board_degc: degc(p[0]),
+                pwrstg_degc: degc(p[1]),
+                motor1_degc: degc(p[2]),
+                motor2_degc: degc(p[3]),
+            }))
+        }
+        ECU_HEALTH_ID => {
+            if p.len() < 8 {
+                return None;
+            }
+            let live = p[4];
+            Some(EcuPitDiagFrame::Health(EcuHealthFrame {
+                free_heap: u16::from_be_bytes([p[0], p[1]]),
+                min_free_heap: u16::from_be_bytes([p[2], p[3]]),
+                task_control: (live & 0x01) != 0,
+                task_can_rx: (live & 0x02) != 0,
+                task_can_tx: (live & 0x04) != 0,
+                task_diag: (live & 0x08) != 0,
+                reset_cause: EcuResetCause::from_byte(p[5]),
+                uptime_s: p[6],
+                last_fault: p[7],
             }))
         }
         _ => None,
@@ -435,6 +560,42 @@ mod tests {
                 assert_eq!(fw.git_hash, [0xAB, 0xCD, 0xEF, 0x01]);
             }
             other => panic!("expected FwInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inverter_temps_decode_offset_and_sentinel() {
+        // board=25 (raw 75), pwrstg=60 (raw 110), motor1=-10 (raw 40),
+        // motor2=disconnected (raw 0xFF => 205).
+        let frame = CanFrame::new(ECU_INVERTER_TEMPS_ID, &[75, 110, 40, 0xFF]).unwrap();
+        match decode_frame(&frame).unwrap() {
+            EcuPitDiagFrame::InverterTemps(t) => {
+                assert_eq!(t.board_degc, 25);
+                assert_eq!(t.pwrstg_degc, 60);
+                assert_eq!(t.motor1_degc, -10);
+                assert_eq!(t.motor2_degc, ECU_INV_TEMP_DISCONNECTED_C);
+            }
+            other => panic!("expected InverterTemps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_decodes() {
+        // free=0x1234, min=0x0800, live=0b1011 (control+can_rx+diag, not
+        // can_tx), reset=4 (IWDG), uptime=42, last_fault=0xF5 (stack overflow).
+        let p = [0x12, 0x34, 0x08, 0x00, 0b1011, 4, 42, 0xF5];
+        let frame = CanFrame::new(ECU_HEALTH_ID, &p).unwrap();
+        match decode_frame(&frame).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert_eq!(h.free_heap, 0x1234);
+                assert_eq!(h.min_free_heap, 0x0800);
+                assert!(h.task_control && h.task_can_rx && h.task_diag);
+                assert!(!h.task_can_tx);
+                assert_eq!(h.reset_cause, EcuResetCause::Iwdg);
+                assert_eq!(h.uptime_s, 42);
+                assert_eq!(h.last_fault, 0xF5);
+            }
+            other => panic!("expected Health, got {other:?}"),
         }
     }
 
