@@ -201,7 +201,7 @@ export async function runFlash(options: FlashOptions): Promise<void> {
 async function promptForNodeId(): Promise<string | undefined> {
     const value = await vscode.window.showInputBox({
         title: 'ISC MingoCAN: target node-id',
-        prompt: 'Flashing needs the bootloader node-id (0x0–0xF). Team scheme: AMS = 0x1, ECU = 0x2, uDV = 0x3.',
+        prompt: 'Flashing needs the bootloader node-id (0x0–0xF). Team scheme: ECU = 0x1, AMS = 0x2, uDV = 0x3.',
         placeHolder: 'e.g. 0x1',
         ignoreFocusOut: true,
         validateInput: validateNodeId,
