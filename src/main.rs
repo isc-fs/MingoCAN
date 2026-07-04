@@ -38,6 +38,13 @@ impl From<ExitCodeValue> for ExitCode {
 }
 
 fn main() -> ExitCode {
+    // If we were spawned as an out-of-process CAN backend helper
+    // (`__can-host`), run the bridge and exit — before clap, so the
+    // hidden mode never has to be a real subcommand.
+    if can_flasher::transport::isolation::maybe_run_as_host() {
+        return ExitCodeValue::Ok.into();
+    }
+
     let cli = Cli::parse();
     logging::init(cli.global.verbose);
 
