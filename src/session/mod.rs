@@ -229,10 +229,18 @@ impl Default for SessionConfig {
 /// seconds on each miss.
 const BL_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(750);
 
-/// Delay between reboot-trigger + CONNECT probes while polling a target
-/// into the bootloader. One reboot round is roughly this plus up to one
+/// Delay between successive CONNECT probes while polling a target into
+/// the bootloader. One probe cycle is roughly this plus up to one
 /// [`BL_CONNECT_ATTEMPT_TIMEOUT`].
 const BL_REBOOT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Minimum gap between reboot-to-BL triggers while polling. Deliberately
+/// several probe cycles long: re-sending the trigger too aggressively
+/// can keep restarting a board's reset → bootloader-boot sequence so it
+/// never settles long enough to answer CONNECT (observed on the ECU —
+/// one trigger reaches a stable bootloader, rapid re-triggering never
+/// does). We still re-send periodically to cover a dropped trigger.
+const BL_REBOOT_RETRIGGER_INTERVAL: Duration = Duration::from_millis(2_500);
 
 /// The handle a caller holds. Internally shares state with the RX
 /// task + optional keepalive task via `Arc<SessionInner>`.
@@ -442,37 +450,53 @@ impl Session {
         }
     }
 
-    /// Poll a running application into the bootloader: each round
-    /// (re)sends the reboot-to-BL trigger, waits a beat for the reset,
-    /// then probes CONNECT with a short timeout — looping until it
-    /// answers or `window` elapses. Re-sending the trigger every round
-    /// (not just once) rescues a board that dropped the first frame, or
-    /// whose bootloader only listens briefly after reset before jumping
-    /// back to the application.
+    /// Poll a running application into the bootloader: send the
+    /// reboot-to-BL trigger, then probe CONNECT with a short timeout and
+    /// keep probing — re-sending the trigger only every
+    /// [`BL_REBOOT_RETRIGGER_INTERVAL`], not every probe — until the
+    /// bootloader answers or `window` elapses.
+    ///
+    /// The trigger cadence matters: a board's reset → bootloader-boot
+    /// sequence (open HV relays, drain, `NVIC_SystemReset`, BL preamble)
+    /// takes a beat, and re-triggering *during* it can restart the whole
+    /// sequence so the board never settles long enough to answer. So we
+    /// give it an uninterrupted stretch after each trigger, probing
+    /// frequently, and only re-send periodically to cover a genuinely
+    /// dropped trigger.
     async fn reboot_and_connect(&self, window: Duration) -> Result<(u8, u8), SessionError> {
         let deadline = Instant::now() + window;
         let mut attempts: u32 = 0;
         loop {
             self.send_app_frame(REBOOT_TO_BL_ID, &REBOOT_TO_BL_PAYLOAD)
                 .await?;
-            tokio::time::sleep(BL_REBOOT_POLL_INTERVAL).await;
-            attempts += 1;
-            match self.connect_with_timeout(BL_CONNECT_ATTEMPT_TIMEOUT).await {
-                Ok(v) => {
-                    debug!(attempts, "bootloader answered after reboot trigger");
-                    return Ok(v);
-                }
-                Err(e @ SessionError::CommandTimeout { .. }) => {
-                    if Instant::now() >= deadline {
-                        warn!(
-                            attempts,
-                            "bootloader did not answer within the reboot window"
-                        );
-                        return Err(e);
+            let next_trigger = Instant::now() + BL_REBOOT_RETRIGGER_INTERVAL;
+
+            // Probe CONNECT until it's time to re-send the trigger — or
+            // the overall deadline passes.
+            loop {
+                tokio::time::sleep(BL_REBOOT_POLL_INTERVAL).await;
+                attempts += 1;
+                match self.connect_with_timeout(BL_CONNECT_ATTEMPT_TIMEOUT).await {
+                    Ok(v) => {
+                        debug!(attempts, "bootloader answered after reboot trigger");
+                        return Ok(v);
                     }
-                    // else: keep polling until the deadline
+                    Err(e @ SessionError::CommandTimeout { .. }) => {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            warn!(
+                                attempts,
+                                "bootloader did not answer within the reboot window"
+                            );
+                            return Err(e);
+                        }
+                        if now >= next_trigger {
+                            break; // re-send the trigger, then keep probing
+                        }
+                        // else: keep probing without re-triggering
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
             }
         }
     }

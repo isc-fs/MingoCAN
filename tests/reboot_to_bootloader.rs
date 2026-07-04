@@ -19,7 +19,12 @@ use can_flasher::session::{Session, SessionConfig, SessionError};
 use can_flasher::transport::{CanBackend, StubDevice, VirtualBus};
 
 const STUB_NODE: u8 = 0x1; // ECU
-const WINDOW: Duration = Duration::from_secs(4);
+
+// Comfortably longer than one BL_REBOOT_RETRIGGER_INTERVAL (2.5s) so the
+// "dropped first trigger" case, which only re-sends on the second
+// trigger, has room. Passing tests return as soon as CONNECT succeeds,
+// so the larger cap doesn't slow them.
+const WINDOW: Duration = Duration::from_secs(8);
 
 /// Build a session + stub that requires `reboots_needed` reboot triggers
 /// before it answers CONNECT. Caller drives the session, then drops
