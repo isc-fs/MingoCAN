@@ -21,6 +21,13 @@ pub const REBOOT_TO_BL_ID: u16 = 0x002;
 /// the firmware `memcmp`s all four bytes.
 pub const REBOOT_TO_BL_PAYLOAD: [u8; 4] = [0xB0, 0x07, 0xAD, 0x11];
 
+/// Default total window to poll a target into the bootloader after the
+/// reboot trigger, for `Session::connect_entering_bootloader`. Sized to
+/// cover a board's reset-into-BL time plus several retries (a running
+/// app reboots in well under a second; the extra headroom absorbs
+/// timing jitter and the odd dropped frame on a busy bus).
+pub const DEFAULT_BL_ENTRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// How the flash flow should get a target into the bootloader before
 /// the `CMD_CONNECT` handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]

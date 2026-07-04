@@ -221,6 +221,19 @@ impl Default for SessionConfig {
     }
 }
 
+/// Per-attempt `CMD_CONNECT` timeout while entering the bootloader.
+/// When a bootloader is present it ACKs within a few ms, so we keep this
+/// short — deliberately decoupled from the (erase-sized) session
+/// `command_timeout`, which can be seconds — so the reboot-to-BL poll
+/// loop probes many times inside the window instead of blocking whole
+/// seconds on each miss.
+const BL_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// Delay between reboot-trigger + CONNECT probes while polling a target
+/// into the bootloader. One reboot round is roughly this plus up to one
+/// [`BL_CONNECT_ATTEMPT_TIMEOUT`].
+const BL_REBOOT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
 /// The handle a caller holds. Internally shares state with the RX
 /// task + optional keepalive task via `Arc<SessionInner>`.
 pub struct Session {
@@ -310,9 +323,21 @@ impl Session {
     /// waits for an ACK carrying the device's advertised version,
     /// validates majors match, starts the keepalive task.
     pub async fn connect(&self) -> Result<(u8, u8), SessionError> {
+        self.connect_with_timeout(self.config.command_timeout).await
+    }
+
+    /// [`connect`](Self::connect), but waits only `reply_timeout` for the
+    /// CONNECT ACK instead of the session `command_timeout`. Used by the
+    /// bootloader-entry poll loop, which wants fast per-attempt probes.
+    async fn connect_with_timeout(
+        &self,
+        reply_timeout: Duration,
+    ) -> Result<(u8, u8), SessionError> {
         let _guard = self.inner.command_lock.lock().await;
         let payload = cmd_connect(self.config.host_major, self.config.host_minor);
-        let response = self.send_raw(&payload, MessageType::Cmd).await?;
+        let response = self
+            .send_raw_with_timeout(&payload, MessageType::Cmd, reply_timeout)
+            .await?;
 
         match response {
             Response::Ack { opcode, payload } => {
@@ -384,34 +409,71 @@ impl Session {
     /// CONNECT, transparently rebooting a *running application* into
     /// the bootloader when needed (see [`BootloaderEntry`]).
     ///
-    /// On `Auto`, a first CONNECT timeout is taken to mean "no
-    /// bootloader answered" — the app-level reboot-to-BL frame is
-    /// sent, we wait `settle` for the bootloader to come up, then
-    /// retry CONNECT once. `Always` sends the trigger up front;
-    /// `Never` is a plain [`connect`](Self::connect).
+    /// `window` bounds how long we keep trying to reach the bootloader
+    /// after the reboot trigger. Rather than a single fixed sleep + one
+    /// retry — fragile against reboot-timing jitter, a dropped trigger,
+    /// or a bootloader whose post-reset listen window is short — we
+    /// *poll*: re-send the trigger and probe CONNECT (with a short
+    /// per-attempt timeout) every round until the bootloader answers or
+    /// `window` elapses.
+    ///
+    /// - `Never`: plain [`connect`](Self::connect), no trigger.
+    /// - `Auto`: one short CONNECT probe first (fast path for a board
+    ///   already in the bootloader); on timeout, fall into the reboot
+    ///   poll loop.
+    /// - `Always`: straight into the reboot poll loop.
     pub async fn connect_entering_bootloader(
         &self,
         entry: BootloaderEntry,
-        settle: Duration,
+        window: Duration,
     ) -> Result<(u8, u8), SessionError> {
         match entry {
             BootloaderEntry::Never => self.connect().await,
-            BootloaderEntry::Always => {
-                self.send_app_frame(REBOOT_TO_BL_ID, &REBOOT_TO_BL_PAYLOAD)
-                    .await?;
-                tokio::time::sleep(settle).await;
-                self.connect().await
-            }
-            BootloaderEntry::Auto => match self.connect().await {
-                Ok(v) => Ok(v),
-                Err(SessionError::CommandTimeout { .. }) => {
-                    self.send_app_frame(REBOOT_TO_BL_ID, &REBOOT_TO_BL_PAYLOAD)
-                        .await?;
-                    tokio::time::sleep(settle).await;
-                    self.connect().await
+            BootloaderEntry::Always => self.reboot_and_connect(window).await,
+            BootloaderEntry::Auto => {
+                match self.connect_with_timeout(BL_CONNECT_ATTEMPT_TIMEOUT).await {
+                    Ok(v) => Ok(v),
+                    Err(SessionError::CommandTimeout { .. }) => {
+                        self.reboot_and_connect(window).await
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
+        }
+    }
+
+    /// Poll a running application into the bootloader: each round
+    /// (re)sends the reboot-to-BL trigger, waits a beat for the reset,
+    /// then probes CONNECT with a short timeout — looping until it
+    /// answers or `window` elapses. Re-sending the trigger every round
+    /// (not just once) rescues a board that dropped the first frame, or
+    /// whose bootloader only listens briefly after reset before jumping
+    /// back to the application.
+    async fn reboot_and_connect(&self, window: Duration) -> Result<(u8, u8), SessionError> {
+        let deadline = Instant::now() + window;
+        let mut attempts: u32 = 0;
+        loop {
+            self.send_app_frame(REBOOT_TO_BL_ID, &REBOOT_TO_BL_PAYLOAD)
+                .await?;
+            tokio::time::sleep(BL_REBOOT_POLL_INTERVAL).await;
+            attempts += 1;
+            match self.connect_with_timeout(BL_CONNECT_ATTEMPT_TIMEOUT).await {
+                Ok(v) => {
+                    debug!(attempts, "bootloader answered after reboot trigger");
+                    return Ok(v);
+                }
+                Err(e @ SessionError::CommandTimeout { .. }) => {
+                    if Instant::now() >= deadline {
+                        warn!(
+                            attempts,
+                            "bootloader did not answer within the reboot window"
+                        );
+                        return Err(e);
+                    }
+                    // else: keep polling until the deadline
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 
@@ -639,15 +701,29 @@ impl Session {
         payload: &[u8],
         message_type: MessageType,
     ) -> Result<Response, SessionError> {
+        self.send_raw_with_timeout(payload, message_type, self.config.command_timeout)
+            .await
+    }
+
+    /// [`send_raw`](Self::send_raw) with an explicit reply timeout,
+    /// instead of the session `command_timeout`. Lets the CONNECT
+    /// handshake use a short per-attempt timeout while the erase-sized
+    /// `command_timeout` still governs ordinary flash commands.
+    async fn send_raw_with_timeout(
+        &self,
+        payload: &[u8],
+        message_type: MessageType,
+        reply_timeout: Duration,
+    ) -> Result<Response, SessionError> {
         let errors_before = self.inner.backend.adapter_error_count();
         self.send_frames(payload, message_type, self.inner.target_node)
             .await?;
         let mut rx = self.inner.reply_rx.lock().await;
-        match timeout(self.config.command_timeout, rx.recv()).await {
+        match timeout(reply_timeout, rx.recv()).await {
             Ok(Some(response)) => Ok(response),
             Ok(None) => Err(SessionError::RxClosed),
             Err(_) => Err(SessionError::CommandTimeout {
-                timeout: self.config.command_timeout,
+                timeout: reply_timeout,
                 adapter_errors_during_wait: self
                     .inner
                     .backend
