@@ -193,7 +193,7 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
     let (proto_major, proto_minor) = session
         .connect_entering_bootloader(
             args.enter_bootloader,
-            Duration::from_millis(ENTER_BL_SETTLE_MS),
+            crate::app_control::DEFAULT_BL_ENTRY_WINDOW,
         )
         .await
         .map_err(|e| {
@@ -1032,12 +1032,6 @@ const _: () = assert!(FLASH_ERASE_FLOOR_MS >= 4_000);
 /// option-byte reload. Mirrors `config ob apply-wrp`'s default
 /// `--reset-wait-ms`.
 const WRP_RESET_SETTLE_MS: u64 = 2_000;
-
-/// How long to wait after sending the app reboot-to-BL trigger before
-/// re-CONNECTing. The app opens relays + drains TX (~10 ms) then
-/// resets; the bootloader's preamble then has to come up. Generous so
-/// a slow boot doesn't race the retry.
-const ENTER_BL_SETTLE_MS: u64 = 2_000;
 
 fn open_session(global: &GlobalFlags, keepalive_ms: u32) -> Result<Session> {
     // FMEA #271 G2: never silently guess which physical board to

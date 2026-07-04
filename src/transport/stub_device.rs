@@ -132,6 +132,16 @@ pub struct StubDevice {
     /// inspection surface — real hardware would be rebooting by
     /// the time the host could ask.
     reset_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Test knob: how many app reboot-to-BL triggers
+    /// ([`REBOOT_TO_BL_ID`]/[`REBOOT_TO_BL_PAYLOAD`]) must be received
+    /// before `CMD_CONNECT` is answered. Models a *running application*
+    /// that only enters the bootloader after the trigger (`1`), or a
+    /// flaky board that misses the first trigger (`2`). `0` (default) =
+    /// already in the bootloader, answer CONNECT immediately.
+    reboots_needed: u32,
+    /// Count of reboot triggers seen so far. Once it reaches
+    /// `reboots_needed`, CONNECT is answered.
+    reboots_seen: u32,
 }
 
 impl StubDevice {
@@ -151,7 +161,17 @@ impl StubDevice {
             flash_buffer: vec![0xFF; BL_APP_MAX_SIZE as usize],
             flash_crc_overrides: HashMap::new(),
             reset_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            reboots_needed: 0,
+            reboots_seen: 0,
         }
+    }
+
+    /// Test-only: require this many app reboot-to-BL triggers before the
+    /// stub answers `CMD_CONNECT`. Simulates a running application (`1`)
+    /// or a board that drops the first trigger (`2`), exercising the
+    /// host's reboot-and-connect poll loop.
+    pub fn set_reboots_needed(&mut self, n: u32) {
+        self.reboots_needed = n;
     }
 
     /// Cheaply-cloneable handle to the reset counter. Tests grab
@@ -230,6 +250,23 @@ impl StubDevice {
     }
 
     async fn handle_frame(&mut self, frame: CanFrame) -> Result<()> {
+        // App reboot-to-BL trigger: a raw classic-CAN frame (not the
+        // bootloader ISO-TP protocol) the *application* listens for. The
+        // real BL never sees it — it's the app that resets on a match —
+        // but the stub uses it to model the running-app → bootloader
+        // transition for the host's reboot-and-connect poll loop.
+        if frame.id == crate::app_control::REBOOT_TO_BL_ID
+            && frame.payload() == crate::app_control::REBOOT_TO_BL_PAYLOAD
+        {
+            self.reboots_seen = self.reboots_seen.saturating_add(1);
+            debug!(
+                node = self.node_id,
+                seen = self.reboots_seen,
+                "stub: reboot-to-BL trigger received"
+            );
+            return Ok(());
+        }
+
         // New wire format (fix/12): the 11-bit ID carries only
         // direction + node; message type lives in the reassembled
         // payload's first byte. The BL only ever hears host→node
@@ -368,6 +405,18 @@ impl StubDevice {
     // ---- Handlers ----
 
     async fn handle_connect(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        // Model a board not yet in the bootloader: stay silent until
+        // enough reboot triggers have arrived, so the host's CONNECT
+        // times out and it drops into the reboot poll loop.
+        if self.reboots_seen < self.reboots_needed {
+            trace!(
+                node = self.node_id,
+                seen = self.reboots_seen,
+                needed = self.reboots_needed,
+                "stub: ignoring CONNECT — not in bootloader yet"
+            );
+            return Ok(());
+        }
         if payload.len() < 3 {
             return self
                 .send_nack(
