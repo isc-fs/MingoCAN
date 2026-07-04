@@ -161,7 +161,11 @@ type FnGetErrorText = unsafe extern "system" fn(error: u32, language: u16, buffe
 /// the loaded library. Cheap to clone via `Arc` so the reader thread
 /// and the async send path can both hold a reference.
 struct PcanApi {
-    _lib: Arc<Library>,
+    /// Keep-alive handle on the loaded library — held so the dylib
+    /// stays mapped for as long as any thread might call through the
+    /// function pointers below. `None` only in unit tests, which
+    /// substitute plain Rust fns for the FFI symbols.
+    _lib: Option<Arc<Library>>,
     initialize: FnInitialize,
     uninitialize: FnUninitialize,
     read: FnRead,
@@ -192,7 +196,7 @@ impl PcanApi {
                 .get::<FnGetErrorText>(b"CAN_GetErrorText\0")
                 .map_err(|e| missing_symbol("CAN_GetErrorText", e))?;
             Ok(Self {
-                _lib: lib,
+                _lib: Some(lib),
                 initialize,
                 uninitialize,
                 read,
@@ -248,6 +252,12 @@ pub struct PcanBackend {
     channel: u16,
     rx: Arc<TokioMutex<mpsc::Receiver<CanFrame>>>,
     shutdown: Arc<AtomicBool>,
+    /// Latched `true` by the reader once the adapter is gone (USB
+    /// unplugged / driver unloaded). Once set, we must NOT call any more
+    /// FFI against the channel — `send()` fails fast and `Drop` skips
+    /// `CAN_Uninitialize`, because re-entering the driver against a
+    /// vanished IOKit device is what corrupts driver state / SIGBUSes.
+    removed: Arc<AtomicBool>,
     reader_handle: StdMutex<Option<thread::JoinHandle<()>>>,
     description: String,
 }
@@ -285,13 +295,15 @@ impl PcanBackend {
         let description = format!("PCAN (channel 0x{channel:02X} @ {nominal_bps} bps)");
         let api = Arc::new(api);
         let shutdown = Arc::new(AtomicBool::new(false));
+        let removed = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel(RX_QUEUE_DEPTH);
 
         let reader_api = Arc::clone(&api);
         let reader_shutdown = Arc::clone(&shutdown);
+        let reader_removed = Arc::clone(&removed);
         let reader_handle = thread::Builder::new()
             .name("pcan-reader".into())
-            .spawn(move || reader_loop(reader_api, channel, tx, reader_shutdown))
+            .spawn(move || reader_loop(reader_api, channel, tx, reader_shutdown, reader_removed))
             .map_err(|e| TransportError::Other(format!("spawn reader thread: {e}")))?;
 
         Ok(Self {
@@ -299,6 +311,7 @@ impl PcanBackend {
             channel,
             rx: Arc::new(TokioMutex::new(rx)),
             shutdown,
+            removed,
             reader_handle: StdMutex::new(Some(reader_handle)),
             description,
         })
@@ -308,6 +321,11 @@ impl PcanBackend {
 #[async_trait]
 impl CanBackend for PcanBackend {
     async fn send(&self, frame: CanFrame) -> Result<()> {
+        // If the adapter already vanished, don't call CAN_Write into a
+        // dead device (a SIGBUS risk) — surface a clean disconnect.
+        if self.removed.load(Ordering::SeqCst) {
+            return Err(TransportError::Disconnected);
+        }
         let mut msg = our_frame_to_tpcan(&frame)?;
         let api = Arc::clone(&self.api);
         let channel = self.channel;
@@ -356,9 +374,35 @@ impl CanBackend for PcanBackend {
 
 impl Drop for PcanBackend {
     fn drop(&mut self) {
+        // 1. Signal the reader to stop.
         self.shutdown.store(true, Ordering::SeqCst);
-        // Uninitialize before joining so the reader's next poll
-        // returns promptly with an error we ignore.
+
+        // 2. Join the reader BEFORE uninitializing. `CAN_Uninitialize`
+        //    and the reader's `CAN_Read` run on the SAME channel handle;
+        //    uninitializing while a read is in flight frees channel state
+        //    out from under it. On macOS/MacCAN an unplugged adapter
+        //    turns that race into a SIGBUS on the driver's IOKit thread
+        //    (the reported crash). The reader observes `shutdown` within
+        //    one poll (~1 ms) and never blocks on send, so this join is
+        //    bounded — no CAN_Read can be running once it returns.
+        if let Ok(mut handle) = self.reader_handle.lock() {
+            if let Some(h) = handle.take() {
+                let _ = h.join();
+            }
+        }
+
+        // 3. The reader is gone, so nothing can race us now. Uninitialize
+        //    the channel — UNLESS the device already vanished: re-entering
+        //    the driver against a removed IOKit device is itself a crash
+        //    risk, and the OS has already torn the channel down, so
+        //    skipping uninit leaks nothing.
+        if self.removed.load(Ordering::SeqCst) {
+            debug!(
+                channel = self.channel,
+                "PCAN: adapter removed — skipping CAN_Uninitialize"
+            );
+            return;
+        }
         let rc = unsafe { (self.api.uninitialize)(self.channel) };
         if rc != PCAN_ERROR_OK {
             warn!(
@@ -367,11 +411,6 @@ impl Drop for PcanBackend {
                 text = %self.api.error_text(rc),
                 "PCAN_Uninitialize returned an error; ignoring"
             );
-        }
-        if let Ok(mut handle) = self.reader_handle.lock() {
-            if let Some(h) = handle.take() {
-                let _ = h.join();
-            }
         }
     }
 }
@@ -432,6 +471,7 @@ fn reader_loop(
     channel: u16,
     tx: mpsc::Sender<CanFrame>,
     shutdown: Arc<AtomicBool>,
+    removed: Arc<AtomicBool>,
 ) {
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -469,9 +509,26 @@ fn reader_loop(
                         continue;
                     }
                 };
-                if tx.blocking_send(frame).is_err() {
-                    // Async receiver dropped — the backend is gone.
-                    return;
+                // Deliver without ever blocking indefinitely: a full
+                // queue is retried, but we re-check `shutdown` each pass
+                // so a teardown can never wedge the reader inside a
+                // full-channel send (which would make Drop's join hang).
+                let mut pending = frame;
+                loop {
+                    match tx.try_send(pending) {
+                        Ok(()) => break,
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            // Async receiver dropped — the backend is gone.
+                            return;
+                        }
+                        Err(mpsc::error::TrySendError::Full(f)) => {
+                            if shutdown.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            pending = f;
+                            thread::sleep(RX_POLL_INTERVAL);
+                        }
+                    }
                 }
             }
             PCAN_ERROR_QRCVEMPTY => {
@@ -480,12 +537,15 @@ fn reader_loop(
             }
             PCAN_ERROR_ILLHW | PCAN_ERROR_NODRIVER => {
                 // The adapter is gone (USB unplugged / driver
-                // unloaded). Stop the reader: returning drops `tx`, so
-                // the async `recv()` resolves to `Ok(None)` →
+                // unloaded). Latch `removed` so `send()` and `Drop`
+                // stop issuing FFI against the dead channel, then stop
+                // the reader: returning drops `tx`, so the async
+                // `recv()` resolves to `Ok(None)` →
                 // `TransportError::Disconnected`, which the caller
                 // surfaces as a clean "adapter disconnected" instead
                 // of spinning here re-calling into a driver whose
                 // device just vanished.
+                removed.store(true, Ordering::SeqCst);
                 warn!(
                     code = format!("0x{rc:05X}"),
                     text = %api.error_text(rc),
@@ -810,5 +870,127 @@ mod tests {
             let back = tpcan_to_our(&msg).unwrap();
             assert_eq!(f, back, "roundtrip {f:?}");
         }
+    }
+
+    // ---- Reader / teardown behaviour (mock FFI, no real adapter) ----
+    //
+    // These drive `reader_loop` with plain Rust fns standing in for the
+    // PCAN-Basic symbols, exercising the crash-fix invariants without a
+    // device: the reader latches `removed` + exits on hardware-gone, exits
+    // promptly on shutdown, and never wedges on a full queue during
+    // teardown (which is what makes Drop's join-before-uninitialize
+    // bounded — see the SIGBUS fix in `Drop`).
+
+    use std::sync::atomic::AtomicUsize;
+
+    unsafe extern "system" fn mock_init(_c: u16, _b: u16, _h: u8, _i: u32, _n: u16) -> u32 {
+        PCAN_ERROR_OK
+    }
+    unsafe extern "system" fn mock_uninit(_c: u16) -> u32 {
+        PCAN_ERROR_OK
+    }
+    unsafe extern "system" fn mock_write(_c: u16, _m: *mut TPCANMsg) -> u32 {
+        PCAN_ERROR_OK
+    }
+    unsafe extern "system" fn mock_get_error_text(_e: u32, _l: u16, _b: *mut u8) -> u32 {
+        PCAN_ERROR_OK
+    }
+    unsafe extern "system" fn mock_read_empty(
+        _c: u16,
+        _m: *mut TPCANMsg,
+        _t: *mut TPCANTimestamp,
+    ) -> u32 {
+        PCAN_ERROR_QRCVEMPTY
+    }
+    unsafe extern "system" fn mock_read_ok(
+        _c: u16,
+        _m: *mut TPCANMsg,
+        _t: *mut TPCANTimestamp,
+    ) -> u32 {
+        PCAN_ERROR_OK
+    }
+
+    static READ_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "system" fn mock_read_then_illhw(
+        _c: u16,
+        _m: *mut TPCANMsg,
+        _t: *mut TPCANTimestamp,
+    ) -> u32 {
+        if READ_CALLS.fetch_add(1, Ordering::SeqCst) < 3 {
+            PCAN_ERROR_QRCVEMPTY
+        } else {
+            PCAN_ERROR_ILLHW
+        }
+    }
+
+    fn mock_api(read: FnRead) -> Arc<PcanApi> {
+        Arc::new(PcanApi {
+            _lib: None,
+            initialize: mock_init,
+            uninitialize: mock_uninit,
+            read,
+            write: mock_write,
+            get_error_text: mock_get_error_text,
+        })
+    }
+
+    #[test]
+    fn reader_latches_removed_and_exits_on_hardware_gone() {
+        READ_CALLS.store(0, Ordering::SeqCst);
+        let removed = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel(RX_QUEUE_DEPTH);
+        // Must RETURN (not spin) once CAN_Read reports the adapter is gone,
+        // and must latch `removed` so Drop skips CAN_Uninitialize.
+        reader_loop(
+            mock_api(mock_read_then_illhw),
+            0x51,
+            tx,
+            shutdown,
+            Arc::clone(&removed),
+        );
+        assert!(
+            removed.load(Ordering::SeqCst),
+            "reader must latch `removed` on ILLHW/NODRIVER"
+        );
+    }
+
+    #[test]
+    fn reader_exits_promptly_on_shutdown() {
+        let removed = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(true)); // pre-signalled
+        let (tx, _rx) = mpsc::channel(RX_QUEUE_DEPTH);
+        // The top-of-loop shutdown check returns immediately — this is what
+        // keeps Drop's join-before-uninitialize bounded.
+        reader_loop(
+            mock_api(mock_read_empty),
+            0x51,
+            tx,
+            shutdown,
+            Arc::clone(&removed),
+        );
+        assert!(
+            !removed.load(Ordering::SeqCst),
+            "a clean shutdown is not a removal"
+        );
+    }
+
+    #[test]
+    fn reader_does_not_wedge_on_full_queue_during_teardown() {
+        // A never-drained capacity-1 queue + a reader that always produces
+        // a frame: the reader will block on send at the OLD `blocking_send`.
+        // The fix retries `try_send` while honouring `shutdown`, so setting
+        // shutdown must let the reader return. If this regresses, the test
+        // hangs (the exact wedge that would make Drop's join deadlock).
+        let removed = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<CanFrame>(1);
+        let sd = Arc::clone(&shutdown);
+        let rm = Arc::clone(&removed);
+        let h = thread::spawn(move || reader_loop(mock_api(mock_read_ok), 0x51, tx, sd, rm));
+        thread::sleep(Duration::from_millis(30));
+        shutdown.store(true, Ordering::SeqCst);
+        h.join()
+            .expect("reader thread must exit after shutdown, not wedge on a full queue");
     }
 }
