@@ -38,6 +38,9 @@ pub mod stub_device;
 pub mod vector;
 pub mod virtual_bus;
 
+/// Out-of-process backend isolation (crash-prone native drivers).
+pub mod isolation;
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use pcan::{PcanAdapterInfo, PcanBackend};
 pub use slcan::{SlcanAdapterInfo, SlcanBackend};
@@ -158,9 +161,46 @@ pub trait CanBackend: Send + Sync {
 /// Router: pick the right backend for the given `--interface` /
 /// `--channel` combination and return it as a `Box<dyn CanBackend>`.
 ///
+/// Native PCAN on macOS/Windows runs in an ISOLATED helper process
+/// (see [`isolation`]): the MacCAN/PCAN-Basic driver can fault on its
+/// own threads (e.g. a libPCBUSB SIGBUS when the adapter is unplugged),
+/// and running it out-of-process means such a crash kills only the
+/// helper — the app sees the pipe close and reports a clean disconnect
+/// instead of dying. Every other backend runs in-process via
+/// [`open_backend_direct`].
+///
+/// Must be called from within a tokio runtime context.
+pub fn open_backend(
+    iface: InterfaceType,
+    channel: Option<&str>,
+    bitrate: u32,
+) -> Result<Box<dyn CanBackend>> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if matches!(iface, InterfaceType::Pcan)
+        // Escape hatch: `CANFLASHER_NO_ISOLATE=1` forces the in-process
+        // driver (e.g. to A/B a suspected isolation regression on the
+        // bench). Isolation is ON by default — that's the whole point.
+        && std::env::var_os("CANFLASHER_NO_ISOLATE").is_none()
+    {
+        let channel = channel.ok_or_else(|| TransportError::InvalidChannel {
+            channel: String::new(),
+            reason: "--channel required for --interface pcan (e.g. PCAN_USBBUS1)".into(),
+        })?;
+        return Ok(Box::new(isolation::IsolatedBackend::spawn(
+            iface, channel, bitrate,
+        )?));
+    }
+    open_backend_direct(iface, channel, bitrate)
+}
+
+/// The in-process backend router. Opens the real driver directly, with
+/// no process isolation — used by every non-isolated interface, and by
+/// the `__can-host` helper itself (which IS the isolated process, so it
+/// must not recursively isolate).
+///
 /// Must be called from within a tokio runtime context — the virtual
 /// arm spawns a [`StubDevice`] task via `tokio::spawn`.
-pub fn open_backend(
+pub(crate) fn open_backend_direct(
     iface: InterfaceType,
     channel: Option<&str>,
     bitrate: u32,

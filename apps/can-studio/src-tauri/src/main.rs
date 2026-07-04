@@ -11,6 +11,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // If launched as the hidden out-of-process CAN backend helper
+    // (`__can-host`), run the stdio bridge and exit before doing any
+    // GUI/tracing setup. The desktop binary spawns *itself* as the
+    // helper (`current_exe()` is `can-studio`, not `can-flasher`), so
+    // this guard must live here too — otherwise a driver crash on the
+    // helper side would take the whole app down, defeating isolation.
+    if can_flasher::transport::isolation::maybe_run_as_host() {
+        return;
+    }
+
     // tracing-subscriber bootstrap matches the convention used by
     // the can-flasher CLI. RUST_LOG=can_studio=debug works as
     // expected. Defaults to INFO when no env var is set.
