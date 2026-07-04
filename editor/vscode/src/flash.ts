@@ -304,11 +304,66 @@ async function resolveArtifact(
         10,
     );
     if (matches.length === 0) {
+        // Before erroring on the DEFAULT glob, cast a wider net. Lots of
+        // firmware projects build into a non-`build/` directory (e.g.
+        // `build-fw/`, `Debug/`, `out/`) that `**/build/**` never
+        // matches. If we find binaries elsewhere, let the operator pick
+        // one and PERSIST it to `iscFs.firmwareArtifact` (workspace
+        // scope → `.vscode/settings.json`), so the fix sticks and can be
+        // committed for the whole team instead of every dev re-hitting
+        // this wall.
+        if (pattern === DEFAULT_FIRMWARE_GLOB) {
+            const wider = await vscode.workspace.findFiles(
+                '**/*.{elf,hex,bin}',
+                '{**/node_modules/**,**/CMakeFiles/**,**/.git/**}',
+                50,
+            );
+            if (wider.length > 0) {
+                const items = wider
+                    .map((uri) => ({
+                        label: vscode.workspace.asRelativePath(uri),
+                        uri,
+                    }))
+                    .sort((a, b) => a.label.localeCompare(b.label));
+                const picked = await vscode.window.showQuickPick(items, {
+                    title: 'ISC MingoCAN: no artifact matched the default — pick your firmware',
+                    placeHolder:
+                        'Saved to iscFs.firmwareArtifact — commit .vscode/settings.json to share it with the team',
+                    matchOnDescription: true,
+                });
+                if (picked === undefined) {
+                    out.appendLine(
+                        '[cancelled] firmware-artifact auto-discovery cancelled by user',
+                    );
+                    return null;
+                }
+                try {
+                    await vscode.workspace
+                        .getConfiguration('iscFs')
+                        .update(
+                            'firmwareArtifact',
+                            picked.label,
+                            vscode.ConfigurationTarget.Workspace,
+                        );
+                    out.appendLine(
+                        `[info] saved iscFs.firmwareArtifact = ${picked.label} (workspace) — commit .vscode/settings.json to share it`,
+                    );
+                } catch (e) {
+                    // Non-fatal: no workspace folder to persist into, etc.
+                    // Still flash the picked artifact this run.
+                    out.appendLine(
+                        `[warn] could not persist iscFs.firmwareArtifact: ${String(e)}`,
+                    );
+                }
+                return picked.uri.fsPath;
+            }
+        }
+
         const setPath = 'Set artifact path';
         const buildFirst = 'Build first';
         const detail =
             pattern === DEFAULT_FIRMWARE_GLOB
-                ? "no `.elf` / `.hex` / `.bin` produced under `build/` yet — run your build first, or set `iscFs.firmwareArtifact` to the path your toolchain actually produces"
+                ? "no `.elf` / `.hex` / `.bin` found — run your build first, or set `iscFs.firmwareArtifact` to the path your toolchain produces (and commit `.vscode/settings.json` so teammates inherit it)"
                 : `no file matched \`${pattern}\` under ${cwd}`;
         const pick = await vscode.window.showErrorMessage(
             `ISC MingoCAN: ${detail}.`,
