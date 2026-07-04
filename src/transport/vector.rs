@@ -757,19 +757,25 @@ impl CanBackend for VectorBackend {
 
 impl Drop for VectorBackend {
     fn drop(&mut self) {
-        // Signal the reader to exit, then clean up the XL side before
-        // joining so the reader's next xlReceive returns quickly with
-        // an error rather than blocking the join.
+        // Signal the reader, then JOIN it BEFORE tearing down the XL
+        // port/driver. `xlReceive` and `xlDeactivateChannel`/`xlClosePort`/
+        // `xlCloseDriver` touch the same port handle; closing while a
+        // receive is in flight frees it out from under the reader — a
+        // use-after-free that becomes a crash when the adapter was just
+        // unplugged (mirrors the PCAN teardown fix). The reader observes
+        // `shutdown` within one poll and never blocks on send, so this
+        // join is bounded — no xlReceive can be running once it returns.
         self.shutdown.store(true, Ordering::SeqCst);
-        // SAFETY: port_handle and access_mask are valid for our lifetime.
-        let _ = unsafe { (self.api.deactivate_channel)(self.port_handle, self.access_mask) };
-        let _ = unsafe { (self.api.close_port)(self.port_handle) };
-        let _ = unsafe { (self.api.close_driver)() };
         if let Ok(mut guard) = self.reader_handle.lock() {
             if let Some(h) = guard.take() {
                 let _ = h.join();
             }
         }
+        // SAFETY: port_handle and access_mask are valid for our lifetime;
+        // the reader is gone, so nothing can race these teardown calls.
+        let _ = unsafe { (self.api.deactivate_channel)(self.port_handle, self.access_mask) };
+        let _ = unsafe { (self.api.close_port)(self.port_handle) };
+        let _ = unsafe { (self.api.close_driver)() };
     }
 }
 
@@ -829,9 +835,26 @@ fn reader_loop(
                     data: msg.data,
                     len: dlc,
                 };
-                if tx.blocking_send(frame).is_err() {
-                    // Async receiver dropped — VectorBackend is gone.
-                    return;
+                // Deliver without blocking indefinitely: retry a full
+                // queue but re-check `shutdown` each pass, so teardown can
+                // never wedge the reader inside a send (which would make
+                // Drop's join-before-close hang).
+                let mut pending = frame;
+                loop {
+                    match tx.try_send(pending) {
+                        Ok(()) => break,
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            // Async receiver dropped — VectorBackend is gone.
+                            return;
+                        }
+                        Err(mpsc::error::TrySendError::Full(f)) => {
+                            if shutdown.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            pending = f;
+                            thread::sleep(RX_POLL_INTERVAL);
+                        }
+                    }
                 }
             }
             XL_ERR_QUEUE_IS_EMPTY => {
