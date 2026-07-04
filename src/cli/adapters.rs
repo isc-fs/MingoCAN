@@ -121,7 +121,17 @@ pub fn collect_report() -> AdapterReport {
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        for info in pcan::detect() {
+        // Enumerate PCAN out-of-process by default: `pcan::detect()`
+        // loads the native driver, which on macOS plants a persistent
+        // IOKit thread that SIGBUSes the *whole app* on an adapter
+        // unplug. Running it in a throwaway child confines that crash.
+        // `CANFLASHER_NO_ISOLATE=1` forces the legacy in-process path.
+        let pcan_adapters = if std::env::var_os("CANFLASHER_NO_ISOLATE").is_none() {
+            crate::transport::isolation::detect_pcan_isolated()
+        } else {
+            pcan::detect()
+        };
+        for info in pcan_adapters {
             report.pcan.push(PcanEntry {
                 channel: info.channel_name,
                 channel_byte: format!("0x{:02X}", info.channel_byte),

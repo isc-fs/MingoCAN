@@ -13,6 +13,33 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// The hidden `__can-detect` helper must enumerate adapters in its own
+/// process and print a single JSON array on stdout, then exit cleanly —
+/// this is what keeps the crash-prone native driver load off the parent
+/// (app) process. No adapter is required: an empty array is a pass.
+#[test]
+fn can_detect_helper_emits_json_array_and_exits_clean() {
+    let exe = env!("CARGO_BIN_EXE_can-flasher");
+    let out = Command::new(exe)
+        .arg("__can-detect")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("spawn __can-detect helper");
+
+    assert!(
+        out.status.success(),
+        "detect helper should exit cleanly, got {:?}",
+        out.status
+    );
+    let stdout = String::from_utf8(out.stdout).expect("helper stdout is utf-8");
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.starts_with('[') && trimmed.ends_with(']'),
+        "detect helper stdout must be a JSON array, got {trimmed:?}"
+    );
+}
+
 /// Framed `READY`: `[u32-LE len = 1][tag = 0x03]`.
 const READY_FRAME: [u8; 5] = [1, 0, 0, 0, 0x03];
 

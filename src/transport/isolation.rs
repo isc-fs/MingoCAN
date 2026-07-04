@@ -45,6 +45,13 @@ use super::{open_backend_direct, CanBackend, Result, TransportError};
 /// Hidden subcommand name the parent invokes to spawn a helper.
 pub const CAN_HOST_SUBCOMMAND: &str = "__can-host";
 
+/// Hidden subcommand name the parent invokes to enumerate PCAN adapters
+/// in a throwaway child process. Detection loads the crash-prone native
+/// PCAN driver (`libPCBUSB`), which plants a persistent USB-monitor
+/// IOKit thread on macOS — an unplug faults it with SIGBUS. Running
+/// detection out-of-process means that fault only ever kills the child.
+pub const CAN_DETECT_SUBCOMMAND: &str = "__can-detect";
+
 /// MPSC depth for the parent's RX queue. Matches the other backends.
 const RX_QUEUE_DEPTH: usize = 256;
 
@@ -359,6 +366,16 @@ impl Drop for IsolatedBackend {
 #[must_use]
 pub fn maybe_run_as_host() -> bool {
     let args: Vec<String> = std::env::args().collect();
+
+    // Detection helper: enumerate PCAN adapters in-process (this child),
+    // print the result as a JSON line on stdout, and exit. On macOS this
+    // is where `libPCBUSB` gets loaded and its persistent IOKit thread
+    // planted, so it must live in a throwaway process — never the app.
+    if args.iter().any(|a| a == CAN_DETECT_SUBCOMMAND) {
+        run_detect_host();
+        return true;
+    }
+
     if !args.iter().any(|a| a == CAN_HOST_SUBCOMMAND) {
         return false;
     }
@@ -406,6 +423,78 @@ pub fn maybe_run_as_host() -> bool {
     };
     let _ = rt.block_on(run_host(iface, channel.as_deref(), bitrate));
     true
+}
+
+/// Child side of `__can-detect`: enumerate PCAN adapters in *this*
+/// process and print the result as a single JSON line on stdout. This is
+/// the only place `libPCBUSB` is loaded for enumeration, so if the driver
+/// SIGBUSes (adapter yanked mid-scan) it takes only this throwaway
+/// process down. No tracing subscriber is installed in the helper, so
+/// stdout carries just the JSON.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn run_detect_host() {
+    use std::io::Write;
+    let list = super::pcan::detect();
+    let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "{json}");
+    let _ = out.flush();
+}
+
+/// Linux has no `libPCBUSB` (PCAN adapters surface as SocketCAN), so the
+/// detect helper is a no-op that emits an empty list for protocol
+/// symmetry. Never actually spawned on Linux — `collect_report` only
+/// routes through the isolated path on Windows / macOS.
+#[cfg(target_os = "linux")]
+fn run_detect_host() {
+    println!("[]");
+}
+
+/// Parent side of `__can-detect`: spawn `current_exe()` as a throwaway
+/// detection helper and parse its JSON adapter list. A spawn failure, a
+/// non-success exit (the child crashed on an unplug mid-scan), or garbage
+/// output all degrade to "no adapters found" — the same result the direct
+/// in-process `pcan::detect()` gives when the driver is unavailable.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[must_use]
+pub fn detect_pcan_isolated() -> Vec<super::PcanAdapterInfo> {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("isolated PCAN detect: locating own executable: {e}");
+            return Vec::new();
+        }
+    };
+
+    let output = Command::new(exe)
+        .arg(CAN_DETECT_SUBCOMMAND)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null()) // discard any driver chatter
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            warn!("isolated PCAN detect: spawn failed: {e}");
+            return Vec::new();
+        }
+    };
+
+    // A crash mid-scan (SIGBUS on unplug) surfaces as a non-success
+    // status; treat it as "nothing enumerated" rather than propagating.
+    if !output.status.success() {
+        debug!(
+            "isolated PCAN detect: helper exited without success ({:?})",
+            output.status
+        );
+        return Vec::new();
+    }
+
+    serde_json::from_slice::<Vec<super::PcanAdapterInfo>>(&output.stdout).unwrap_or_else(|e| {
+        warn!("isolated PCAN detect: parsing helper output: {e}");
+        Vec::new()
+    })
 }
 
 /// Body of the hidden `__can-host` subcommand: open the real backend

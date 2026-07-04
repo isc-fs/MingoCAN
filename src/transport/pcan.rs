@@ -664,7 +664,11 @@ pub fn detect() -> Vec<PcanAdapterInfo> {
 }
 
 /// Enumerated PCAN channel, surfaced by the `adapters` subcommand.
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` let this cross the process boundary when
+/// enumeration is isolated in a `__can-detect` helper (see
+/// [`crate::transport::isolation::detect_pcan_isolated`]).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PcanAdapterInfo {
     pub channel_name: String,
     pub channel_byte: u16,
