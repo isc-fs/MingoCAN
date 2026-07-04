@@ -346,6 +346,68 @@ impl Drop for IsolatedBackend {
 
 // ---- Helper side (`__can-host`) ------------------------------------
 
+/// Early-dispatch guard for **every** binary that can be `open_backend`'s
+/// `current_exe()` — the `can-flasher` CLI *and* the `can-studio` Tauri
+/// app. Call it as the FIRST thing in `main`, before any clap parsing or
+/// GUI init.
+///
+/// If this process was spawned as an isolation helper (argv contains
+/// `__can-host`), it parses the `--interface` / `--channel` / `--bitrate`
+/// flags, runs the [`run_host`] bridge to completion on a fresh runtime,
+/// and returns `true` — the caller must then exit immediately (do NOT
+/// launch the UI / parse subcommands). Returns `false` on a normal launch.
+#[must_use]
+pub fn maybe_run_as_host() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    if !args.iter().any(|a| a == CAN_HOST_SUBCOMMAND) {
+        return false;
+    }
+
+    let mut iface = InterfaceType::Pcan;
+    let mut channel: Option<String> = None;
+    let mut bitrate: u32 = 500_000;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--interface" => {
+                if let Some(v) = args.get(i + 1) {
+                    if let Ok(x) = InterfaceType::from_str(v, true) {
+                        iface = x;
+                    }
+                }
+                i += 1;
+            }
+            "--channel" => {
+                channel = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--bitrate" => {
+                if let Some(v) = args.get(i + 1) {
+                    if let Ok(b) = v.parse() {
+                        bitrate = b;
+                    }
+                }
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("can-host: failed to build runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    let _ = rt.block_on(run_host(iface, channel.as_deref(), bitrate));
+    true
+}
+
 /// Body of the hidden `__can-host` subcommand: open the real backend
 /// in-process and bridge it to the parent over stdio. Runs until the
 /// parent closes `stdin` (EOF) or the backend disconnects.

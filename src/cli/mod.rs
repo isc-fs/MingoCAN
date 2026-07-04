@@ -154,12 +154,6 @@ pub enum Command {
     /// List detected CAN adapters on this machine
     Adapters,
 
-    /// Internal: run a CAN backend in this process and bridge it to the
-    /// parent over stdio. Spawned by `open_backend` to isolate the
-    /// crash-prone native PCAN driver — not for direct operator use.
-    #[command(name = "__can-host", hide = true)]
-    CanHost,
-
     /// (`--features swd`) Flash the bootloader to a bare chip via
     /// SWD (ST-LINK). Solves the "first boot" problem for ECUs
     /// that haven't run the CAN bootloader yet.
