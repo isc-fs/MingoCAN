@@ -13,6 +13,7 @@
 
     import {
         onFlashEvent,
+        readRepoFlashConfig,
         runFlash,
         type FlashEvent,
         type FlashRequest,
@@ -158,17 +159,45 @@
             error = 'Pick an adapter in the Adapters view first.';
             return;
         }
-        // Artifact + build command live in Settings; here we only
-        // resolve the chosen profile into the `{profile}` placeholder.
-        const artifactRaw = settings.flash.artifactPath.trim();
+        // A repo's committed `.vscode/settings.json` (iscFs.* keys) is the
+        // source of truth when the Build directory points at one — exactly
+        // like the VS Code extension. It overrides the app's stored build
+        // command / artifact / node-id, so there's no per-machine setup.
+        const buildCwd =
+            settings.flash.buildCwd.trim().length > 0
+                ? settings.flash.buildCwd
+                : null;
+        const repoCfg = buildCwd ? await readRepoFlashConfig(buildCwd) : null;
+
+        // Artifact: the repo value is already an absolute path; the app's
+        // own path still carries the `{profile}` placeholder to resolve.
+        const artifactRaw = (
+            repoCfg?.artifactPath ?? settings.flash.artifactPath
+        ).trim();
         if (artifactRaw.length === 0) {
             error = 'Set a firmware artifact path in Settings first.';
             return;
         }
-        const artifactPath = applyProfile(artifactRaw);
+        const artifactPath = repoCfg?.artifactPath
+            ? repoCfg.artifactPath
+            : applyProfile(artifactRaw);
+
+        // Node-id from the repo (`"0x1"` / `"2"`) wins when present.
+        const repoNodeRaw = repoCfg?.nodeId?.trim();
+        const repoNodeId = repoNodeRaw
+            ? repoNodeRaw.toLowerCase().startsWith('0x')
+                ? parseInt(repoNodeRaw, 16)
+                : parseInt(repoNodeRaw, 10)
+            : Number.NaN;
+        const effectiveNodeId = Number.isFinite(repoNodeId)
+            ? repoNodeId
+            : settings.adapter.nodeId;
 
         running = true;
         resetLog();
+        if (repoCfg) {
+            log = [...log, `[info] build config from ${repoCfg.source}`];
+        }
         progressMessage = 'starting…';
         result = null;
         error = null;
@@ -202,14 +231,12 @@
         });
 
         try {
+            const buildCommandRaw =
+                repoCfg?.buildCommand ?? settings.flash.buildCommand;
             const buildCmd = opts.skipBuild
                 ? null
-                : settings.flash.buildCommand.trim().length > 0
-                    ? applyProfile(settings.flash.buildCommand)
-                    : null;
-            const buildCwd =
-                settings.flash.buildCwd.trim().length > 0
-                    ? settings.flash.buildCwd
+                : buildCommandRaw.trim().length > 0
+                    ? applyProfile(buildCommandRaw)
                     : null;
             const payload: FlashRequest = {
                 artifactPath,
@@ -221,7 +248,7 @@
                         ? settings.adapter.channel
                         : null,
                 bitrate: settings.adapter.bitrate,
-                nodeId: settings.adapter.nodeId,
+                nodeId: effectiveNodeId,
                 timeoutMs: settings.adapter.timeoutMs,
                 keepaliveMs: 5_000,
                 diff: settings.flash.diff,
