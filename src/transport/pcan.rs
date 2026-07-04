@@ -372,6 +372,8 @@ impl CanBackend for PcanBackend {
     }
 }
 
+// NOTE: teardown ordering below is load-bearing — see the module-level
+// invariant. `Drop` MUST join the reader before uninitialize.
 impl Drop for PcanBackend {
     fn drop(&mut self) {
         // 1. Signal the reader to stop.

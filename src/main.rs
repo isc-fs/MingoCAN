@@ -81,6 +81,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Provision(args) => cli::provision::run(args, &cli.global).await,
         Command::PitDiag(args) => cli::pit_diag::run(args, &cli.global).await,
         Command::Adapters => cli::adapters::run(&cli.global).await,
+        Command::CanHost => can_flasher::transport::isolation::run_host(
+            cli.global.interface,
+            cli.global.channel.as_deref(),
+            cli.global.bitrate,
+        )
+        .await
+        .map_err(Into::into),
         #[cfg(feature = "swd")]
         Command::SwdFlash(args) => cli::swd_flash::run(args, &cli.global).await,
     }
