@@ -112,10 +112,16 @@
         border-bottom: 1px solid var(--border);
     }
 
+    /* The mark is transparent yellow line-art; sit it on a deep-green
+       badge so it reads as a logo tile against the lighter green
+       sidebar (rather than floating on the surface). */
     .brand img {
         width: 36px;
         height: 36px;
         border-radius: var(--radius-lg);
+        background: #123024;
+        padding: 3px;
+        box-shadow: inset 0 0 0 1px var(--border);
     }
 
     .brand-text h1 {

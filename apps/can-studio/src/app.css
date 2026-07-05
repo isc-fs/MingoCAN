@@ -30,13 +30,17 @@
        --bg-soft + --surface-elev are aliases kept for back-compat
        with views that still reference them. New code should not
        use them. */
-    --bg: #131313;
-    --surface: #1a1a1a;
-    --hover: #1f1f1f;
-    --border: #262626;
-    --border-strong: #383838;
-    --code-bg: #1a1a1a;
-    --bg-soft: #161616; /* input fills — recessed inside a card */
+    /* Forest-green ground (rgb 24 63 44 = #183f2c) with a matching
+       green elevation ramp: surfaces sit *lighter* than the ground so
+       cards + the sidebar still read as raised, the way the old
+       greyscale did. Everything derives from the one requested green. */
+    --bg: #183f2c;
+    --surface: #21503a;
+    --hover: #285d44;
+    --border: #2f6349;
+    --border-strong: #3d7657;
+    --code-bg: #14351f;
+    --bg-soft: #163a28; /* input fills — recessed inside a card */
     --surface-elev: var(--surface);
 
     /* Text ramp — primary, secondary, muted (for body hints — not

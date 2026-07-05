@@ -11,8 +11,11 @@
     banner); `Change` jumps back to Adapters.
 -->
 <script lang="ts">
+    import { onMount } from 'svelte';
+
     import type { ViewId } from './stores';
     import { settings } from './settings.svelte';
+    import { discoverAdapters, flattenReport, isSameAdapter } from './cli';
 
     interface Props {
         navigateTo: (id: ViewId) => void;
@@ -30,25 +33,77 @@
         settings.adapter.label.length > 0 &&
             settings.adapter.label !== settings.adapter.channel,
     );
+
+    // Presence: the saved selection persists across restarts + unplugs,
+    // so on entering a view we re-detect and confirm the selected adapter
+    // is actually on this machine — otherwise the strip would claim an
+    // adapter that isn't there. Checked on mount (a navigation moment, so
+    // never mid-flash — probing opens channels, which would collide with
+    // an in-flight operation holding the same one). `virtual` needs no
+    // hardware. Optimistic until the first check resolves.
+    let presence = $state<'checking' | 'present' | 'absent'>('checking');
+
+    async function checkPresence(): Promise<void> {
+        if (settings.adapter.interface === 'virtual') {
+            presence = 'present';
+            return;
+        }
+        try {
+            const entries = flattenReport(await discoverAdapters());
+            const here = entries.some((e) =>
+                isSameAdapter(
+                    e,
+                    settings.adapter.interface!,
+                    settings.adapter.channel,
+                ),
+            );
+            presence = here ? 'present' : 'absent';
+        } catch {
+            presence = 'absent';
+        }
+    }
+
+    onMount(checkPresence);
 </script>
 
-<div class="statusbar">
-    <span class="tag">Adapter</span>
-    <span class="iface" data-iface={settings.adapter.interface}>
-        {settings.adapter.interface}
-    </span>
-    {#if showLabel}
-        <span class="label">{settings.adapter.label}</span>
-    {/if}
-    {#if settings.adapter.channel.length > 0}
-        <code class="channel">{settings.adapter.channel}</code>
-    {/if}
-    <span class="sep" aria-hidden="true">·</span>
-    <span class="bitrate">{kbit}</span>
-    <button type="button" class="change" onclick={() => navigateTo('adapters')}>
-        Change
-    </button>
-</div>
+{#if presence === 'absent'}
+    <div class="statusbar absent">
+        <span class="warn">No adapter connected</span>
+        <span class="detail">
+            {settings.adapter.interface}
+            {settings.adapter.channel} isn't on this machine
+        </span>
+        <button
+            type="button"
+            class="change"
+            onclick={() => navigateTo('adapters')}
+        >
+            Select adapter →
+        </button>
+    </div>
+{:else}
+    <div class="statusbar">
+        <span class="tag">Adapter</span>
+        <span class="iface" data-iface={settings.adapter.interface}>
+            {settings.adapter.interface}
+        </span>
+        {#if showLabel}
+            <span class="label">{settings.adapter.label}</span>
+        {/if}
+        {#if settings.adapter.channel.length > 0}
+            <code class="channel">{settings.adapter.channel}</code>
+        {/if}
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="bitrate">{kbit}</span>
+        <button
+            type="button"
+            class="change"
+            onclick={() => navigateTo('adapters')}
+        >
+            Change
+        </button>
+    </div>
+{/if}
 
 <style>
     .statusbar {
@@ -60,6 +115,22 @@
         border-bottom: 1px solid var(--border);
         flex: none;
     }
+    /* Absent state — the selected adapter isn't detected. Warning rail
+       so it reads as "attention needed", not a normal chrome strip. */
+    .statusbar.absent {
+        border-left: 3px solid var(--warning);
+    }
+    .absent .warn {
+        font-weight: 600;
+        font-size: var(--text-sm);
+        color: var(--warning);
+    }
+    .absent .detail {
+        font-family: var(--font-mono);
+        font-size: var(--text-sm);
+        color: var(--text-muted);
+    }
+
     /* Muted "Adapter" caption — anchors the strip and frames the row as
        a *selection*, not a live connection (no status LED that would
        imply the bus is up). */
