@@ -18,11 +18,7 @@
         type FlashRequest,
         type JsonReport,
     } from './flash';
-    import {
-        inferRoleFromArtifact,
-        provisionNodeId,
-        type Role,
-    } from './provision';
+    import { provisionNodeId, ROLES, type Role } from './provision';
     import NodeIdRolePicker from './NodeIdRolePicker.svelte';
     import { settings } from './settings.svelte';
 
@@ -109,14 +105,16 @@
     let copyState = $state<'idle' | 'copied'>('idle');
 
     // ---- Provision-after-flash ---------------------------------
-    // When the artifact filename matches a role (`ams.elf` /
-    // `ecu.hex` / `udv.bin` etc.) we offer to commission the board —
-    // write the matching node-id NVM key + reset it. Rather than a
-    // pre-checked box that's easy to miss, a successful flash pops a
-    // confirm dialog naming the role + node-id, so commissioning is
-    // an explicit, unmissable choice and never fires silently.
-    const detectedRole = $derived<Role | null>(
-        inferRoleFromArtifact(settings.flash.artifactPath.trim()),
+    // The Target-board picker is the single source of truth for which
+    // board this is (it was previously inferred from the artifact
+    // filename, which could disagree with the selected target — e.g. a
+    // stale `ams.elf` path while flashing the ECU). When a known role is
+    // selected (ECU/AMS/uDV — not Custom), a successful flash offers to
+    // commission the board as that role (write its node-id to NVM +
+    // reset). A confirm dialog — not a silent pre-checked box — keeps
+    // commissioning an explicit choice.
+    const provisionRole = $derived<Role | null>(
+        ROLES.find((r) => r.nodeId === settings.adapter.nodeId) ?? null,
     );
     let provisionState = $state<
         | { kind: 'idle' }
@@ -237,17 +235,17 @@
             progressMessage = `done in ${report.duration_ms} ms`;
             lastOutcome = 'success';
 
-            // Provision-after-flash hook. When the artifact name
-            // resolves to a role, pop a confirm dialog asking whether
-            // to commission the board as that role (write node-id +
-            // reset). No role detected → nothing to ask. Failures
-            // here don't roll back the flash — surface the error and
-            // let the operator re-run later if they need to retry.
-            const role = detectedRole;
+            // Provision-after-flash hook. When a known role is the
+            // selected target, pop a confirm dialog asking whether to
+            // commission the board as that role (write node-id + reset).
+            // Custom target → nothing to ask. Failures here don't roll
+            // back the flash — surface the error and let the operator
+            // re-run later if they need to retry.
+            const role = provisionRole;
             const wantsProvision =
                 role !== null &&
                 (await ask(
-                    `Flashed ${role.name.toUpperCase()} firmware.\n\n` +
+                    `Target board: ${role.name.toUpperCase()}.\n\n` +
                         `Commission this board as ${role.name.toUpperCase()}? ` +
                         `This writes node-id 0x${role.nodeId
                             .toString(16)
@@ -485,19 +483,19 @@
             ><input type="checkbox" bind:checked={settings.flash.enterBootloader} /> Enter bootloader if needed</label>
             <label class="toggle"><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
         </div>
-        {#if detectedRole !== null}
+        {#if provisionRole !== null}
             <!--
-                When the artifact name resolves to a role, a confirm
-                dialog after the flash asks whether to commission the
-                board (write node-id + reset) — so this is just a
-                heads-up that the prompt will appear, not a control.
+                Heads-up that a confirm dialog will appear after a
+                successful flash — driven by the selected Target board,
+                not a control here. Skippable, for routine reflashes.
             -->
             <p class="provision-hint">
-                <code class="mono">{detectedRole.name.toUpperCase()}</code>
-                firmware detected — after a successful flash you'll be asked
-                whether to commission this board as
-                <strong>{detectedRole.name.toUpperCase()}</strong>
-                (node-id 0x{detectedRole.nodeId.toString(16).toUpperCase()}).
+                After a successful flash you'll be asked whether to
+                commission this board as
+                <strong>{provisionRole.name.toUpperCase()}</strong>
+                (write node-id 0x{provisionRole.nodeId
+                    .toString(16)
+                    .toUpperCase()} + reset) — skip it for a routine reflash.
             </p>
         {/if}
     </div>
@@ -781,12 +779,6 @@
         font-size: var(--text-xs);
         color: var(--text-muted);
         line-height: 1.5;
-    }
-    .provision-hint code {
-        padding: 0 4px;
-        border-radius: var(--radius-sm);
-        background: rgba(255, 255, 255, 0.05);
-        color: var(--text);
     }
     .provision-hint strong {
         color: var(--text);
