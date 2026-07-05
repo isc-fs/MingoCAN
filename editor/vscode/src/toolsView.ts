@@ -26,6 +26,7 @@ const ALLOWED_COMMANDS = new Set<string>([
     'iscFs.readDtcs',
     'iscFs.clearDtcs',
     'iscFs.liveData',
+    'iscFs.doctor',
 ]);
 
 export class ToolsViewProvider implements vscode.WebviewViewProvider {
@@ -233,6 +234,7 @@ export class ToolsViewProvider implements vscode.WebviewViewProvider {
 
     <h2>Diagnostics</h2>
     <section class="group">
+        <button data-cmd="iscFs.doctor">Doctor: check environment</button>
         <button data-cmd="iscFs.health">Session health</button>
         <button data-cmd="iscFs.readDtcs">Read DTCs</button>
         <button class="danger" data-cmd="iscFs.clearDtcs">Clear DTCs</button>

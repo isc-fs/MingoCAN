@@ -268,6 +268,7 @@ export class ToolsPanel {
     <section class="card">
         <h2>Diagnostics</h2>
         <div class="grid">
+            <button data-cmd="iscFs.doctor">Doctor: check environment</button>
             <button data-cmd="iscFs.health">Session health</button>
             <button data-cmd="iscFs.readDtcs">Read DTCs</button>
             <button class="danger" data-cmd="iscFs.clearDtcs">Clear DTCs</button>
@@ -328,6 +329,7 @@ const ALLOWED_COMMANDS = new Set<string>([
     'iscFs.readDtcs',
     'iscFs.clearDtcs',
     'iscFs.liveData',
+    'iscFs.doctor',
 ]);
 
 function randomNonce(): string {

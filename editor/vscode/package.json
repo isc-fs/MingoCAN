@@ -58,6 +58,7 @@
     "onCommand:iscFs.readDtcs",
     "onCommand:iscFs.clearDtcs",
     "onCommand:iscFs.health",
+    "onCommand:iscFs.doctor",
     "onCommand:iscFs.liveData",
     "onWebviewPanel:iscFs.liveData",
     "onView:iscFs.devices",
@@ -130,6 +131,11 @@
       {
         "command": "iscFs.useCliOnPath",
         "title": "Use CLI on PATH (ignore managed download)",
+        "category": "ISC MingoCAN"
+      },
+      {
+        "command": "iscFs.doctor",
+        "title": "Doctor: check flashing environment",
         "category": "ISC MingoCAN"
       }
     ],

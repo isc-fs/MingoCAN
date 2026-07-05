@@ -27,6 +27,7 @@ import {
 import { cliVersion, ensureManagedCli } from './cliManager';
 import { readConfig } from './config';
 import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
+import { runDoctor } from './doctor';
 import { initFlash, runFlash, runReflashLast } from './flash';
 import { LiveDataPanel } from './liveDataPanel';
 import { applyAdapter, selectAdapter } from './picker';
@@ -137,6 +138,9 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('iscFs.health', () => runHealth()),
         vscode.commands.registerCommand('iscFs.readDtcs', () => runReadDtcs()),
         vscode.commands.registerCommand('iscFs.clearDtcs', () => runClearDtcs()),
+        // Environment triage — checks CLI/adapter/node-id/build config in
+        // one pass and reports the first blocker with a fix button.
+        vscode.commands.registerCommand('iscFs.doctor', () => runDoctor(context)),
     );
 
     // ---- Tier C.2 (streaming diagnostics) ----
