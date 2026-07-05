@@ -187,16 +187,11 @@
             ? repoCfg.artifactPath
             : applyProfile(artifactRaw);
 
-        // Node-id from the repo (`"0x1"` / `"2"`) wins when present.
-        const repoNodeRaw = repoCfg?.nodeId?.trim();
-        const repoNodeId = repoNodeRaw
-            ? repoNodeRaw.toLowerCase().startsWith('0x')
-                ? parseInt(repoNodeRaw, 16)
-                : parseInt(repoNodeRaw, 10)
-            : Number.NaN;
-        const effectiveNodeId = Number.isFinite(repoNodeId)
-            ? repoNodeId
-            : settings.adapter.nodeId;
+        // Node-id (which board) is the operator's explicit choice via the
+        // Target-board picker — the committed repo config only supplies
+        // *how to build* (command + artifact), not which node to hit, so
+        // the picker stays the single source of truth and can't be
+        // silently overridden out from under the flash / provision path.
 
         running = true;
         resetLog();
@@ -253,7 +248,7 @@
                         ? settings.adapter.channel
                         : null,
                 bitrate: settings.adapter.bitrate,
-                nodeId: effectiveNodeId,
+                nodeId: settings.adapter.nodeId,
                 timeoutMs: settings.adapter.timeoutMs,
                 keepaliveMs: 5_000,
                 diff: settings.flash.diff,

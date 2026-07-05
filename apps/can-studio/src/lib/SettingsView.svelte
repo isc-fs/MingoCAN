@@ -305,18 +305,18 @@
             choice on the Flash tab substitutes <code>{'{profile}'}</code> below
             (as <code>Release</code> / <code>Debug</code>) — set this once.
         </p>
-        {#if repoFlashConfig}
+        {#if repoFlashConfig && (repoFlashConfig.buildCommand || repoFlashConfig.artifactPath)}
             <p class="repo-config-note small">
                 ✓ Using committed config from
                 <code>{repoFlashConfig.source}</code>. The Build directory's
                 repo defines
-                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && (repoFlashConfig.artifactPath || repoFlashConfig.nodeId)},
-                {/if}{#if repoFlashConfig.artifactPath}<code>firmwareArtifact</code>{/if}{#if repoFlashConfig.artifactPath && repoFlashConfig.nodeId}
-                and {/if}{#if repoFlashConfig.nodeId}<code
-                        >nodeId={repoFlashConfig.nodeId}</code
+                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && repoFlashConfig.artifactPath}
+                    and {/if}{#if repoFlashConfig.artifactPath}<code
+                        >firmwareArtifact</code
                     >{/if}
-                — these override the fields below when flashing, so every
-                developer builds this repo the same way with no local setup.
+                — used when flashing, so every developer builds this repo the
+                same way with no local setup. (The target board stays your
+                explicit choice on the Flash tab.)
             </p>
         {/if}
         <div class="field">
