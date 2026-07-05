@@ -22,6 +22,12 @@
         type HealthSnapshot,
     } from './diagnose';
     import { settings } from './settings.svelte';
+    import type { ViewId } from './stores';
+
+    interface Props {
+        navigateTo: (id: ViewId) => void;
+    }
+    const { navigateTo }: Props = $props();
 
     const adapterReady = $derived(
         settings.adapter.interface !== null &&
@@ -125,9 +131,18 @@
     </header>
 
     {#if !adapterReady}
-        <div class="banner banner-warning">
-            <strong>No adapter selected.</strong> Pick one in the
-            <em>Adapters</em> view first.
+        <div class="banner banner-warning gate">
+            <span>
+                <strong>No adapter selected.</strong> Diagnostics needs an
+                adapter to reach the board.
+            </span>
+            <button
+                type="button"
+                class="btn btn-sm gate-action"
+                onclick={() => navigateTo('adapters')}
+            >
+                Choose adapter →
+            </button>
         </div>
     {/if}
 

@@ -19,12 +19,15 @@
         type FlashRequest,
         type JsonReport,
     } from './flash';
-    import {
-        inferRoleFromArtifact,
-        provisionNodeId,
-        type Role,
-    } from './provision';
+    import { provisionNodeId, ROLES, type Role } from './provision';
+    import NodeIdRolePicker from './NodeIdRolePicker.svelte';
     import { settings } from './settings.svelte';
+    import type { ViewId } from './stores';
+
+    interface Props {
+        navigateTo: (id: ViewId) => void;
+    }
+    const { navigateTo }: Props = $props();
 
     // The Flash tab exposes exactly one build choice — Release vs.
     // Debug. The build command, working directory, and artifact path
@@ -109,14 +112,16 @@
     let copyState = $state<'idle' | 'copied'>('idle');
 
     // ---- Provision-after-flash ---------------------------------
-    // When the artifact filename matches a role (`ams.elf` /
-    // `ecu.hex` / `udv.bin` etc.) we offer to commission the board —
-    // write the matching node-id NVM key + reset it. Rather than a
-    // pre-checked box that's easy to miss, a successful flash pops a
-    // confirm dialog naming the role + node-id, so commissioning is
-    // an explicit, unmissable choice and never fires silently.
-    const detectedRole = $derived<Role | null>(
-        inferRoleFromArtifact(settings.flash.artifactPath.trim()),
+    // The Target-board picker is the single source of truth for which
+    // board this is (it was previously inferred from the artifact
+    // filename, which could disagree with the selected target — e.g. a
+    // stale `ams.elf` path while flashing the ECU). When a known role is
+    // selected (ECU/AMS/uDV — not Custom), a successful flash offers to
+    // commission the board as that role (write its node-id to NVM +
+    // reset). A confirm dialog — not a silent pre-checked box — keeps
+    // commissioning an explicit choice.
+    const provisionRole = $derived<Role | null>(
+        ROLES.find((r) => r.nodeId === settings.adapter.nodeId) ?? null,
     );
     let provisionState = $state<
         | { kind: 'idle' }
@@ -263,17 +268,17 @@
             progressMessage = `done in ${report.duration_ms} ms`;
             lastOutcome = 'success';
 
-            // Provision-after-flash hook. When the artifact name
-            // resolves to a role, pop a confirm dialog asking whether
-            // to commission the board as that role (write node-id +
-            // reset). No role detected → nothing to ask. Failures
-            // here don't roll back the flash — surface the error and
-            // let the operator re-run later if they need to retry.
-            const role = detectedRole;
+            // Provision-after-flash hook. When a known role is the
+            // selected target, pop a confirm dialog asking whether to
+            // commission the board as that role (write node-id + reset).
+            // Custom target → nothing to ask. Failures here don't roll
+            // back the flash — surface the error and let the operator
+            // re-run later if they need to retry.
+            const role = provisionRole;
             const wantsProvision =
                 role !== null &&
                 (await ask(
-                    `Flashed ${role.name.toUpperCase()} firmware.\n\n` +
+                    `Target board: ${role.name.toUpperCase()}.\n\n` +
                         `Commission this board as ${role.name.toUpperCase()}? ` +
                         `This writes node-id 0x${role.nodeId
                             .toString(16)
@@ -404,10 +409,18 @@
     </header>
 
     {#if !adapterReady}
-        <div class="banner banner-warning">
-            <strong>No adapter selected.</strong> Pick one in the
-            <em>Adapters</em> view first — the flash command needs an
-            <code>--interface</code>/<code>--channel</code> pair.
+        <div class="banner banner-warning gate">
+            <span>
+                <strong>No adapter selected.</strong> Flashing needs an
+                <code>--interface</code>/<code>--channel</code> pair.
+            </span>
+            <button
+                type="button"
+                class="btn btn-sm gate-action"
+                onclick={() => navigateTo('adapters')}
+            >
+                Choose adapter →
+            </button>
         </div>
     {/if}
 
@@ -464,7 +477,17 @@
             </p>
         </div>
 
-        <div class="row-three">
+        <div class="field">
+            <span class="field-label">Target board</span>
+            <NodeIdRolePicker bind:value={settings.adapter.nodeId} />
+            <p class="hint">
+                Which board you're flashing — the host aims the
+                reboot-to-bootloader trigger at this node, and the ECU and
+                AMS use different magic, so the role must match the board.
+            </p>
+        </div>
+
+        <div class="row-two">
             <div class="field">
                 <label for="bitrate">Bitrate (bps)</label>
                 <input
@@ -475,17 +498,6 @@
                     max="1000000"
                     step="1000"
                     bind:value={settings.adapter.bitrate}
-                />
-            </div>
-            <div class="field">
-                <label for="nodeId">Node ID (0–0xF)</label>
-                <input
-                    id="nodeId"
-                    class="input mono"
-                    type="number"
-                    min="0"
-                    max="15"
-                    bind:value={settings.adapter.nodeId}
                 />
             </div>
             <div class="field">
@@ -501,30 +513,60 @@
             </div>
         </div>
 
-        <div class="opts">
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.diff} /> Diff-skip unchanged sectors</label>
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.verifyAfter} /> Verify each sector</label>
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.finalCommit} /> Final CMD_FLASH_VERIFY commit</label>
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.jump} /> Jump to app after flash</label>
-            <label
-                class="toggle"
-                title="If the board is running its application, send the reboot-to-bootloader trigger (opens HV relays + resets into the BL) so it can be flashed without a manual reset."
-            ><input type="checkbox" bind:checked={settings.flash.enterBootloader} /> Enter bootloader if needed</label>
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
-        </div>
-        {#if detectedRole !== null}
+        <details class="advanced">
+            <summary>Advanced options</summary>
+            <div class="opts">
+                <label
+                    class="toggle"
+                    title="Only rewrite sectors whose contents changed on the device — faster reflashes."
+                ><input type="checkbox" bind:checked={settings.flash.diff} /> Skip
+                    unchanged sectors</label>
+                <label
+                    class="toggle"
+                    title="Read each sector's CRC back after writing and compare it."
+                ><input
+                        type="checkbox"
+                        bind:checked={settings.flash.verifyAfter}
+                    /> Verify each sector after writing</label>
+                <label
+                    class="toggle"
+                    title="Send a final whole-image CRC check so the bootloader marks the new app valid."
+                ><input
+                        type="checkbox"
+                        bind:checked={settings.flash.finalCommit}
+                    /> Confirm the whole image at the end</label>
+                <label
+                    class="toggle"
+                    title="Boot straight into the flashed application when the flash finishes."
+                ><input type="checkbox" bind:checked={settings.flash.jump} /> Start
+                    the app after flashing</label>
+                <label
+                    class="toggle"
+                    title="If the board is running its application, send the reboot-to-bootloader trigger so it can be flashed without a manual reset."
+                ><input
+                        type="checkbox"
+                        bind:checked={settings.flash.enterBootloader}
+                    /> Reboot a running board into the bootloader</label>
+                <label
+                    class="toggle"
+                    title="Walk the whole pipeline but send no erase/write commands — a safe rehearsal."
+                ><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry
+                    run — no erases or writes</label>
+            </div>
+        </details>
+        {#if provisionRole !== null}
             <!--
-                When the artifact name resolves to a role, a confirm
-                dialog after the flash asks whether to commission the
-                board (write node-id + reset) — so this is just a
-                heads-up that the prompt will appear, not a control.
+                Heads-up that a confirm dialog will appear after a
+                successful flash — driven by the selected Target board,
+                not a control here. Skippable, for routine reflashes.
             -->
             <p class="provision-hint">
-                <code class="mono">{detectedRole.name.toUpperCase()}</code>
-                firmware detected — after a successful flash you'll be asked
-                whether to commission this board as
-                <strong>{detectedRole.name.toUpperCase()}</strong>
-                (node-id 0x{detectedRole.nodeId.toString(16).toUpperCase()}).
+                After a successful flash you'll be asked whether to
+                commission this board as
+                <strong>{provisionRole.name.toUpperCase()}</strong>
+                (write node-id 0x{provisionRole.nodeId
+                    .toString(16)
+                    .toUpperCase()} + reset) — skip it for a routine reflash.
             </p>
         {/if}
     </div>
@@ -776,18 +818,50 @@
         flex: 1;
     }
 
-    /* Three-up grid for bitrate / node-id / timeout. Drops to a
-       single column at narrow widths so the sidebar-collapsed
-       layout doesn't squish the inputs. */
-    .row-three {
+    /* Two-up grid for bitrate / timeout. Drops to a single column at
+       narrow widths so the sidebar-collapsed layout doesn't squish the
+       inputs. (Node-id moved up into the Target-role picker.) */
+    .row-two {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
         gap: var(--space-3);
     }
     @media (max-width: 720px) {
-        .row-three {
+        .row-two {
             grid-template-columns: 1fr;
         }
+    }
+
+    /* Advanced-options disclosure — the six per-run flags are sane by
+       default, so tuck them behind a twisty instead of fronting the
+       happy path with a wall of jargon checkboxes. */
+    .advanced {
+        margin-top: var(--space-1);
+    }
+    .advanced summary {
+        cursor: pointer;
+        user-select: none;
+        list-style: none;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-1) 0;
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+    }
+    .advanced summary::-webkit-details-marker {
+        display: none;
+    }
+    .advanced summary::before {
+        content: '▸';
+        color: var(--text-muted);
+        transition: transform var(--motion-fast);
+    }
+    .advanced[open] summary::before {
+        transform: rotate(90deg);
+    }
+    .advanced summary:hover {
+        color: var(--text);
     }
 
     /* Per-run options — wrapping row of checkboxes. The .toggle
@@ -798,7 +872,7 @@
         display: flex;
         flex-wrap: wrap;
         gap: var(--space-4);
-        margin-top: var(--space-1);
+        margin-top: var(--space-3);
     }
     /* Commission heads-up — shown under the toggles when the
        artifact name resolves to a role; the actual choice is the
@@ -808,12 +882,6 @@
         font-size: var(--text-xs);
         color: var(--text-muted);
         line-height: 1.5;
-    }
-    .provision-hint code {
-        padding: 0 4px;
-        border-radius: var(--radius-sm);
-        background: rgba(255, 255, 255, 0.05);
-        color: var(--text);
     }
     .provision-hint strong {
         color: var(--text);

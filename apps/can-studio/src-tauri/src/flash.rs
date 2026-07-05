@@ -208,7 +208,7 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
         can_flasher::app_control::BootloaderEntry::Never
     };
     let _proto = session
-        .connect_entering_bootloader(entry, Duration::from_millis(2_000))
+        .connect_entering_bootloader(entry, can_flasher::app_control::DEFAULT_BL_ENTRY_WINDOW)
         .await
         .map_err(|e| format!("CONNECT failed: {e}"))?;
 

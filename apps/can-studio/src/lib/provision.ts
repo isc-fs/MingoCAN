@@ -18,7 +18,10 @@ export interface Role {
     nodeId: number;
 }
 
-const ROLES: ReadonlyArray<Role> = [
+/** Canonical role → node-id table, shared by the Flash tab's target-role
+ *  picker and the artifact-name inference below. Order is the display
+ *  order of the role control. */
+export const ROLES: ReadonlyArray<Role> = [
     { name: 'ecu', nodeId: 0x01 },
     { name: 'ams', nodeId: 0x02 },
     { name: 'udv', nodeId: 0x03 },

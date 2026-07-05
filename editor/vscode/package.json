@@ -2,7 +2,7 @@
   "name": "vscode-stm32-can",
   "displayName": "ISC MingoCAN Flasher",
   "description": "Build, flash, and diagnose STM32 firmware over CAN — one button, four adapters, live telemetry. Wraps the can-flasher CLI.",
-  "version": "2.6.7",
+  "version": "2.6.10",
   "publisher": "isc-fs",
   "license": "MIT",
   "preview": true,
@@ -166,7 +166,7 @@
         },
         "iscFs.nodeId": {
           "type": "string",
-          "markdownDescription": "Target node ID — hex (`0x0`–`0xF`) or decimal. **Flashing requires this** (the CLI won't guess which board to overwrite); if it's empty you'll be prompted at flash time and the answer is saved here. Team scheme: AMS = `0x1`, ECU = `0x2`, uDV = `0x3`. For broadcast commands like *discover*, an empty value omits `--node-id`."
+          "markdownDescription": "Target node ID — hex (`0x0`–`0xF`) or decimal. **Flashing requires this** (the CLI won't guess which board to overwrite); if it's empty you'll be prompted at flash time and the answer is saved here. Team scheme: ECU = `0x1`, AMS = `0x2`, uDV = `0x3`. For broadcast commands like *discover*, an empty value omits `--node-id`."
         },
         "iscFs.buildCommand": {
           "type": "string",

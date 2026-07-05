@@ -50,6 +50,12 @@
         type PitDiagStatus,
     } from './pit_diag';
     import { settings } from './settings.svelte';
+    import type { ViewId } from './stores';
+
+    interface Props {
+        navigateTo: (id: ViewId) => void;
+    }
+    const { navigateTo }: Props = $props();
 
     // Which ECU's pit-diag stream the view targets. Only AMS is wired
     // end-to-end (arm handshake + 0x6C0..=0x6C8 frames). ECU / uDV are
@@ -814,10 +820,18 @@
     </div>
 
     {#if !adapterReady}
-        <div class="banner banner-warning">
-            <strong>No adapter selected.</strong> Pick one in the
-            <em>Adapters</em> view first — pit-diag needs an
-            <code>--interface</code>/<code>--channel</code> pair.
+        <div class="banner banner-warning gate">
+            <span>
+                <strong>No adapter selected.</strong> Pit-diag needs an
+                <code>--interface</code>/<code>--channel</code> pair.
+            </span>
+            <button
+                type="button"
+                class="btn btn-sm gate-action"
+                onclick={() => navigateTo('adapters')}
+            >
+                Choose adapter →
+            </button>
         </div>
     {/if}
 
