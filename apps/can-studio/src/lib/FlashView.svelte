@@ -486,17 +486,47 @@
             </div>
         </div>
 
-        <div class="opts">
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.diff} /> Diff-skip unchanged sectors</label>
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.verifyAfter} /> Verify each sector</label>
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.finalCommit} /> Final CMD_FLASH_VERIFY commit</label>
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.jump} /> Jump to app after flash</label>
-            <label
-                class="toggle"
-                title="If the board is running its application, send the reboot-to-bootloader trigger (opens HV relays + resets into the BL) so it can be flashed without a manual reset."
-            ><input type="checkbox" bind:checked={settings.flash.enterBootloader} /> Enter bootloader if needed</label>
-            <label class="toggle"><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry-run (no erases / writes)</label>
-        </div>
+        <details class="advanced">
+            <summary>Advanced options</summary>
+            <div class="opts">
+                <label
+                    class="toggle"
+                    title="Only rewrite sectors whose contents changed on the device — faster reflashes."
+                ><input type="checkbox" bind:checked={settings.flash.diff} /> Skip
+                    unchanged sectors</label>
+                <label
+                    class="toggle"
+                    title="Read each sector's CRC back after writing and compare it."
+                ><input
+                        type="checkbox"
+                        bind:checked={settings.flash.verifyAfter}
+                    /> Verify each sector after writing</label>
+                <label
+                    class="toggle"
+                    title="Send a final whole-image CRC check so the bootloader marks the new app valid."
+                ><input
+                        type="checkbox"
+                        bind:checked={settings.flash.finalCommit}
+                    /> Confirm the whole image at the end</label>
+                <label
+                    class="toggle"
+                    title="Boot straight into the flashed application when the flash finishes."
+                ><input type="checkbox" bind:checked={settings.flash.jump} /> Start
+                    the app after flashing</label>
+                <label
+                    class="toggle"
+                    title="If the board is running its application, send the reboot-to-bootloader trigger so it can be flashed without a manual reset."
+                ><input
+                        type="checkbox"
+                        bind:checked={settings.flash.enterBootloader}
+                    /> Reboot a running board into the bootloader</label>
+                <label
+                    class="toggle"
+                    title="Walk the whole pipeline but send no erase/write commands — a safe rehearsal."
+                ><input type="checkbox" bind:checked={settings.flash.dryRun} /> Dry
+                    run — no erases or writes</label>
+            </div>
+        </details>
         {#if provisionRole !== null}
             <!--
                 Heads-up that a confirm dialog will appear after a
@@ -775,6 +805,38 @@
         }
     }
 
+    /* Advanced-options disclosure — the six per-run flags are sane by
+       default, so tuck them behind a twisty instead of fronting the
+       happy path with a wall of jargon checkboxes. */
+    .advanced {
+        margin-top: var(--space-1);
+    }
+    .advanced summary {
+        cursor: pointer;
+        user-select: none;
+        list-style: none;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-1) 0;
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+    }
+    .advanced summary::-webkit-details-marker {
+        display: none;
+    }
+    .advanced summary::before {
+        content: '▸';
+        color: var(--text-muted);
+        transition: transform var(--motion-fast);
+    }
+    .advanced[open] summary::before {
+        transform: rotate(90deg);
+    }
+    .advanced summary:hover {
+        color: var(--text);
+    }
+
     /* Per-run options — wrapping row of checkboxes. The .toggle
        utility handles spacing + accent-color; we just lay them out
        horizontally with a wider gap than the in-card stack so they
@@ -783,7 +845,7 @@
         display: flex;
         flex-wrap: wrap;
         gap: var(--space-4);
-        margin-top: var(--space-1);
+        margin-top: var(--space-3);
     }
     /* Commission heads-up — shown under the toggles when the
        artifact name resolves to a role; the actual choice is the
