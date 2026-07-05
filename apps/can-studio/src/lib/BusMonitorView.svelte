@@ -59,6 +59,12 @@
         type SignalSchema,
     } from './dbc';
     import { settings } from './settings.svelte';
+    import type { ViewId } from './stores';
+
+    interface Props {
+        navigateTo: (id: ViewId) => void;
+    }
+    const { navigateTo }: Props = $props();
 
     // ---- Adapter gate ----
 
@@ -501,10 +507,18 @@
     </header>
 
     {#if !adapterReady}
-        <div class="banner banner-warning">
-            <strong>No adapter selected.</strong> Pick one in the
-            <em>Adapters</em> view first — the monitor needs an
-            <code>--interface</code>/<code>--channel</code> pair.
+        <div class="banner banner-warning gate">
+            <span>
+                <strong>No adapter selected.</strong> The monitor needs an
+                <code>--interface</code>/<code>--channel</code> pair.
+            </span>
+            <button
+                type="button"
+                class="btn btn-sm gate-action"
+                onclick={() => navigateTo('adapters')}
+            >
+                Choose adapter →
+            </button>
         </div>
     {/if}
 

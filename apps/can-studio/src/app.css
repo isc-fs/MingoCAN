@@ -501,6 +501,20 @@ button.btn {
     color: var(--info);
 }
 
+/* Gate variant — a banner that carries an action (e.g. the "no adapter
+   selected → Choose adapter" empty-state gate). Lays the message and
+   the action button on one row, action pushed to the trailing edge. */
+.banner.gate {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    justify-content: space-between;
+}
+.banner.gate .gate-action {
+    flex: none;
+    white-space: nowrap;
+}
+
 /* ---- View shell ---- */
 /* Every top-level view shares the same outer chrome: comfortable
    page padding, vertical stack of sections, scroll on Y when

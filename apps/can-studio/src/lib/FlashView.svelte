@@ -21,6 +21,12 @@
     import { provisionNodeId, ROLES, type Role } from './provision';
     import NodeIdRolePicker from './NodeIdRolePicker.svelte';
     import { settings } from './settings.svelte';
+    import type { ViewId } from './stores';
+
+    interface Props {
+        navigateTo: (id: ViewId) => void;
+    }
+    const { navigateTo }: Props = $props();
 
     // The Flash tab exposes exactly one build choice — Release vs.
     // Debug. The build command, working directory, and artifact path
@@ -376,10 +382,18 @@
     </header>
 
     {#if !adapterReady}
-        <div class="banner banner-warning">
-            <strong>No adapter selected.</strong> Pick one in the
-            <em>Adapters</em> view first — the flash command needs an
-            <code>--interface</code>/<code>--channel</code> pair.
+        <div class="banner banner-warning gate">
+            <span>
+                <strong>No adapter selected.</strong> Flashing needs an
+                <code>--interface</code>/<code>--channel</code> pair.
+            </span>
+            <button
+                type="button"
+                class="btn btn-sm gate-action"
+                onclick={() => navigateTo('adapters')}
+            >
+                Choose adapter →
+            </button>
         </div>
     {/if}
 
