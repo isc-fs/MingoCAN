@@ -31,6 +31,7 @@
         unloadDbc,
         type DbcSummary,
     } from './dbc';
+    import NodeIdRolePicker from './NodeIdRolePicker.svelte';
 
     interface Props {
         navigateTo: (id: ViewId) => void;
@@ -232,7 +233,17 @@
         <p class="muted small section-hint">
             Applied to every flash, discover, diagnose, and live-data call.
         </p>
-        <div class="grid-three">
+        <div class="field">
+            <span class="field-label">Default target board</span>
+            <NodeIdRolePicker bind:value={settings.adapter.nodeId} />
+            <p class="muted small">
+                Default node-id for every flash / diagnose / live-data call.
+                ECU and AMS use different reboot-to-bootloader magic, so the
+                role must match the board; the Flash tab can override it per
+                run.
+            </p>
+        </div>
+        <div class="grid-two">
             <div class="field">
                 <label for="bitrate">Bitrate (bps)</label>
                 <input
@@ -243,17 +254,6 @@
                     max="1000000"
                     step="1000"
                     bind:value={settings.adapter.bitrate}
-                />
-            </div>
-            <div class="field">
-                <label for="nodeId">Default node ID (0–0xF)</label>
-                <input
-                    id="nodeId"
-                    class="input mono"
-                    type="number"
-                    min="0"
-                    max="15"
-                    bind:value={settings.adapter.nodeId}
                 />
             </div>
             <div class="field">
@@ -445,6 +445,15 @@
         margin: 0 0 var(--space-3);
     }
 
+    /* Non-interactive field caption — same muted look a `.field > label`
+       gets, for fields whose control isn't a single labelable input
+       (the Target-role picker). */
+    .field-label {
+        font-size: var(--text-sm);
+        color: var(--text-muted);
+        margin-bottom: var(--space-1);
+    }
+
     /* Selected-adapter row — same iface tag + label/channel pair
        as AdaptersView. Color-coded backend IDs help operators
        scan; keeping them functional (not decorative) is why these
@@ -492,15 +501,16 @@
         font-size: var(--text-sm);
     }
 
-    /* Form grids — three-up for bus params. Collapse to single
-       column on narrow widths. */
-    .grid-three {
+    /* Form grid — bitrate + frame-timeout side by side (node-id moved
+       up into its own Target-role field). Collapse to a single column
+       on narrow widths. */
+    .grid-two {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
         gap: var(--space-3);
     }
     @media (max-width: 720px) {
-        .grid-three {
+        .grid-two {
             grid-template-columns: 1fr;
         }
     }
