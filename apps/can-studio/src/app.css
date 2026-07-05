@@ -30,18 +30,17 @@
        --bg-soft + --surface-elev are aliases kept for back-compat
        with views that still reference them. New code should not
        use them. */
-    /* Forest-green ground sampled straight from the logo art
-       (rgb 23 59 39 = #173b27), with a matching green elevation ramp:
-       surfaces sit *lighter* than the ground so cards + the sidebar
-       still read as raised, the way the old greyscale did, and the
-       main content plane matches the logo badge exactly. */
-    --bg: #173b27;
-    --surface: #1d4a31;
-    --hover: #235739;
-    --border: #2b6144;
-    --border-strong: #387253;
-    --code-bg: #112d1c;
-    --bg-soft: #143421; /* input fills — recessed inside a card */
+    /* British Racing Green ground (#004225 = rgb 0 66 37) — a deep, pure
+       green. Surfaces step *lighter* off it (racing-green family) so
+       cards + the sidebar still read as raised, the way the old
+       greyscale did; the accent yellow pops hard on the deep green. */
+    --bg: #004225;
+    --surface: #0b4e2e;
+    --hover: #135a37;
+    --border: #1c6641;
+    --border-strong: #2c7c53;
+    --code-bg: #003019;
+    --bg-soft: #003a20; /* input fills — recessed inside a card */
     --surface-elev: var(--surface);
 
     /* Text ramp — primary, secondary, muted (for body hints — not
