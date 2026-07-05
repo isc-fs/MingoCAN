@@ -28,7 +28,30 @@ let toolsItem: vscode.StatusBarItem | undefined;
 const FLASH_TOOLTIP_BASE =
     'Run `iscFs.buildCommand` (default `cmake --build build`) and then flash ' +
     'the produced artifact to the selected device over CAN.';
+const FLASH_IDLE_TEXT = '$(zap) Build + Flash';
 let cliInfo = '';
+
+/**
+ * Drive the Flash status-bar item's live state during a flash run.
+ * `setFlashBusy` swaps the label for a spinner + a terse stage
+ * ("$(sync~spin) Writing…") so the operator can watch progress from the
+ * status bar without keeping the notification toast in focus;
+ * `setFlashIdle` restores the clickable "Build + Flash" label. Both
+ * no-op before the item is registered. Callers MUST pair every
+ * `setFlashBusy` with a `setFlashIdle` (flash.ts does this in a
+ * `finally`).
+ */
+export function setFlashBusy(stage: string): void {
+    if (flashItem !== undefined) {
+        flashItem.text = `$(sync~spin) ${stage}`;
+    }
+}
+
+export function setFlashIdle(): void {
+    if (flashItem !== undefined) {
+        flashItem.text = FLASH_IDLE_TEXT;
+    }
+}
 
 /**
  * Surface which `can-flasher` binary actually resolved (the managed
@@ -63,7 +86,7 @@ export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     // $(zap) is the lightning-bolt codicon — universally "flash"
     // even for non-English operators. The "Build + Flash" label is
     // explicit so nobody confuses it with `iscFs.flashWithoutBuild`.
-    flashItem.text = '$(zap) Build + Flash';
+    flashItem.text = FLASH_IDLE_TEXT;
     flashItem.tooltip = FLASH_TOOLTIP_BASE;
     flashItem.show();
     context.subscriptions.push(flashItem);
