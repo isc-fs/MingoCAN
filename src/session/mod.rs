@@ -88,7 +88,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
 
-use crate::app_control::{BootloaderEntry, REBOOT_TO_BL_ID, REBOOT_TO_BL_PAYLOAD};
+use crate::app_control::{reboot_to_bl_payload, BootloaderEntry, REBOOT_TO_BL_ID};
 use crate::protocol::commands::{
     cmd_connect, cmd_disconnect, cmd_get_health, PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR,
 };
@@ -467,8 +467,11 @@ impl Session {
         let deadline = Instant::now() + window;
         let mut attempts: u32 = 0;
         loop {
-            self.send_app_frame(REBOOT_TO_BL_ID, &REBOOT_TO_BL_PAYLOAD)
-                .await?;
+            self.send_app_frame(
+                REBOOT_TO_BL_ID,
+                &reboot_to_bl_payload(self.config.target_node),
+            )
+            .await?;
             let next_trigger = Instant::now() + BL_REBOOT_RETRIGGER_INTERVAL;
 
             // Probe CONNECT until it's time to re-send the trigger — or
