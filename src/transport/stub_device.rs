@@ -133,8 +133,8 @@ pub struct StubDevice {
     /// the time the host could ask.
     reset_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Test knob: how many app reboot-to-BL triggers
-    /// ([`REBOOT_TO_BL_ID`]/[`REBOOT_TO_BL_PAYLOAD`]) must be received
-    /// before `CMD_CONNECT` is answered. Models a *running application*
+    /// ([`REBOOT_TO_BL_ID`] + this node's `reboot_to_bl_payload`) must be
+    /// received before `CMD_CONNECT` is answered. Models a *running application*
     /// that only enters the bootloader after the trigger (`1`), or a
     /// flaky board that misses the first trigger (`2`). `0` (default) =
     /// already in the bootloader, answer CONNECT immediately.
@@ -254,9 +254,10 @@ impl StubDevice {
         // bootloader ISO-TP protocol) the *application* listens for. The
         // real BL never sees it — it's the app that resets on a match —
         // but the stub uses it to model the running-app → bootloader
-        // transition for the host's reboot-and-connect poll loop.
+        // transition for the host's reboot-and-connect poll loop. The
+        // payload is per-node (ECU ≠ AMS), so match this stub's own.
         if frame.id == crate::app_control::REBOOT_TO_BL_ID
-            && frame.payload() == crate::app_control::REBOOT_TO_BL_PAYLOAD
+            && frame.payload() == crate::app_control::reboot_to_bl_payload(self.node_id)
         {
             self.reboots_seen = self.reboots_seen.saturating_add(1);
             debug!(
