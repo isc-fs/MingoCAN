@@ -68,11 +68,8 @@
 
 {#if presence === 'absent'}
     <div class="statusbar absent">
-        <span class="warn">No adapter connected</span>
-        <span class="detail">
-            {settings.adapter.interface}
-            {settings.adapter.channel} isn't on this machine
-        </span>
+        <span class="warn">No adapter detected</span>
+        <span class="detail">Connect a CAN adapter, then select it</span>
         <button
             type="button"
             class="change"
