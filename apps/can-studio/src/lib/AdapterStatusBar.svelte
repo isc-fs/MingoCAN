@@ -1,10 +1,14 @@
 <!--
-    Persistent active-adapter strip. Sits at the top of every workflow
+    Persistent selected-adapter strip. Sits at the top of every workflow
     view so the interface / channel / bitrate every action is scoped to
     is always visible — on a shared bench with several adapters, this is
-    the always-on confirmation you're flashing the right channel. Only
-    rendered when an adapter is selected (the empty state is each view's
-    actionable "no adapter" banner); `Change` jumps back to Adapters.
+    the always-on confirmation of which adapter you'll flash through.
+
+    It shows the *selected* adapter (from settings), NOT a live link — the
+    app doesn't hold the bus open between actions, so there's no honest
+    "connected" state to show here. Only rendered when an adapter is
+    selected (the empty state is each view's actionable "no adapter"
+    banner); `Change` jumps back to Adapters.
 -->
 <script lang="ts">
     import type { ViewId } from './stores';
@@ -18,19 +22,27 @@
     const kbit = $derived(
         `${(settings.adapter.bitrate / 1000).toLocaleString()} kbit/s`,
     );
+
+    // Some backends (PCAN) use the channel string as the label, so
+    // showing both would just repeat "PCAN_USBBUS1 PCAN_USBBUS1". Only
+    // show the label when it adds something over the channel.
+    const showLabel = $derived(
+        settings.adapter.label.length > 0 &&
+            settings.adapter.label !== settings.adapter.channel,
+    );
 </script>
 
 <div class="statusbar">
-    <span class="live" aria-hidden="true"></span>
+    <span class="tag">Adapter</span>
     <span class="iface" data-iface={settings.adapter.interface}>
         {settings.adapter.interface}
     </span>
-    <span class="label">{settings.adapter.label || '(no label)'}</span>
-    <code class="channel">
-        {settings.adapter.channel.length > 0
-            ? settings.adapter.channel
-            : '(no channel)'}
-    </code>
+    {#if showLabel}
+        <span class="label">{settings.adapter.label}</span>
+    {/if}
+    {#if settings.adapter.channel.length > 0}
+        <code class="channel">{settings.adapter.channel}</code>
+    {/if}
     <span class="sep" aria-hidden="true">·</span>
     <span class="bitrate">{kbit}</span>
     <button type="button" class="change" onclick={() => navigateTo('adapters')}>
@@ -48,15 +60,14 @@
         border-bottom: 1px solid var(--border);
         flex: none;
     }
-    /* Steady green pip — "an adapter is selected". Not a live-link
-       indicator (the app doesn't hold the bus open); it just anchors
-       the strip and reads as "ready". */
-    .live {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--success);
-        box-shadow: 0 0 0 3px var(--success-soft);
+    /* Muted "Adapter" caption — anchors the strip and frames the row as
+       a *selection*, not a live connection (no status LED that would
+       imply the bus is up). */
+    .tag {
+        font-size: var(--text-xs);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--text-muted);
         flex: none;
     }
     .label {
