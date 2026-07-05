@@ -37,10 +37,51 @@ import {
     spawnCommand,
 } from './cli';
 import { getOutputChannel, showOutputChannel } from './output';
+import { currentSnapshot } from './adapterPresence';
+import { setFlashBusy, setFlashIdle } from './statusBar';
+import {
+    clearBuildDiagnostics,
+    publishBuildDiagnostics,
+} from './buildDiagnostics';
+import { runReadback } from './readback';
 
 export interface FlashOptions {
     /** When true, skip the configured build command. */
     skipBuild: boolean;
+    /** Re-flash a previous artifact/node-id with no prompts (used by
+     *  `iscFs.reflashLast`). Implies `skipBuild`. */
+    reflash?: LastFlash;
+}
+
+/** The bits `iscFs.reflashLast` remembers between runs. */
+export interface LastFlash {
+    artifactPath: string;
+    nodeId: string;
+}
+
+// Workspace-scoped memento, set once at activation, so the last flash's
+// artifact + node-id survive across a re-flash (and window reloads).
+let flashMemento: vscode.Memento | undefined;
+const LAST_FLASH_KEY = 'iscFs.lastFlash';
+
+/** Wire the extension's workspaceState in at activation. */
+export function initFlash(memento: vscode.Memento): void {
+    flashMemento = memento;
+}
+
+/**
+ * `iscFs.reflashLast` — repeat the previous flash (same artifact + node)
+ * with no build and no prompts. The daily inner-loop shortcut.
+ */
+export async function runReflashLast(): Promise<void> {
+    const last = flashMemento?.get<LastFlash>(LAST_FLASH_KEY);
+    if (last === undefined) {
+        void vscode.window.showInformationMessage(
+            'ISC MingoCAN: nothing to re-flash yet — run Build & Flash once first.',
+        );
+        return;
+    }
+    await runFlash({ skipBuild: true, reflash: last });
 }
 
 /**
@@ -61,12 +102,16 @@ export async function runFlash(options: FlashOptions): Promise<void> {
     }
     const cwd = workspace.uri.fsPath;
     const cfg = readConfig();
+    const reflash = options.reflash;
 
     // Flash requires a target node-id (the CLI refuses to guess which
-    // board to overwrite). When `iscFs.nodeId` is unset, prompt for it
-    // here — and remember it — instead of letting the CLI fail with a
-    // raw "node-id required" error the operator can't act on.
-    if (cfg.nodeId.trim().length === 0) {
+    // board to overwrite). A re-flash reuses the remembered node-id; a
+    // normal flash with `iscFs.nodeId` unset prompts for it (and
+    // remembers it) rather than letting the CLI fail with a raw
+    // "node-id required" error the operator can't act on.
+    if (reflash !== undefined) {
+        cfg.nodeId = reflash.nodeId;
+    } else if (cfg.nodeId.trim().length === 0) {
         const picked = await promptForNodeId();
         if (picked === undefined) {
             out.appendLine('[cancelled] flash aborted — no node-id provided');
@@ -112,6 +157,12 @@ export async function runFlash(options: FlashOptions): Promise<void> {
         }
     }
 
+    // Mirror the flash lifecycle onto the status-bar Flash item (spinner
+    // + terse stage) so progress is visible even when the notification
+    // toast isn't focused. The `finally` guarantees the label resets to
+    // "Build + Flash" no matter which stage returns/throws.
+    setFlashBusy('Starting…');
+    try {
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
@@ -122,6 +173,7 @@ export async function runFlash(options: FlashOptions): Promise<void> {
             // Stage 1: build
             if (!options.skipBuild && cfg.buildCommand.trim().length > 0) {
                 progress.report({ message: 'building…' });
+                setFlashBusy('Building…');
                 const buildOk = await runBuildStep(cfg.buildCommand, cwd, token);
                 if (token.isCancellationRequested) {
                     return;
@@ -133,12 +185,18 @@ export async function runFlash(options: FlashOptions): Promise<void> {
                     // an action to jump to `iscFs.buildCommand` in
                     // case the default isn't right for this project.
                     showOutputChannel();
+                    const showProblems = 'Show Problems';
                     const change = 'Change build command';
                     const choice = await vscode.window.showErrorMessage(
-                        'ISC MingoCAN: build failed. See the ISC MingoCAN output channel for details.',
+                        'ISC MingoCAN: build failed. Compile errors are in the Problems panel; full output is in the ISC MingoCAN channel.',
+                        showProblems,
                         change,
                     );
-                    if (choice === change) {
+                    if (choice === showProblems) {
+                        await vscode.commands.executeCommand(
+                            'workbench.actions.view.problems',
+                        );
+                    } else if (choice === change) {
                         await vscode.commands.executeCommand(
                             'workbench.action.openSettings',
                             'iscFs.buildCommand',
@@ -175,18 +233,31 @@ export async function runFlash(options: FlashOptions): Promise<void> {
                 );
             }
 
-            // Stage 2: resolve artifact
-            progress.report({ message: 'resolving artifact…' });
-            const artifact = await resolveArtifact(cfg.firmwareArtifact, cwd);
+            // Stage 2: resolve artifact — a re-flash reuses the exact
+            // path from last time (no glob, no picker); a normal flash
+            // resolves the configured artifact/glob.
+            let artifact: string | null;
+            if (reflash !== undefined) {
+                artifact = reflash.artifactPath;
+                out.appendLine(`[info] re-flashing ${artifact}`);
+            } else {
+                progress.report({ message: 'resolving artifact…' });
+                setFlashBusy('Resolving…');
+                artifact = await resolveArtifact(cfg.firmwareArtifact, cwd);
+            }
             if (artifact === null) {
                 return;
             }
 
             // Stage 3: flash
             progress.report({ message: 'opening session…' });
+            setFlashBusy('Opening…');
             await runFlashStep(cfg, artifact, cwd, progress, token);
         },
     );
+    } finally {
+        setFlashIdle();
+    }
 }
 
 // ---- Node-id prompt ----
@@ -199,17 +270,54 @@ export async function runFlash(options: FlashOptions): Promise<void> {
  * `undefined` if the operator cancelled.
  */
 async function promptForNodeId(): Promise<string | undefined> {
-    const value = await vscode.window.showInputBox({
-        title: 'ISC MingoCAN: target node-id',
-        prompt: 'Flashing needs the bootloader node-id (0x0–0xF). Team scheme: ECU = 0x1, AMS = 0x2, uDV = 0x3.',
-        placeHolder: 'e.g. 0x1',
+    // A role QuickPick beats free text: the three team boards are one
+    // click and can't be fat-fingered (a wrong node-id silently fails to
+    // enter the bootloader, since the reboot-to-BL payload is per-node).
+    // "Other…" keeps the raw entry for off-scheme nodes.
+    interface RoleItem extends vscode.QuickPickItem {
+        nodeId?: string;
+        custom?: boolean;
+    }
+    const hex = (n: number): string => `0x${n.toString(16).toUpperCase()}`;
+    const items: RoleItem[] = [
+        ...PROVISION_ROLES.map((r) => ({
+            label: r.name.toUpperCase(),
+            description: hex(r.nodeId),
+            nodeId: hex(r.nodeId),
+        })),
+        {
+            label: 'Other…',
+            description: 'custom node-id',
+            detail: 'Enter a hex (0x0–0xF) or decimal node-id by hand',
+            custom: true,
+        },
+    ];
+    const pick = await vscode.window.showQuickPick(items, {
+        title: 'ISC MingoCAN: target board',
+        placeHolder: 'Which board are you flashing? (sets --node-id)',
         ignoreFocusOut: true,
-        validateInput: validateNodeId,
     });
-    if (value === undefined) {
+    if (pick === undefined) {
         return undefined;
     }
-    const normalized = value.trim();
+
+    let normalized: string;
+    if (pick.custom === true) {
+        const value = await vscode.window.showInputBox({
+            title: 'ISC MingoCAN: custom node-id',
+            prompt: 'Bootloader node-id (0x0–0xF), hex (e.g. 0x4) or decimal.',
+            placeHolder: 'e.g. 0x4',
+            ignoreFocusOut: true,
+            validateInput: validateNodeId,
+        });
+        if (value === undefined) {
+            return undefined;
+        }
+        normalized = value.trim();
+    } else {
+        normalized = pick.nodeId as string;
+    }
+
     // Remember it (workspace-scoped) so routine re-flashes don't
     // re-prompt. The operator can change it in Settings or via
     // "Flash this device…", which overrides per-run.
@@ -255,6 +363,10 @@ async function runBuildStep(
     out.appendLine('');
     out.appendLine(`---- build ${new Date().toISOString()} ----`);
 
+    // Fresh run — drop the previous build's Problems so stale errors
+    // don't linger after a fix.
+    clearBuildDiagnostics();
+
     // Spawn through the user's shell so the configured command can
     // contain pipes / chained commands / quoted args without us
     // having to parse it. `/bin/sh -c` is fine for the team's
@@ -263,19 +375,38 @@ async function runBuildStep(
     const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
     const shellArgs = process.platform === 'win32' ? ['/c', command] : ['-c', command];
 
+    // Accumulate every output line so we can parse gcc/clang
+    // diagnostics into the Problems panel once the build finishes.
+    // Compilers emit errors on both stdout and stderr depending on the
+    // toolchain, so we harvest both streams.
+    const buildLines: string[] = [];
     const result = await spawnCommand(shell, shellArgs, {
         cwd,
         cancellation: token,
-        onStdoutLine: (line) => out.appendLine(line),
-        onStderrLine: (line) => out.appendLine(line),
+        onStdoutLine: (line) => {
+            out.appendLine(line);
+            buildLines.push(line);
+        },
+        onStderrLine: (line) => {
+            out.appendLine(line);
+            buildLines.push(line);
+        },
     });
+
+    // Publish diagnostics regardless of exit code — a build can succeed
+    // with warnings worth surfacing, and a failing build's errors are
+    // exactly what the operator needs clickable.
+    const errorCount = publishBuildDiagnostics(buildLines, cwd);
 
     if (result.cancelled) {
         out.appendLine('[cancelled] build interrupted by user');
         return false;
     }
     if (result.exitCode !== 0) {
-        out.appendLine(`[error] build exited with code ${result.exitCode}`);
+        out.appendLine(
+            `[error] build exited with code ${result.exitCode}` +
+                (errorCount > 0 ? ` (${errorCount} error(s) in Problems)` : ''),
+        );
         return false;
     }
     return true;
@@ -438,6 +569,7 @@ async function runFlashStep(
             if (ev !== null) {
                 events.push(ev);
                 progress.report({ message: progressMessage(ev) });
+                setFlashBusy(flashStageShort(ev));
             }
         },
         onStderrLine: (line) => out.appendLine(line),
@@ -452,6 +584,17 @@ async function runFlashStep(
     if (result.exitCode === 0) {
         const report = parseFlashReport(result.stdout);
         announceSuccess(report, artifactPath);
+        // Post-flash readback: resolve the flashed image's git-hash
+        // against the workspace (did I flash HEAD?), and — when the board
+        // stayed in the bootloader (`--no-jump`) — re-read its reported
+        // hash to confirm the identity. Best-effort; never fails the flash.
+        await runReadback(cfg, cwd, report, cfg.jumpAfterFlash);
+        // Remember this flash so `iscFs.reflashLast` can repeat it with
+        // no build and no prompts.
+        void flashMemento?.update(LAST_FLASH_KEY, {
+            artifactPath,
+            nodeId: cfg.nodeId,
+        } satisfies LastFlash);
         // Look at the artifact filename — if it matches a known
         // role (`ams.elf`, `build/ECU.HEX`, etc.) offer to write the
         // node-id NVM key + reset, completing the
@@ -461,7 +604,7 @@ async function runFlashStep(
         await maybeOfferProvision(artifactPath, cfg, cwd);
         return;
     }
-    announceFailure(result.exitCode, result.stderr);
+    await announceFailure(result.exitCode, result.stderr);
 }
 
 // ---- Argv + UX helpers ----
@@ -503,6 +646,28 @@ function progressMessage(ev: FlashEvent): string {
             return 'committing';
         case 'done':
             return `done in ${ev.duration_ms} ms`;
+    }
+}
+
+/** Terse one- or two-word stage label for the status-bar Flash item —
+ *  the notification toast carries the detailed `progressMessage`; the
+ *  status bar just needs the current phase at a glance. */
+function flashStageShort(ev: FlashEvent): string {
+    switch (ev.event) {
+        case 'planning':
+            return 'Planning…';
+        case 'erased':
+            return `Erasing s${ev.sector}`;
+        case 'written': {
+            const pct = ev.total === 0 ? 0 : Math.floor((ev.bytes * 100) / ev.total);
+            return `Writing s${ev.sector} ${pct}%`;
+        }
+        case 'verified':
+            return `Verifying s${ev.sector}`;
+        case 'committing':
+            return 'Committing…';
+        case 'done':
+            return 'Done ✓';
     }
 }
 
@@ -603,24 +768,108 @@ function announceSuccess(report: FlashReport | null, artifactPath: string): void
         );
         return;
     }
+    // Name the board + firmware identity the CLI already reported, so a
+    // successful flash is a definitive receipt ("Flashed ECU v0.2.0
+    // @293db9c") rather than an anonymous "flashed firmware.elf".
+    const fw = report.firmware;
+    const name = fw.product_name ?? base;
+    const ver = fw.version.trim().length > 0 ? ` v${fw.version}` : '';
+    const git =
+        fw.git_hash !== undefined && fw.git_hash.trim().length > 0
+            ? ` @${fw.git_hash.slice(0, 7)}`
+            : '';
     const sectors = report.sectors_written.length;
     const skipped = report.sectors_skipped.length;
+    const skipStr = skipped > 0 ? `, ${skipped} skipped` : '';
     void vscode.window.showInformationMessage(
-        `ISC MingoCAN: flashed ${base} ✓  ` +
-            `${sectors} sector(s) written, ${skipped} skipped, ${report.duration_ms} ms.`,
+        `ISC MingoCAN: flashed ${name}${ver}${git} ✓  ` +
+            `(${sectors} sector(s)${skipStr}, ${report.duration_ms} ms)`,
     );
 }
 
-function announceFailure(exitCode: number | null, stderr: string): void {
+async function announceFailure(
+    exitCode: number | null,
+    stderr: string,
+): Promise<void> {
     // Exit-code table from REQUIREMENTS.md § Output and CI integration.
     // Keep in sync with src/cli/mod.rs::ExitCodeHint.
     const hint = exitCodeHint(exitCode);
     const firstLine = stderr.split('\n').find((l) => l.trim().length > 0) ?? '';
     const detail = firstLine.length > 0 ? `\n${firstLine}` : '';
-    void vscode.window.showErrorMessage(
-        `ISC MingoCAN: flash failed (exit ${exitCode ?? 'killed'}: ${hint}).${detail}  ` +
-            `See ISC CAN output channel.`,
-    );
+
+    // Action labels (also used as the returned choice).
+    const OPEN_LOG = 'Open log';
+    const SELECT_ADAPTER = 'Select adapter…';
+    const CHANGE_NODE = 'Change node-id';
+    const APPLY_WRP = 'Enable --apply-wrp';
+    const REFLASH = 'Re-flash';
+
+    // If the adapter isn't currently on the bus, that's almost certainly
+    // the real cause of a timeout / not-found — lead with it.
+    const adapterGone = currentSnapshot().presence === 'disconnected';
+
+    const actions: string[] = [];
+    switch (exitCode) {
+        case 4: // device not found / timeout
+            actions.push(SELECT_ADAPTER, CHANGE_NODE, OPEN_LOG);
+            break;
+        case 9: // adapter not found
+            actions.push(SELECT_ADAPTER, OPEN_LOG);
+            break;
+        case 3: // protection violation (address in a WRP'd sector)
+        case 7: // WRP not applied
+            actions.push(APPLY_WRP, OPEN_LOG);
+            break;
+        case 2: // verification mismatch
+            actions.push(REFLASH, OPEN_LOG);
+            break;
+        default:
+            actions.push(OPEN_LOG);
+    }
+
+    const message =
+        adapterGone && (exitCode === 4 || exitCode === 9)
+            ? `ISC MingoCAN: no adapter detected — the flash couldn't reach the bus. Connect + select an adapter, then retry.`
+            : `ISC MingoCAN: flash failed (exit ${exitCode ?? 'killed'}: ${hint}).${detail}`;
+
+    const choice = await vscode.window.showErrorMessage(message, ...actions);
+    switch (choice) {
+        case OPEN_LOG:
+            showOutputChannel();
+            break;
+        case SELECT_ADAPTER:
+            void vscode.commands.executeCommand('iscFs.selectAdapter');
+            break;
+        case CHANGE_NODE:
+            void vscode.commands.executeCommand(
+                'workbench.action.openSettings',
+                'iscFs.nodeId',
+            );
+            break;
+        case APPLY_WRP:
+            try {
+                await vscode.workspace
+                    .getConfiguration('iscFs')
+                    .update(
+                        'applyWrp',
+                        true,
+                        vscode.ConfigurationTarget.Workspace,
+                    );
+                void vscode.window.showInformationMessage(
+                    'ISC MingoCAN: enabled `--apply-wrp`. Re-run the flash.',
+                );
+            } catch {
+                void vscode.window.showWarningMessage(
+                    'ISC MingoCAN: could not write iscFs.applyWrp — set it in Settings.',
+                );
+            }
+            break;
+        case REFLASH:
+            void vscode.commands.executeCommand('iscFs.flash');
+            break;
+        default:
+            break;
+    }
 }
 
 function exitCodeHint(code: number | null): string {

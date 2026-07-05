@@ -25,6 +25,50 @@ let adapterItem: vscode.StatusBarItem | undefined;
 let flashItem: vscode.StatusBarItem | undefined;
 let toolsItem: vscode.StatusBarItem | undefined;
 
+const FLASH_TOOLTIP_BASE =
+    'Run `iscFs.buildCommand` (default `cmake --build build`) and then flash ' +
+    'the produced artifact to the selected device over CAN.';
+const FLASH_IDLE_TEXT = '$(zap) Build + Flash';
+let cliInfo = '';
+
+/**
+ * Drive the Flash status-bar item's live state during a flash run.
+ * `setFlashBusy` swaps the label for a spinner + a terse stage
+ * ("$(sync~spin) Writing…") so the operator can watch progress from the
+ * status bar without keeping the notification toast in focus;
+ * `setFlashIdle` restores the clickable "Build + Flash" label. Both
+ * no-op before the item is registered. Callers MUST pair every
+ * `setFlashBusy` with a `setFlashIdle` (flash.ts does this in a
+ * `finally`).
+ */
+export function setFlashBusy(stage: string): void {
+    if (flashItem !== undefined) {
+        flashItem.text = `$(sync~spin) ${stage}`;
+    }
+}
+
+export function setFlashIdle(): void {
+    if (flashItem !== undefined) {
+        flashItem.text = FLASH_IDLE_TEXT;
+    }
+}
+
+/**
+ * Surface which `can-flasher` binary actually resolved (the managed
+ * globalStorage download silently wins over PATH — see cliPath.ts — and
+ * that has bitten operators). Appended to the Flash button's tooltip.
+ * Called from `bootstrapCli` once resolution settles.
+ */
+export function setCliInfo(info: string): void {
+    cliInfo = info;
+    if (flashItem !== undefined) {
+        flashItem.tooltip =
+            cliInfo.length > 0
+                ? `${FLASH_TOOLTIP_BASE}\n\nCLI: ${cliInfo}`
+                : FLASH_TOOLTIP_BASE;
+    }
+}
+
 export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     // Adapter pill — leftmost, highest priority number renders first.
     adapterItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -42,12 +86,12 @@ export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     // $(zap) is the lightning-bolt codicon — universally "flash"
     // even for non-English operators. The "Build + Flash" label is
     // explicit so nobody confuses it with `iscFs.flashWithoutBuild`.
-    flashItem.text = '$(zap) Build + Flash';
-    flashItem.tooltip =
-        'Run `iscFs.buildCommand` (default `cmake --build build`) and then flash ' +
-        'the produced artifact to the selected device over CAN.';
+    flashItem.text = FLASH_IDLE_TEXT;
+    flashItem.tooltip = FLASH_TOOLTIP_BASE;
     flashItem.show();
     context.subscriptions.push(flashItem);
+    // Re-apply any CLI info that resolved before this item existed.
+    setCliInfo(cliInfo);
 
     // Tools panel — opens the dashboard webview with every
     // action surface side-by-side. Last so it's the rightmost.

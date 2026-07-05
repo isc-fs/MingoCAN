@@ -2,7 +2,7 @@
   "name": "vscode-stm32-can",
   "displayName": "ISC MingoCAN Flasher",
   "description": "Build, flash, and diagnose STM32 firmware over CAN — one button, four adapters, live telemetry. Wraps the can-flasher CLI.",
-  "version": "2.6.12",
+  "version": "2.6.13",
   "publisher": "isc-fs",
   "license": "MIT",
   "preview": true,
@@ -58,6 +58,7 @@
     "onCommand:iscFs.readDtcs",
     "onCommand:iscFs.clearDtcs",
     "onCommand:iscFs.health",
+    "onCommand:iscFs.doctor",
     "onCommand:iscFs.liveData",
     "onWebviewPanel:iscFs.liveData",
     "onView:iscFs.devices",
@@ -121,6 +122,41 @@
         "command": "iscFs.openTools",
         "title": "Open tools panel",
         "category": "ISC MingoCAN"
+      },
+      {
+        "command": "iscFs.reflashLast",
+        "title": "Re-flash last (skip build)",
+        "category": "ISC MingoCAN"
+      },
+      {
+        "command": "iscFs.useCliOnPath",
+        "title": "Use CLI on PATH (ignore managed download)",
+        "category": "ISC MingoCAN"
+      },
+      {
+        "command": "iscFs.doctor",
+        "title": "Doctor: check flashing environment",
+        "category": "ISC MingoCAN"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "iscFs.flash",
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f",
+        "when": "workspaceFolderCount != 0"
+      },
+      {
+        "command": "iscFs.flashWithoutBuild",
+        "key": "ctrl+alt+shift+f",
+        "mac": "cmd+alt+shift+f",
+        "when": "workspaceFolderCount != 0"
+      },
+      {
+        "command": "iscFs.reflashLast",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "workspaceFolderCount != 0"
       }
     ],
     "configuration": {
@@ -129,16 +165,19 @@
         "iscFs.canFlasherPath": {
           "type": "string",
           "default": "can-flasher",
+          "scope": "machine-overridable",
           "markdownDescription": "Path to the `can-flasher` binary. Use the bare name `can-flasher` if it's on `$PATH`; otherwise an absolute path. When left at the default and `#iscFs.cliAutoDownload#` is on, the extension prefers a version-matched binary it downloads itself."
         },
         "iscFs.cliAutoDownload": {
           "type": "boolean",
           "default": true,
+          "scope": "machine-overridable",
           "markdownDescription": "Download a `can-flasher` binary matching this extension's version from the GitHub release and use it, instead of relying on whatever is on `$PATH`. Keeps flashing in lockstep with the extension (the desktop app stays in sync by compiling the same library in). Ignored when `#iscFs.canFlasherPath#` is set to a custom path — that is always honoured. Falls back to `$PATH` when offline or on an unsupported platform."
         },
         "iscFs.interface": {
           "type": "string",
           "default": "slcan",
+          "scope": "machine-overridable",
           "enum": [
             "slcan",
             "socketcan",
@@ -157,6 +196,7 @@
         },
         "iscFs.channel": {
           "type": "string",
+          "scope": "machine-overridable",
           "markdownDescription": "Adapter channel string passed as `--channel`. Examples: `/dev/ttyACM0`, `COM3`, `PCAN_USBBUS1`, `can0`, `0` (Vector index). Leave empty for `virtual`."
         },
         "iscFs.bitrate": {
@@ -231,9 +271,9 @@
     "views": {
       "iscFsMingoCAN": [
         {
-          "type": "webview",
           "id": "iscFs.tools",
           "name": "Tools",
+          "icon": "$(tools)",
           "contextualTitle": "ISC MingoCAN"
         },
         {
@@ -275,6 +315,60 @@
       {
         "view": "iscFs.devices",
         "contents": "No CAN adapters detected yet.\n\n[Refresh](command:iscFs.refreshDevices)\n\n[Select adapter…](command:iscFs.selectAdapter)\n\nMake sure your CAN adapter is plugged in and the `can-flasher` binary is on PATH (or set `iscFs.canFlasherPath`).\n\nFor a no-hardware smoke test, set `iscFs.interface` to `virtual`."
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "iscFs.getStarted",
+        "title": "Get flashing with MingoCAN",
+        "description": "CLI ready → pick an adapter → find a board → your first flash over CAN.",
+        "when": "config.iscFs.channel == '' && config.iscFs.interface != 'virtual'",
+        "steps": [
+          {
+            "id": "iscFs.walkthrough.cli",
+            "title": "Confirm the CLI is ready",
+            "description": "The extension manages a version-matched `can-flasher` for you. Run Doctor to confirm it — and the rest of your setup.\n[Run Doctor](command:iscFs.doctor)",
+            "media": {
+              "markdown": "media/walkthroughs/cli.md"
+            },
+            "completionEvents": [
+              "onCommand:iscFs.doctor"
+            ]
+          },
+          {
+            "id": "iscFs.walkthrough.adapter",
+            "title": "Pick your CAN adapter",
+            "description": "Choose which adapter to talk to your boards through.\n[Select adapter…](command:iscFs.selectAdapter)",
+            "media": {
+              "markdown": "media/walkthroughs/adapter.md"
+            },
+            "completionEvents": [
+              "onSettingChanged:iscFs.channel"
+            ]
+          },
+          {
+            "id": "iscFs.walkthrough.discover",
+            "title": "Find a board on the bus",
+            "description": "Broadcast on the bus and list the boards in bootloader mode.\n[Discover devices](command:iscFs.discover)",
+            "media": {
+              "markdown": "media/walkthroughs/discover.md"
+            },
+            "completionEvents": [
+              "onCommand:iscFs.discover"
+            ]
+          },
+          {
+            "id": "iscFs.walkthrough.flash",
+            "title": "Your first flash",
+            "description": "Build your firmware and flash it over CAN in one step.\n[Build & Flash](command:iscFs.flash)",
+            "media": {
+              "markdown": "media/walkthroughs/flash.md"
+            },
+            "completionEvents": [
+              "onCommand:iscFs.flash"
+            ]
+          }
+        ]
       }
     ]
   },

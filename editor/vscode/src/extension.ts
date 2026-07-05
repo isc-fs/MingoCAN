@@ -26,13 +26,16 @@ import {
 } from './cliPath';
 import { cliVersion, ensureManagedCli } from './cliManager';
 import { readConfig } from './config';
+import { initBuildDiagnostics } from './buildDiagnostics';
 import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
-import { runFlash } from './flash';
+import { runDoctor } from './doctor';
+import { initFlash, runFlash, runReflashLast } from './flash';
 import { LiveDataPanel } from './liveDataPanel';
-import { selectAdapter } from './picker';
-import { registerStatusBarItem } from './statusBar';
+import { applyAdapter, selectAdapter } from './picker';
+import { fetchAdapters, type AdapterEntry } from './adapters';
+import { registerStatusBarItem, setCliInfo } from './statusBar';
 import { ToolsPanel } from './toolsPanel';
-import { ToolsViewProvider } from './toolsView';
+import { ToolsTreeProvider } from './toolsTree';
 import { DeviceTreeProvider, type IscFsTreeNode } from './tree';
 import { getOutputChannel, showOutputChannel } from './output';
 import { formatNodeId } from './discover';
@@ -45,7 +48,17 @@ export function activate(context: vscode.ExtensionContext): void {
     // cliManager.ts for the rationale (the desktop app stays in sync
     // by compiling the library in; the extension shells out, so it
     // has to manage its own version-matched binary).
-    void bootstrapCli(context);
+    // Resolve the CLI first, then (best-effort) offer to auto-pick an
+    // adapter on a fresh setup — probing needs a working binary.
+    void bootstrapCli(context).then(() => autoDetectAdapter());
+
+    // Let the flash module remember the last artifact + node-id (for
+    // `iscFs.reflashLast`) across runs and window reloads.
+    initFlash(context.workspaceState);
+
+    // Build-output → Problems panel: create the diagnostic collection
+    // the build step publishes gcc/clang errors into.
+    initBuildDiagnostics(context);
 
     // ---- Tier A (flash) ----
     context.subscriptions.push(
@@ -55,6 +68,38 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('iscFs.flashWithoutBuild', () =>
             runFlash({ skipBuild: true }),
         ),
+        vscode.commands.registerCommand('iscFs.reflashLast', () =>
+            runReflashLast(),
+        ),
+    );
+
+    // ---- CLI management ----
+    // Escape hatch: the managed globalStorage binary silently wins over
+    // PATH, which confused operators debugging a stale build. This flips
+    // off auto-download + clears the managed override so PATH wins, then
+    // reports what actually resolved.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('iscFs.useCliOnPath', async () => {
+            await vscode.workspace
+                .getConfiguration('iscFs')
+                .update(
+                    'cliAutoDownload',
+                    false,
+                    vscode.ConfigurationTarget.Global,
+                );
+            setManagedCliPath(null);
+            clearCanFlasherPathCache();
+            const configured = vscode.workspace
+                .getConfiguration('iscFs')
+                .get<string>('canFlasherPath', DEFAULT_BARE_NAME);
+            const resolved = resolveCanFlasherPath(configured);
+            const v = await cliVersion(resolved);
+            const info = `PATH · ${resolved}${v !== null ? ` (v${v})` : ''}`;
+            setCliInfo(info);
+            void vscode.window.showInformationMessage(
+                `ISC MingoCAN: now using the CLI on PATH — ${info}. Managed auto-download disabled.`,
+            );
+        }),
     );
 
     // ---- Tier B (device awareness) ----
@@ -98,6 +143,9 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('iscFs.health', () => runHealth()),
         vscode.commands.registerCommand('iscFs.readDtcs', () => runReadDtcs()),
         vscode.commands.registerCommand('iscFs.clearDtcs', () => runClearDtcs()),
+        // Environment triage — checks CLI/adapter/node-id/build config in
+        // one pass and reports the first blocker with a fix button.
+        vscode.commands.registerCommand('iscFs.doctor', () => runDoctor(context)),
     );
 
     // ---- Tier C.2 (streaming diagnostics) ----
@@ -117,18 +165,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ---- Tools view (activity-bar sidebar) ----
     //
-    // Same shape as PlatformIO's left-rail panel: the MingoCAN
-    // activity-bar icon reveals a sidebar with two views — the
-    // Tools webview (one-click access to every action) and the
-    // Devices tree (live discovery). This is the canonical surface
-    // from v2.3.4 onward.
-    const toolsView = new ToolsViewProvider(context);
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(
-            ToolsViewProvider.viewType,
-            toolsView,
-        ),
-    );
+    // Same shape as PlatformIO's left-rail QuickAccess: the MingoCAN
+    // activity-bar icon reveals a sidebar with two views — the Tools
+    // tree (one-click access to every action, grouped Flash / Devices /
+    // Diagnostics) and the Devices tree (live discovery). Native
+    // TreeView, so it's themed + keyboard-navigable with no webview /
+    // CSP / postMessage surface to maintain.
+    new ToolsTreeProvider().register(context);
 
     // ---- Legacy "Open tools panel" command ----
     //
@@ -200,6 +243,10 @@ async function bootstrapCli(context: vscode.ExtensionContext): Promise<void> {
         const managed = await ensureManagedCli(context, expected);
         if (managed !== null) {
             setManagedCliPath(managed);
+            setCliInfo(`managed v${expected} · ${managed}`);
+            getOutputChannel().appendLine(
+                `[cli] using managed binary v${expected}: ${managed}`,
+            );
             return;
         }
         // Download unavailable → clear any stale managed override so we
@@ -213,8 +260,70 @@ async function bootstrapCli(context: vscode.ExtensionContext): Promise<void> {
     // we only warn on a definite version mismatch.
     const resolved = resolveCanFlasherPath(configured);
     const actual = await cliVersion(resolved);
+    const source = configured !== DEFAULT_BARE_NAME ? 'pinned' : 'PATH';
+    setCliInfo(
+        `${source} · ${resolved}${actual !== null ? ` (v${actual})` : ''}`,
+    );
+    getOutputChannel().appendLine(
+        `[cli] using ${source} binary: ${resolved}${actual !== null ? ` (v${actual})` : ''}`,
+    );
     if (actual !== null && actual !== expected) {
         warnSkew(expected, actual, configured !== DEFAULT_BARE_NAME);
+    }
+}
+
+/**
+ * First-run convenience: when no adapter is configured yet, probe for
+ * hardware and offer a one-click pick. Exactly one adapter → "Use it?";
+ * several → nudge to the picker; none → stay silent (nothing to offer).
+ * Best-effort — any failure is swallowed. The detected adapter is saved
+ * to user (machine) settings, matching the machine-overridable scope.
+ */
+async function autoDetectAdapter(): Promise<void> {
+    const cfg = readConfig();
+    // Already set up (an explicit channel, or the channel-less virtual
+    // bus) → nothing to offer.
+    if (cfg.interface === 'virtual' || cfg.channel.trim().length > 0) {
+        return;
+    }
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (workspace === undefined) {
+        return;
+    }
+
+    let hw: AdapterEntry[];
+    try {
+        const entries = await fetchAdapters(cfg, workspace.uri.fsPath);
+        hw = entries.filter((e) => e.interface !== 'virtual');
+    } catch {
+        return;
+    }
+    if (hw.length === 0) {
+        return;
+    }
+
+    if (hw.length === 1) {
+        const entry = hw[0];
+        const use = `Use ${entry.label}`;
+        const choice = await vscode.window.showInformationMessage(
+            `ISC MingoCAN: detected a ${entry.interface.toUpperCase()} adapter — ${entry.label} (${entry.channel}). Use it?`,
+            use,
+        );
+        if (choice === use) {
+            await applyAdapter(entry, vscode.ConfigurationTarget.Global);
+            void vscode.window.showInformationMessage(
+                `ISC MingoCAN: adapter set to ${entry.interface} · ${entry.channel}.`,
+            );
+        }
+    } else {
+        const pick = 'Select adapter…';
+        const choice = await vscode.window.showInformationMessage(
+            `ISC MingoCAN: ${hw.length} CAN adapters detected — pick which one to use.`,
+            pick,
+        );
+        if (choice === pick) {
+            void vscode.commands.executeCommand('iscFs.selectAdapter');
+        }
     }
 }
 
