@@ -7,8 +7,8 @@
     import { onMount } from 'svelte';
     import { getVersion } from '@tauri-apps/api/app';
 
-    import type { ViewId } from './stores';
-    import { VIEWS } from './stores';
+    import type { ViewId, ViewMeta } from './stores';
+    import { VIEWS, NAV_SECTIONS } from './stores';
 
     interface Props {
         activeView: ViewId;
@@ -16,6 +16,11 @@
     }
 
     const { activeView, onSelect }: Props = $props();
+
+    // Pinned rows render outside the sections: Adapters at the top
+    // (start here), Settings at the bottom.
+    const topViews = VIEWS.filter((v) => v.id === 'adapters');
+    const bottomViews = VIEWS.filter((v) => v.id === 'settings');
 
     // `getVersion()` reads tauri.conf.json's version field — the
     // same field `release.yml`'s verify-version gate compares the
@@ -42,19 +47,40 @@
         </div>
     </div>
 
-    <nav>
-        {#each VIEWS as view (view.id)}
-            <button
-                type="button"
-                class="nav-item"
-                class:active={activeView === view.id}
-                onclick={() => onSelect(view.id)}
-            >
+    {#snippet navRow(view: ViewMeta)}
+        <button
+            type="button"
+            class="nav-item"
+            class:active={activeView === view.id}
+            title={view.description}
+            onclick={() => onSelect(view.id)}
+        >
+            <span class="nav-text">
                 <span class="label">{view.label}</span>
-                {#if view.status === 'soon'}
-                    <span class="pill soon-pill">soon</span>
-                {/if}
-            </button>
+                <span class="desc">{view.description}</span>
+            </span>
+            {#if view.status === 'soon'}
+                <span class="pill soon-pill">soon</span>
+            {/if}
+        </button>
+    {/snippet}
+
+    <nav>
+        {#each topViews as view (view.id)}
+            {@render navRow(view)}
+        {/each}
+
+        {#each NAV_SECTIONS as sec (sec.section)}
+            <div class="nav-section">{sec.label}</div>
+            {#each VIEWS.filter((v) => v.section === sec.section) as view (view.id)}
+                {@render navRow(view)}
+            {/each}
+        {/each}
+
+        <div class="nav-spacer"></div>
+
+        {#each bottomViews as view (view.id)}
+            {@render navRow(view)}
         {/each}
     </nav>
 </aside>
@@ -108,6 +134,35 @@
         display: flex;
         flex-direction: column;
         gap: 2px;
+        flex: 1;
+        min-height: 0;
+    }
+
+    /* Section header — quiet uppercase mono label with a trailing
+       hairline, separating Program from Observe. */
+    .nav-section {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        padding: 0 var(--space-3) var(--space-1);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+    }
+    .nav-section::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: var(--border);
+    }
+
+    /* Pushes the pinned Settings row to the bottom of the rail. */
+    .nav-spacer {
+        flex: 1;
+        min-height: var(--space-4);
     }
 
     /* Nav row — bespoke button shape (not .btn) so we can use a
@@ -154,8 +209,27 @@
         margin-left: calc(var(--space-3) * -1);
     }
 
-    .nav-item .label {
+    .nav-text {
         flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+    }
+    .nav-item .label {
+        line-height: 1.25;
+    }
+    /* Plain-language subline — de-jargons "Burn bootloader" / "Pit diag"
+       without needing a hover. Muted so the label still reads first;
+       stays muted on the active row (only the label goes accent). */
+    .nav-item .desc {
+        font-size: 11px;
+        font-weight: 400;
+        color: var(--text-muted);
+        line-height: 1.25;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     /* "soon" tag — leans on the .pill utility but knocks the font

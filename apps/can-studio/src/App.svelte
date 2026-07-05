@@ -14,11 +14,13 @@
         loadSettings,
         registerAutosaveEffect,
         registerDbcAutoloadEffect,
+        settings,
     } from './lib/settings.svelte';
     import { loadDbc, unloadDbc } from './lib/dbc';
     import { checkForUpdate, type AvailableUpdate } from './lib/updater';
 
     import Sidebar from './lib/Sidebar.svelte';
+    import AdapterStatusBar from './lib/AdapterStatusBar.svelte';
     import UpdateBanner from './lib/UpdateBanner.svelte';
     import AdaptersView from './lib/AdaptersView.svelte';
     import FlashView from './lib/FlashView.svelte';
@@ -35,6 +37,24 @@
     function selectView(id: ViewId): void {
         activeView = id;
     }
+
+    // An adapter is "ready" once an interface is picked and it has a
+    // channel (or it's the channel-less virtual bus). Drives the
+    // persistent status bar; each view gates its own actions the same
+    // way and shows an actionable banner when this is false.
+    const adapterReady = $derived(
+        settings.adapter.interface !== null &&
+            (settings.adapter.interface === 'virtual' ||
+                settings.adapter.channel.length > 0),
+    );
+
+    // The status bar is redundant on the Adapters view (you're already
+    // choosing there) — show it on every other workflow view, but only
+    // when an adapter is actually selected (the empty state is each
+    // view's own "no adapter" banner).
+    const showStatusBar = $derived(
+        settingsReady && adapterReady && activeView !== 'adapters',
+    );
 
     onMount(async () => {
         await loadSettings();
@@ -60,20 +80,23 @@
         <Sidebar {activeView} onSelect={selectView} />
 
         <main>
+        {#if showStatusBar}
+            <AdapterStatusBar navigateTo={selectView} />
+        {/if}
         {#if !settingsReady}
             <div class="loading">Loading settings…</div>
         {:else if activeView === 'adapters'}
             <AdaptersView />
         {:else if activeView === 'flash'}
-            <FlashView />
+            <FlashView navigateTo={selectView} />
         {:else if activeView === 'swdFlash'}
             <SwdFlashView />
         {:else if activeView === 'diagnostics'}
-            <DiagnosticsView />
+            <DiagnosticsView navigateTo={selectView} />
         {:else if activeView === 'busMonitor'}
-            <BusMonitorView />
+            <BusMonitorView navigateTo={selectView} />
         {:else if activeView === 'pitDiag'}
-            <PitDiagView />
+            <PitDiagView navigateTo={selectView} />
         {:else if activeView === 'settings'}
             <SettingsView navigateTo={selectView} />
         {/if}
