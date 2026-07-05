@@ -43,6 +43,7 @@ import {
     clearBuildDiagnostics,
     publishBuildDiagnostics,
 } from './buildDiagnostics';
+import { runReadback } from './readback';
 
 export interface FlashOptions {
     /** When true, skip the configured build command. */
@@ -583,6 +584,11 @@ async function runFlashStep(
     if (result.exitCode === 0) {
         const report = parseFlashReport(result.stdout);
         announceSuccess(report, artifactPath);
+        // Post-flash readback: resolve the flashed image's git-hash
+        // against the workspace (did I flash HEAD?), and — when the board
+        // stayed in the bootloader (`--no-jump`) — re-read its reported
+        // hash to confirm the identity. Best-effort; never fails the flash.
+        await runReadback(cfg, cwd, report, cfg.jumpAfterFlash);
         // Remember this flash so `iscFs.reflashLast` can repeat it with
         // no build and no prompts.
         void flashMemento?.update(LAST_FLASH_KEY, {
