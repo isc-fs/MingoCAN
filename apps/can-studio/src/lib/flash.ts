@@ -111,6 +111,28 @@ export function readCmakePresets(cwd: string): Promise<CmakePresetInfo[]> {
     return invoke<CmakePresetInfo[]>('read_cmake_presets', { cwd });
 }
 
+/**
+ * Flash config committed to a repo's `.vscode/settings.json` — the same
+ * `iscFs.*` keys the VS Code extension reads. When the Build directory
+ * points at such a repo, these take precedence over the app's stored
+ * settings, so a developer gets the right build command / artifact /
+ * node-id with no per-machine setup. `artifactPath` is already resolved
+ * to an absolute path against the repo root. `null` when the repo has no
+ * `.vscode/settings.json` or declares none of the keys.
+ */
+export interface RepoFlashConfig {
+    buildCommand: string | null;
+    artifactPath: string | null;
+    nodeId: string | null;
+    source: string;
+}
+
+export function readRepoFlashConfig(
+    cwd: string,
+): Promise<RepoFlashConfig | null> {
+    return invoke<RepoFlashConfig | null>('read_repo_flash_config', { cwd });
+}
+
 export function onFlashEvent(handler: (event: FlashEvent) => void): Promise<UnlistenFn> {
     return listen<FlashEvent>('flash:event', (e) => handler(e.payload));
 }

@@ -67,6 +67,7 @@ pub fn run() {
             flash::flash,
             flash::build_only,
             flash::read_cmake_presets,
+            flash::read_repo_flash_config,
             diagnose::health,
             diagnose::read_dtcs,
             diagnose::clear_dtcs,
