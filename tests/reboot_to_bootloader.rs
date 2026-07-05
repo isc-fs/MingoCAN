@@ -3,7 +3,7 @@
 //!
 //! The [`StubDevice`] is configured to model a *running application*
 //! that only answers `CMD_CONNECT` after it has received the app-level
-//! reboot-to-BL trigger ([`REBOOT_TO_BL_ID`]/[`REBOOT_TO_BL_PAYLOAD`]).
+//! reboot-to-BL trigger (`REBOOT_TO_BL_ID` + the node's per-node payload).
 //! This exercises the host's `Auto` path: a first CONNECT probe times
 //! out, the host sends the trigger, and — crucially — keeps re-sending +
 //! re-probing until the "bootloader" comes up (or the window elapses),
