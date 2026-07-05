@@ -25,6 +25,27 @@ let adapterItem: vscode.StatusBarItem | undefined;
 let flashItem: vscode.StatusBarItem | undefined;
 let toolsItem: vscode.StatusBarItem | undefined;
 
+const FLASH_TOOLTIP_BASE =
+    'Run `iscFs.buildCommand` (default `cmake --build build`) and then flash ' +
+    'the produced artifact to the selected device over CAN.';
+let cliInfo = '';
+
+/**
+ * Surface which `can-flasher` binary actually resolved (the managed
+ * globalStorage download silently wins over PATH — see cliPath.ts — and
+ * that has bitten operators). Appended to the Flash button's tooltip.
+ * Called from `bootstrapCli` once resolution settles.
+ */
+export function setCliInfo(info: string): void {
+    cliInfo = info;
+    if (flashItem !== undefined) {
+        flashItem.tooltip =
+            cliInfo.length > 0
+                ? `${FLASH_TOOLTIP_BASE}\n\nCLI: ${cliInfo}`
+                : FLASH_TOOLTIP_BASE;
+    }
+}
+
 export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     // Adapter pill — leftmost, highest priority number renders first.
     adapterItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -43,11 +64,11 @@ export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     // even for non-English operators. The "Build + Flash" label is
     // explicit so nobody confuses it with `iscFs.flashWithoutBuild`.
     flashItem.text = '$(zap) Build + Flash';
-    flashItem.tooltip =
-        'Run `iscFs.buildCommand` (default `cmake --build build`) and then flash ' +
-        'the produced artifact to the selected device over CAN.';
+    flashItem.tooltip = FLASH_TOOLTIP_BASE;
     flashItem.show();
     context.subscriptions.push(flashItem);
+    // Re-apply any CLI info that resolved before this item existed.
+    setCliInfo(cliInfo);
 
     // Tools panel — opens the dashboard webview with every
     // action surface side-by-side. Last so it's the rightmost.

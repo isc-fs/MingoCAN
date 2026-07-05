@@ -121,6 +121,36 @@
         "command": "iscFs.openTools",
         "title": "Open tools panel",
         "category": "ISC MingoCAN"
+      },
+      {
+        "command": "iscFs.reflashLast",
+        "title": "Re-flash last (skip build)",
+        "category": "ISC MingoCAN"
+      },
+      {
+        "command": "iscFs.useCliOnPath",
+        "title": "Use CLI on PATH (ignore managed download)",
+        "category": "ISC MingoCAN"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "iscFs.flash",
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f",
+        "when": "workspaceFolderCount != 0"
+      },
+      {
+        "command": "iscFs.flashWithoutBuild",
+        "key": "ctrl+alt+shift+f",
+        "mac": "cmd+alt+shift+f",
+        "when": "workspaceFolderCount != 0"
+      },
+      {
+        "command": "iscFs.reflashLast",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "workspaceFolderCount != 0"
       }
     ],
     "configuration": {
@@ -129,16 +159,19 @@
         "iscFs.canFlasherPath": {
           "type": "string",
           "default": "can-flasher",
+          "scope": "machine-overridable",
           "markdownDescription": "Path to the `can-flasher` binary. Use the bare name `can-flasher` if it's on `$PATH`; otherwise an absolute path. When left at the default and `#iscFs.cliAutoDownload#` is on, the extension prefers a version-matched binary it downloads itself."
         },
         "iscFs.cliAutoDownload": {
           "type": "boolean",
           "default": true,
+          "scope": "machine-overridable",
           "markdownDescription": "Download a `can-flasher` binary matching this extension's version from the GitHub release and use it, instead of relying on whatever is on `$PATH`. Keeps flashing in lockstep with the extension (the desktop app stays in sync by compiling the same library in). Ignored when `#iscFs.canFlasherPath#` is set to a custom path — that is always honoured. Falls back to `$PATH` when offline or on an unsupported platform."
         },
         "iscFs.interface": {
           "type": "string",
           "default": "slcan",
+          "scope": "machine-overridable",
           "enum": [
             "slcan",
             "socketcan",
@@ -157,6 +190,7 @@
         },
         "iscFs.channel": {
           "type": "string",
+          "scope": "machine-overridable",
           "markdownDescription": "Adapter channel string passed as `--channel`. Examples: `/dev/ttyACM0`, `COM3`, `PCAN_USBBUS1`, `can0`, `0` (Vector index). Leave empty for `virtual`."
         },
         "iscFs.bitrate": {
