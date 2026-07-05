@@ -22,14 +22,75 @@ export type ViewId =
     | 'pitDiag'
     | 'settings';
 
-export const VIEWS: { id: ViewId; label: string; status: 'live' | 'soon' }[] = [
-    { id: 'adapters', label: 'Adapters', status: 'live' },
-    { id: 'flash', label: 'Flash', status: 'live' },
-    { id: 'swdFlash', label: 'Burn bootloader', status: 'live' },
-    { id: 'diagnostics', label: 'Diagnostics', status: 'live' },
-    { id: 'busMonitor', label: 'Bus monitor', status: 'live' },
-    { id: 'pitDiag', label: 'Pit diag', status: 'live' },
-    { id: 'settings', label: 'Settings', status: 'live' },
+/** Sidebar grouping. Views with no section are pinned — Adapters at the
+ *  top (start here), Settings at the bottom. */
+export type NavSection = 'program' | 'observe';
+
+export interface ViewMeta {
+    id: ViewId;
+    label: string;
+    status: 'live' | 'soon';
+    /** One-line plain-language description — shown under the label in
+     *  the sidebar and as the nav button's tooltip, so labels like
+     *  "Burn bootloader" / "Pit diag" aren't jargon to a newcomer. */
+    description: string;
+    section?: NavSection;
+}
+
+export const VIEWS: ViewMeta[] = [
+    {
+        id: 'adapters',
+        label: 'Adapters',
+        status: 'live',
+        description: 'Pick the CAN adapter & channel',
+    },
+    {
+        id: 'flash',
+        label: 'Flash',
+        status: 'live',
+        section: 'program',
+        description: 'Build & flash firmware over CAN',
+    },
+    {
+        id: 'swdFlash',
+        label: 'Burn bootloader',
+        status: 'live',
+        section: 'program',
+        description: 'First-boot bootloader via SWD',
+    },
+    {
+        id: 'diagnostics',
+        label: 'Diagnostics',
+        status: 'live',
+        section: 'observe',
+        description: 'DTCs & session health',
+    },
+    {
+        id: 'busMonitor',
+        label: 'Bus monitor',
+        status: 'live',
+        section: 'observe',
+        description: 'Live CAN frames & DBC signals',
+    },
+    {
+        id: 'pitDiag',
+        label: 'Pit diag',
+        status: 'live',
+        section: 'observe',
+        description: 'Live AMS / ECU telemetry',
+    },
+    {
+        id: 'settings',
+        label: 'Settings',
+        status: 'live',
+        description: 'Defaults, build config, DBC & updates',
+    },
+];
+
+/** Section headers, in render order, for the grouped sidebar. */
+export const NAV_SECTIONS: { section: NavSection; label: string }[] = [
+    { section: 'program', label: 'Program' },
+    { section: 'observe', label: 'Observe' },
 ];
 
 // Svelte 5 runes can't live at module scope in a `.ts` file (runes
