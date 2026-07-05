@@ -316,6 +316,60 @@
         "view": "iscFs.devices",
         "contents": "No CAN adapters detected yet.\n\n[Refresh](command:iscFs.refreshDevices)\n\n[Select adapter…](command:iscFs.selectAdapter)\n\nMake sure your CAN adapter is plugged in and the `can-flasher` binary is on PATH (or set `iscFs.canFlasherPath`).\n\nFor a no-hardware smoke test, set `iscFs.interface` to `virtual`."
       }
+    ],
+    "walkthroughs": [
+      {
+        "id": "iscFs.getStarted",
+        "title": "Get flashing with MingoCAN",
+        "description": "CLI ready → pick an adapter → find a board → your first flash over CAN.",
+        "when": "config.iscFs.channel == '' && config.iscFs.interface != 'virtual'",
+        "steps": [
+          {
+            "id": "iscFs.walkthrough.cli",
+            "title": "Confirm the CLI is ready",
+            "description": "The extension manages a version-matched `can-flasher` for you. Run Doctor to confirm it — and the rest of your setup.\n[Run Doctor](command:iscFs.doctor)",
+            "media": {
+              "markdown": "media/walkthroughs/cli.md"
+            },
+            "completionEvents": [
+              "onCommand:iscFs.doctor"
+            ]
+          },
+          {
+            "id": "iscFs.walkthrough.adapter",
+            "title": "Pick your CAN adapter",
+            "description": "Choose which adapter to talk to your boards through.\n[Select adapter…](command:iscFs.selectAdapter)",
+            "media": {
+              "markdown": "media/walkthroughs/adapter.md"
+            },
+            "completionEvents": [
+              "onSettingChanged:iscFs.channel"
+            ]
+          },
+          {
+            "id": "iscFs.walkthrough.discover",
+            "title": "Find a board on the bus",
+            "description": "Broadcast on the bus and list the boards in bootloader mode.\n[Discover devices](command:iscFs.discover)",
+            "media": {
+              "markdown": "media/walkthroughs/discover.md"
+            },
+            "completionEvents": [
+              "onCommand:iscFs.discover"
+            ]
+          },
+          {
+            "id": "iscFs.walkthrough.flash",
+            "title": "Your first flash",
+            "description": "Build your firmware and flash it over CAN in one step.\n[Build & Flash](command:iscFs.flash)",
+            "media": {
+              "markdown": "media/walkthroughs/flash.md"
+            },
+            "completionEvents": [
+              "onCommand:iscFs.flash"
+            ]
+          }
+        ]
+      }
     ]
   },
   "scripts": {
