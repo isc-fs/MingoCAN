@@ -21,9 +21,34 @@
     import {
         inferRoleFromArtifact,
         provisionNodeId,
+        ROLES,
         type Role,
     } from './provision';
     import { settings } from './settings.svelte';
+
+    // ---- Target role picker --------------------------------------
+    // The node-id selects which board the reboot-to-BL magic is aimed
+    // at — and the ECU and AMS use DIFFERENT payloads, so a mismatched
+    // node-id silently fails to enter the bootloader. Front the raw
+    // number with the role table so the common targets are one click
+    // and impossible to fat-finger; `Custom` reveals the raw field for
+    // anything off-scheme.
+    const roleForNode = $derived(
+        ROLES.find((r) => r.nodeId === settings.adapter.nodeId) ?? null,
+    );
+    let customNode = $state<boolean>(false);
+    const showCustomNode = $derived(customNode || roleForNode === null);
+
+    function pickRole(nodeId: number): void {
+        settings.adapter.nodeId = nodeId;
+        customNode = false;
+    }
+    function enableCustomNode(): void {
+        customNode = true;
+    }
+    function roleHex(nodeId: number): string {
+        return `0x${nodeId.toString(16).toUpperCase()}`;
+    }
 
     // The Flash tab exposes exactly one build choice — Release vs.
     // Debug. The build command, working directory, and artifact path
@@ -437,7 +462,53 @@
             </p>
         </div>
 
-        <div class="row-three">
+        <div class="field">
+            <span class="field-label">Target board</span>
+            <div class="role-row">
+                <div class="segmented" role="group" aria-label="Target role">
+                    {#each ROLES as r (r.name)}
+                        <button
+                            type="button"
+                            class="seg"
+                            class:active={!showCustomNode &&
+                                roleForNode?.name === r.name}
+                            aria-pressed={!showCustomNode &&
+                                roleForNode?.name === r.name}
+                            onclick={() => pickRole(r.nodeId)}
+                        >
+                            {r.name.toUpperCase()}
+                            <span class="seg-id">{roleHex(r.nodeId)}</span>
+                        </button>
+                    {/each}
+                    <button
+                        type="button"
+                        class="seg"
+                        class:active={showCustomNode}
+                        aria-pressed={showCustomNode}
+                        onclick={enableCustomNode}
+                    >
+                        Custom
+                    </button>
+                </div>
+                {#if showCustomNode}
+                    <input
+                        class="input mono node-custom"
+                        type="number"
+                        min="0"
+                        max="15"
+                        aria-label="Custom node id (0–0xF)"
+                        bind:value={settings.adapter.nodeId}
+                    />
+                {/if}
+            </div>
+            <p class="hint">
+                Which board you're flashing — the host aims the
+                reboot-to-bootloader trigger at this node, and the ECU and
+                AMS use different magic, so the role must match the board.
+            </p>
+        </div>
+
+        <div class="row-two">
             <div class="field">
                 <label for="bitrate">Bitrate (bps)</label>
                 <input
@@ -448,17 +519,6 @@
                     max="1000000"
                     step="1000"
                     bind:value={settings.adapter.bitrate}
-                />
-            </div>
-            <div class="field">
-                <label for="nodeId">Node ID (0–0xF)</label>
-                <input
-                    id="nodeId"
-                    class="input mono"
-                    type="number"
-                    min="0"
-                    max="15"
-                    bind:value={settings.adapter.nodeId}
                 />
             </div>
             <div class="field">
@@ -749,18 +809,44 @@
         flex: 1;
     }
 
-    /* Three-up grid for bitrate / node-id / timeout. Drops to a
-       single column at narrow widths so the sidebar-collapsed
-       layout doesn't squish the inputs. */
-    .row-three {
+    /* Two-up grid for bitrate / timeout. Drops to a single column at
+       narrow widths so the sidebar-collapsed layout doesn't squish the
+       inputs. (Node-id moved up into the Target-role picker.) */
+    .row-two {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
         gap: var(--space-3);
     }
     @media (max-width: 720px) {
-        .row-three {
+        .row-two {
             grid-template-columns: 1fr;
         }
+    }
+
+    /* Target-role picker — the role segmented control plus the raw
+       node-id field that only appears in Custom mode. */
+    .role-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-2);
+    }
+    .role-row .segmented {
+        flex-wrap: wrap;
+    }
+    /* Dim hex under each role name so the number is present but the
+       role reads first. */
+    .seg-id {
+        margin-left: var(--space-1);
+        font-family: var(--font-mono);
+        font-size: var(--text-sm);
+        opacity: 0.65;
+    }
+    .seg.active .seg-id {
+        opacity: 0.8;
+    }
+    .node-custom {
+        width: 6rem;
     }
 
     /* Per-run options — wrapping row of checkboxes. The .toggle
