@@ -112,14 +112,10 @@
         border-bottom: 1px solid var(--border);
     }
 
-    /* Logo art ships with its own deep-green background; round its
-       corners into a tile and give it a hairline so it reads as a badge
-       against the lighter green sidebar. */
     .brand img {
         width: 36px;
         height: 36px;
         border-radius: var(--radius-lg);
-        box-shadow: inset 0 0 0 1px var(--border);
     }
 
     .brand-text h1 {
