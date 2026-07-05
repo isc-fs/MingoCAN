@@ -39,6 +39,10 @@ import {
 import { getOutputChannel, showOutputChannel } from './output';
 import { currentSnapshot } from './adapterPresence';
 import { setFlashBusy, setFlashIdle } from './statusBar';
+import {
+    clearBuildDiagnostics,
+    publishBuildDiagnostics,
+} from './buildDiagnostics';
 
 export interface FlashOptions {
     /** When true, skip the configured build command. */
@@ -180,12 +184,18 @@ export async function runFlash(options: FlashOptions): Promise<void> {
                     // an action to jump to `iscFs.buildCommand` in
                     // case the default isn't right for this project.
                     showOutputChannel();
+                    const showProblems = 'Show Problems';
                     const change = 'Change build command';
                     const choice = await vscode.window.showErrorMessage(
-                        'ISC MingoCAN: build failed. See the ISC MingoCAN output channel for details.',
+                        'ISC MingoCAN: build failed. Compile errors are in the Problems panel; full output is in the ISC MingoCAN channel.',
+                        showProblems,
                         change,
                     );
-                    if (choice === change) {
+                    if (choice === showProblems) {
+                        await vscode.commands.executeCommand(
+                            'workbench.actions.view.problems',
+                        );
+                    } else if (choice === change) {
                         await vscode.commands.executeCommand(
                             'workbench.action.openSettings',
                             'iscFs.buildCommand',
@@ -352,6 +362,10 @@ async function runBuildStep(
     out.appendLine('');
     out.appendLine(`---- build ${new Date().toISOString()} ----`);
 
+    // Fresh run — drop the previous build's Problems so stale errors
+    // don't linger after a fix.
+    clearBuildDiagnostics();
+
     // Spawn through the user's shell so the configured command can
     // contain pipes / chained commands / quoted args without us
     // having to parse it. `/bin/sh -c` is fine for the team's
@@ -360,19 +374,38 @@ async function runBuildStep(
     const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
     const shellArgs = process.platform === 'win32' ? ['/c', command] : ['-c', command];
 
+    // Accumulate every output line so we can parse gcc/clang
+    // diagnostics into the Problems panel once the build finishes.
+    // Compilers emit errors on both stdout and stderr depending on the
+    // toolchain, so we harvest both streams.
+    const buildLines: string[] = [];
     const result = await spawnCommand(shell, shellArgs, {
         cwd,
         cancellation: token,
-        onStdoutLine: (line) => out.appendLine(line),
-        onStderrLine: (line) => out.appendLine(line),
+        onStdoutLine: (line) => {
+            out.appendLine(line);
+            buildLines.push(line);
+        },
+        onStderrLine: (line) => {
+            out.appendLine(line);
+            buildLines.push(line);
+        },
     });
+
+    // Publish diagnostics regardless of exit code — a build can succeed
+    // with warnings worth surfacing, and a failing build's errors are
+    // exactly what the operator needs clickable.
+    const errorCount = publishBuildDiagnostics(buildLines, cwd);
 
     if (result.cancelled) {
         out.appendLine('[cancelled] build interrupted by user');
         return false;
     }
     if (result.exitCode !== 0) {
-        out.appendLine(`[error] build exited with code ${result.exitCode}`);
+        out.appendLine(
+            `[error] build exited with code ${result.exitCode}` +
+                (errorCount > 0 ? ` (${errorCount} error(s) in Problems)` : ''),
+        );
         return false;
     }
     return true;

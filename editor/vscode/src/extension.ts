@@ -26,6 +26,7 @@ import {
 } from './cliPath';
 import { cliVersion, ensureManagedCli } from './cliManager';
 import { readConfig } from './config';
+import { initBuildDiagnostics } from './buildDiagnostics';
 import { runClearDtcs, runHealth, runReadDtcs } from './diagnose';
 import { runDoctor } from './doctor';
 import { initFlash, runFlash, runReflashLast } from './flash';
@@ -54,6 +55,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // Let the flash module remember the last artifact + node-id (for
     // `iscFs.reflashLast`) across runs and window reloads.
     initFlash(context.workspaceState);
+
+    // Build-output → Problems panel: create the diagnostic collection
+    // the build step publishes gcc/clang errors into.
+    initBuildDiagnostics(context);
 
     // ---- Tier A (flash) ----
     context.subscriptions.push(
