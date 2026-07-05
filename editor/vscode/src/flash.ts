@@ -38,6 +38,12 @@ import {
 } from './cli';
 import { getOutputChannel, showOutputChannel } from './output';
 import { currentSnapshot } from './adapterPresence';
+import { setFlashBusy, setFlashIdle } from './statusBar';
+import {
+    clearBuildDiagnostics,
+    publishBuildDiagnostics,
+} from './buildDiagnostics';
+import { runReadback } from './readback';
 
 export interface FlashOptions {
     /** When true, skip the configured build command. */
@@ -151,6 +157,12 @@ export async function runFlash(options: FlashOptions): Promise<void> {
         }
     }
 
+    // Mirror the flash lifecycle onto the status-bar Flash item (spinner
+    // + terse stage) so progress is visible even when the notification
+    // toast isn't focused. The `finally` guarantees the label resets to
+    // "Build + Flash" no matter which stage returns/throws.
+    setFlashBusy('Starting…');
+    try {
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
@@ -161,6 +173,7 @@ export async function runFlash(options: FlashOptions): Promise<void> {
             // Stage 1: build
             if (!options.skipBuild && cfg.buildCommand.trim().length > 0) {
                 progress.report({ message: 'building…' });
+                setFlashBusy('Building…');
                 const buildOk = await runBuildStep(cfg.buildCommand, cwd, token);
                 if (token.isCancellationRequested) {
                     return;
@@ -172,12 +185,18 @@ export async function runFlash(options: FlashOptions): Promise<void> {
                     // an action to jump to `iscFs.buildCommand` in
                     // case the default isn't right for this project.
                     showOutputChannel();
+                    const showProblems = 'Show Problems';
                     const change = 'Change build command';
                     const choice = await vscode.window.showErrorMessage(
-                        'ISC MingoCAN: build failed. See the ISC MingoCAN output channel for details.',
+                        'ISC MingoCAN: build failed. Compile errors are in the Problems panel; full output is in the ISC MingoCAN channel.',
+                        showProblems,
                         change,
                     );
-                    if (choice === change) {
+                    if (choice === showProblems) {
+                        await vscode.commands.executeCommand(
+                            'workbench.actions.view.problems',
+                        );
+                    } else if (choice === change) {
                         await vscode.commands.executeCommand(
                             'workbench.action.openSettings',
                             'iscFs.buildCommand',
@@ -223,6 +242,7 @@ export async function runFlash(options: FlashOptions): Promise<void> {
                 out.appendLine(`[info] re-flashing ${artifact}`);
             } else {
                 progress.report({ message: 'resolving artifact…' });
+                setFlashBusy('Resolving…');
                 artifact = await resolveArtifact(cfg.firmwareArtifact, cwd);
             }
             if (artifact === null) {
@@ -231,9 +251,13 @@ export async function runFlash(options: FlashOptions): Promise<void> {
 
             // Stage 3: flash
             progress.report({ message: 'opening session…' });
+            setFlashBusy('Opening…');
             await runFlashStep(cfg, artifact, cwd, progress, token);
         },
     );
+    } finally {
+        setFlashIdle();
+    }
 }
 
 // ---- Node-id prompt ----
@@ -339,6 +363,10 @@ async function runBuildStep(
     out.appendLine('');
     out.appendLine(`---- build ${new Date().toISOString()} ----`);
 
+    // Fresh run — drop the previous build's Problems so stale errors
+    // don't linger after a fix.
+    clearBuildDiagnostics();
+
     // Spawn through the user's shell so the configured command can
     // contain pipes / chained commands / quoted args without us
     // having to parse it. `/bin/sh -c` is fine for the team's
@@ -347,19 +375,38 @@ async function runBuildStep(
     const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
     const shellArgs = process.platform === 'win32' ? ['/c', command] : ['-c', command];
 
+    // Accumulate every output line so we can parse gcc/clang
+    // diagnostics into the Problems panel once the build finishes.
+    // Compilers emit errors on both stdout and stderr depending on the
+    // toolchain, so we harvest both streams.
+    const buildLines: string[] = [];
     const result = await spawnCommand(shell, shellArgs, {
         cwd,
         cancellation: token,
-        onStdoutLine: (line) => out.appendLine(line),
-        onStderrLine: (line) => out.appendLine(line),
+        onStdoutLine: (line) => {
+            out.appendLine(line);
+            buildLines.push(line);
+        },
+        onStderrLine: (line) => {
+            out.appendLine(line);
+            buildLines.push(line);
+        },
     });
+
+    // Publish diagnostics regardless of exit code — a build can succeed
+    // with warnings worth surfacing, and a failing build's errors are
+    // exactly what the operator needs clickable.
+    const errorCount = publishBuildDiagnostics(buildLines, cwd);
 
     if (result.cancelled) {
         out.appendLine('[cancelled] build interrupted by user');
         return false;
     }
     if (result.exitCode !== 0) {
-        out.appendLine(`[error] build exited with code ${result.exitCode}`);
+        out.appendLine(
+            `[error] build exited with code ${result.exitCode}` +
+                (errorCount > 0 ? ` (${errorCount} error(s) in Problems)` : ''),
+        );
         return false;
     }
     return true;
@@ -522,6 +569,7 @@ async function runFlashStep(
             if (ev !== null) {
                 events.push(ev);
                 progress.report({ message: progressMessage(ev) });
+                setFlashBusy(flashStageShort(ev));
             }
         },
         onStderrLine: (line) => out.appendLine(line),
@@ -536,6 +584,11 @@ async function runFlashStep(
     if (result.exitCode === 0) {
         const report = parseFlashReport(result.stdout);
         announceSuccess(report, artifactPath);
+        // Post-flash readback: resolve the flashed image's git-hash
+        // against the workspace (did I flash HEAD?), and — when the board
+        // stayed in the bootloader (`--no-jump`) — re-read its reported
+        // hash to confirm the identity. Best-effort; never fails the flash.
+        await runReadback(cfg, cwd, report, cfg.jumpAfterFlash);
         // Remember this flash so `iscFs.reflashLast` can repeat it with
         // no build and no prompts.
         void flashMemento?.update(LAST_FLASH_KEY, {
@@ -593,6 +646,28 @@ function progressMessage(ev: FlashEvent): string {
             return 'committing';
         case 'done':
             return `done in ${ev.duration_ms} ms`;
+    }
+}
+
+/** Terse one- or two-word stage label for the status-bar Flash item —
+ *  the notification toast carries the detailed `progressMessage`; the
+ *  status bar just needs the current phase at a glance. */
+function flashStageShort(ev: FlashEvent): string {
+    switch (ev.event) {
+        case 'planning':
+            return 'Planning…';
+        case 'erased':
+            return `Erasing s${ev.sector}`;
+        case 'written': {
+            const pct = ev.total === 0 ? 0 : Math.floor((ev.bytes * 100) / ev.total);
+            return `Writing s${ev.sector} ${pct}%`;
+        }
+        case 'verified':
+            return `Verifying s${ev.sector}`;
+        case 'committing':
+            return 'Committing…';
+        case 'done':
+            return 'Done ✓';
     }
 }
 
