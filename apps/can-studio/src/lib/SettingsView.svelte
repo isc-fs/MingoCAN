@@ -31,6 +31,7 @@
         unloadDbc,
         type DbcSummary,
     } from './dbc';
+    import { readRepoFlashConfig, type RepoFlashConfig } from './flash';
     import NodeIdRolePicker from './NodeIdRolePicker.svelte';
 
     interface Props {
@@ -46,6 +47,30 @@
     );
 
     let canFlasherVersion = $state<string>('…');
+
+    // When the Build working directory points at a repo that commits its
+    // flasher config to `.vscode/settings.json` (the same iscFs.* keys the
+    // VS Code extension reads), those values drive the build/flash and
+    // override the fields below. Surface that so it's not a surprise.
+    let repoFlashConfig = $state<RepoFlashConfig | null>(null);
+    $effect(() => {
+        const cwd = settings.flash.buildCwd.trim();
+        if (cwd.length === 0) {
+            repoFlashConfig = null;
+            return;
+        }
+        let cancelled = false;
+        readRepoFlashConfig(cwd)
+            .then((cfg) => {
+                if (!cancelled) repoFlashConfig = cfg;
+            })
+            .catch(() => {
+                if (!cancelled) repoFlashConfig = null;
+            });
+        return () => {
+            cancelled = true;
+        };
+    });
 
     // App version + manual update check (the launch check + banner
     // live in App.svelte; this is the "check now" path from Settings).
@@ -280,6 +305,20 @@
             choice on the Flash tab substitutes <code>{'{profile}'}</code> below
             (as <code>Release</code> / <code>Debug</code>) — set this once.
         </p>
+        {#if repoFlashConfig && (repoFlashConfig.buildCommand || repoFlashConfig.artifactPath)}
+            <p class="repo-config-note small">
+                ✓ Using committed config from
+                <code>{repoFlashConfig.source}</code>. The Build directory's
+                repo defines
+                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && repoFlashConfig.artifactPath}
+                    and {/if}{#if repoFlashConfig.artifactPath}<code
+                        >firmwareArtifact</code
+                    >{/if}
+                — used when flashing, so every developer builds this repo the
+                same way with no local setup. (The target board stays your
+                explicit choice on the Flash tab.)
+            </p>
+        {/if}
         <div class="field">
             <label for="buildCommand">Build command</label>
             <input
@@ -443,6 +482,21 @@
 
     .section-hint {
         margin: 0 0 var(--space-3);
+    }
+
+    /* Repo-config banner: signals that a committed .vscode/settings.json
+       is the source of truth, so the fields below are informational. */
+    .repo-config-note {
+        margin: 0 0 var(--space-3);
+        padding: var(--space-2) var(--space-3);
+        border: 1px solid var(--color-success, #2e7d32);
+        border-radius: var(--radius-2, 6px);
+        background: color-mix(
+            in srgb,
+            var(--color-success, #2e7d32) 8%,
+            transparent
+        );
+        line-height: 1.5;
     }
 
     /* Non-interactive field caption — same muted look a `.field > label`

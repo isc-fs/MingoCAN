@@ -378,6 +378,139 @@ pub fn read_cmake_presets(cwd: String) -> Result<Vec<CmakePresetInfo>, String> {
     Ok(out)
 }
 
+// ---- Committed per-repo flash config (`.vscode/settings.json`) ----
+
+/// The flash-relevant keys the VS Code extension reads from a repo's
+/// committed `.vscode/settings.json`. Surfacing the same values in the
+/// desktop app means a developer only points the app at the firmware
+/// folder — build command, artifact path and node-id come from the repo,
+/// exactly like the extension, with zero per-machine setup.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFlashConfig {
+    /// `iscFs.buildCommand` — verbatim, as the extension runs it.
+    pub build_command: Option<String>,
+    /// `iscFs.firmwareArtifact`, resolved to an absolute path against the
+    /// repo root so the flash backend can load it directly. Null when the
+    /// key is absent.
+    pub artifact_path: Option<String>,
+    /// `iscFs.nodeId` as written (e.g. `"0x1"`); the frontend parses it.
+    pub node_id: Option<String>,
+    /// Absolute path of the `.vscode/settings.json` we read, for the UI
+    /// to show where the values came from.
+    pub source: String,
+}
+
+/// Read a repo's committed `.vscode/settings.json` and pull out the
+/// `iscFs.*` flash keys. Returns `Ok(None)` when there's no such file or
+/// it declares none of the keys — the caller then falls back to the app's
+/// own stored settings. VS Code settings files are JSONC (they allow
+/// comments), so we strip comments before parsing.
+#[tauri::command]
+pub fn read_repo_flash_config(cwd: String) -> Result<Option<RepoFlashConfig>, String> {
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return Ok(None);
+    }
+    let root = PathBuf::from(cwd);
+    let path = root.join(".vscode").join("settings.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read settings.json: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(&strip_jsonc_comments(&raw))
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+
+    let get_str = |key: &str| {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+
+    let build_command = get_str("iscFs.buildCommand");
+    let node_id = get_str("iscFs.nodeId");
+    // Resolve the artifact against the repo root when it's relative — the
+    // committed value (e.g. `build-fw/ECU08.elf`) is repo-relative, but
+    // the flash backend loads an absolute/process-relative path.
+    let artifact_path = get_str("iscFs.firmwareArtifact").map(|a| {
+        let p = PathBuf::from(&a);
+        if p.is_absolute() {
+            a
+        } else {
+            root.join(p).to_string_lossy().into_owned()
+        }
+    });
+
+    if build_command.is_none() && artifact_path.is_none() && node_id.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(RepoFlashConfig {
+        build_command,
+        artifact_path,
+        node_id,
+        source: path.to_string_lossy().into_owned(),
+    }))
+}
+
+/// Strip `//` line comments and `/* … */` block comments from a JSONC
+/// string so `serde_json` (strict JSON) can parse it. String literals are
+/// respected — a `//` or `/*` inside `"…"` is left untouched — and escaped
+/// quotes inside strings are handled. Trailing commas are NOT stripped;
+/// VS Code tolerates them but the committed files don't use them, and a
+/// full JSONC parser would be overkill here.
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                // Line comment: consume to end of line (keep the newline).
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                // Block comment: consume until the closing `*/`.
+                chars.next(); // eat '*'
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Walk the `inherits` chain to recover a configure preset's
 /// `binaryDir`. Returns None if it's not declared anywhere in the
 /// chain. We don't fully expand CMake's `${sourceDir}` /
@@ -556,5 +689,71 @@ pub(crate) fn parse_interface(s: &str) -> Result<InterfaceType, String> {
         "vector" => Ok(InterfaceType::Vector),
         "virtual" => Ok(InterfaceType::Virtual),
         other => Err(format!("unknown interface: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonc_strips_line_and_block_comments() {
+        let src = r#"{
+            // leading line comment
+            "a": 1, /* inline block */ "b": 2,
+            "url": "http://not-a-comment", // trailing
+            /* multi
+               line */
+            "c": "with // slashes and /* stars */ inside"
+        }"#;
+        let json: serde_json::Value = serde_json::from_str(&strip_jsonc_comments(src)).unwrap();
+        assert_eq!(json["a"], 1);
+        assert_eq!(json["b"], 2);
+        assert_eq!(json["url"], "http://not-a-comment");
+        assert_eq!(json["c"], "with // slashes and /* stars */ inside");
+    }
+
+    #[test]
+    fn repo_config_reads_iscfs_keys_and_resolves_artifact() {
+        let dir = std::env::temp_dir().join(format!("mingocan-cfgtest-{}", std::process::id()));
+        let vscode = dir.join(".vscode");
+        std::fs::create_dir_all(&vscode).unwrap();
+        std::fs::write(
+            vscode.join("settings.json"),
+            r#"{
+                // committed flasher config
+                "iscFs.nodeId": "0x1",
+                "iscFs.buildCommand": "cmake -S firmware -B build-fw && cmake --build build-fw",
+                "iscFs.firmwareArtifact": "build-fw/ECU08.elf"
+            }"#,
+        )
+        .unwrap();
+
+        let cfg = read_repo_flash_config(dir.to_string_lossy().into_owned())
+            .unwrap()
+            .expect("config present");
+        assert_eq!(cfg.node_id.as_deref(), Some("0x1"));
+        assert_eq!(
+            cfg.build_command.as_deref(),
+            Some("cmake -S firmware -B build-fw && cmake --build build-fw")
+        );
+        // Relative artifact resolved against the repo root → absolute.
+        let expected = dir
+            .join("build-fw/ECU08.elf")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(cfg.artifact_path.as_deref(), Some(expected.as_str()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn repo_config_absent_returns_none() {
+        let dir = std::env::temp_dir().join(format!("mingocan-nocfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_repo_flash_config(dir.to_string_lossy().into_owned())
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
