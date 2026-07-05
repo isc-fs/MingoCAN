@@ -271,9 +271,9 @@
     "views": {
       "iscFsMingoCAN": [
         {
-          "type": "webview",
           "id": "iscFs.tools",
           "name": "Tools",
+          "icon": "$(tools)",
           "contextualTitle": "ISC MingoCAN"
         },
         {

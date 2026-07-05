@@ -35,7 +35,7 @@ import { applyAdapter, selectAdapter } from './picker';
 import { fetchAdapters, type AdapterEntry } from './adapters';
 import { registerStatusBarItem, setCliInfo } from './statusBar';
 import { ToolsPanel } from './toolsPanel';
-import { ToolsViewProvider } from './toolsView';
+import { ToolsTreeProvider } from './toolsTree';
 import { DeviceTreeProvider, type IscFsTreeNode } from './tree';
 import { getOutputChannel, showOutputChannel } from './output';
 import { formatNodeId } from './discover';
@@ -165,18 +165,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ---- Tools view (activity-bar sidebar) ----
     //
-    // Same shape as PlatformIO's left-rail panel: the MingoCAN
-    // activity-bar icon reveals a sidebar with two views — the
-    // Tools webview (one-click access to every action) and the
-    // Devices tree (live discovery). This is the canonical surface
-    // from v2.3.4 onward.
-    const toolsView = new ToolsViewProvider(context);
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(
-            ToolsViewProvider.viewType,
-            toolsView,
-        ),
-    );
+    // Same shape as PlatformIO's left-rail QuickAccess: the MingoCAN
+    // activity-bar icon reveals a sidebar with two views — the Tools
+    // tree (one-click access to every action, grouped Flash / Devices /
+    // Diagnostics) and the Devices tree (live discovery). Native
+    // TreeView, so it's themed + keyboard-navigable with no webview /
+    // CSP / postMessage surface to maintain.
+    new ToolsTreeProvider().register(context);
 
     // ---- Legacy "Open tools panel" command ----
     //
