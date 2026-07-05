@@ -30,17 +30,17 @@
        --bg-soft + --surface-elev are aliases kept for back-compat
        with views that still reference them. New code should not
        use them. */
-    /* British Racing Green ground (#004225 = rgb 0 66 37) — a deep, pure
-       green. Surfaces step *lighter* off it (racing-green family) so
-       cards + the sidebar still read as raised, the way the old
-       greyscale did; the accent yellow pops hard on the deep green. */
-    --bg: #004225;
-    --surface: #0b4e2e;
-    --hover: #135a37;
-    --border: #1c6641;
-    --border-strong: #2c7c53;
-    --code-bg: #003019;
-    --bg-soft: #003a20; /* input fills — recessed inside a card */
+    /* Deep British Racing Green ground (#00301b = rgb 0 48 27) — a dark,
+       pure racing green. Surfaces step *lighter* off it (racing-green
+       family) so cards + the sidebar still read as raised, the way the
+       old greyscale did; the accent yellow pops hard on the deep green. */
+    --bg: #00301b;
+    --surface: #073c24;
+    --hover: #0e472c;
+    --border: #175334;
+    --border-strong: #276845;
+    --code-bg: #002012;
+    --bg-soft: #002816; /* input fills — recessed inside a card */
     --surface-elev: var(--surface);
 
     /* Text ramp — primary, secondary, muted (for body hints — not
