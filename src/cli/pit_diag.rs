@@ -1,11 +1,12 @@
 //! `cf pit-diag` — terminal-side pit-diag observer (AMS + ECU).
 //!
-//! Three subcommands:
+//! Four subcommands:
 //!
 //! ```text
 //! cf pit-diag enable                 # arm the stream
 //! cf pit-diag disable                # disarm the stream
 //! cf pit-diag stream [--json]        # arm + stream + disarm-on-exit
+//! cf pit-diag listen [--json]        # passive: decode ungated frames, never arm
 //! ```
 //!
 //! Wraps the `pit_diag` library module (handshake + decoders) with a
@@ -100,6 +101,19 @@ pub enum PitDiagCommand {
     ///   - Schema drift (frames/scan
     ///     diverges from expected 58)   → exit non-zero
     Stream(StreamArgs),
+
+    /// Passively decode the stream to stdout WITHOUT arming.
+    ///
+    /// Unlike `stream`, this never sends the `0x7E0`/`0x7F0` arm frame —
+    /// it only receives. It exists for the frames a board broadcasts
+    /// ungated: the ECU app emits `0x704` health at 1 Hz with no arm
+    /// required (task-liveness bits, reset_cause, last_fault, uptime,
+    /// heap). Because it's send-silent it's safe to run against a live
+    /// car, and it answers "is this board's app alive?" the instant the
+    /// board powers up. `--json` emits the same NDJSON as `stream`
+    /// (`ecuHealth`/…), so the same consumer parses either. Exits on
+    /// `--duration-ms`, Ctrl-C, or bus error.
+    Listen(ListenArgs),
 }
 
 #[derive(Debug, Args)]
@@ -129,6 +143,21 @@ pub struct StreamArgs {
     pub strict_scan: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct ListenArgs {
+    /// Which board's frames to decode: `ecu` (0x700–0x706) or `ams`.
+    /// Defaults to `ecu` — the ungated 0x704 health frame is the whole
+    /// point of a passive listen.
+    #[arg(long, default_value = "ecu")]
+    pub profile: String,
+
+    /// Stop after this many milliseconds. Omit to listen until Ctrl-C
+    /// (the mode a live health indicator uses). A one-shot presence
+    /// probe wants ~1500 ms — long enough to catch a 1 Hz health frame.
+    #[arg(long)]
+    pub duration_ms: Option<u64>,
+}
+
 // ---- Dispatch ---------------------------------------------------
 
 pub async fn run(args: PitDiagArgs, global: &GlobalFlags) -> Result<()> {
@@ -136,6 +165,7 @@ pub async fn run(args: PitDiagArgs, global: &GlobalFlags) -> Result<()> {
         PitDiagCommand::Enable(a) => run_enable(a, global).await,
         PitDiagCommand::Disable(a) => run_disable(a, global).await,
         PitDiagCommand::Stream(a) => run_stream(a, global).await,
+        PitDiagCommand::Listen(a) => run_listen(a, global).await,
     }
 }
 
@@ -211,6 +241,86 @@ async fn run_stream(args: StreamArgs, global: &GlobalFlags) -> Result<()> {
 
     loop_result?;
     Ok(())
+}
+
+// ---- listen (passive) -------------------------------------------
+
+async fn run_listen(args: ListenArgs, global: &GlobalFlags) -> Result<()> {
+    let profile = parse_profile(&args.profile)?;
+    let backend = open(global)?;
+
+    // No arm — this path is deliberately send-silent so it can run
+    // against a live car without perturbing it.
+    if !global.json {
+        eprintln!("• {} pit-diag passive listen (no arm)…", args.profile);
+    }
+
+    let started = Instant::now();
+    let duration = args.duration_ms.map(Duration::from_millis);
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            if !global.json {
+                eprintln!("\n— Ctrl-C —");
+            }
+            Ok(())
+        }
+        result = listen_loop(&*backend, profile, started, duration, global.json) => result,
+    }
+}
+
+/// Inner passive-listen loop — decodes received frames until duration /
+/// bus error, without ever transmitting. Mirrors `stream_loop`'s decode
+/// dispatch minus the arm-dependent scan-rate accounting (a passive
+/// listener sees only whatever the board broadcasts ungated, so a
+/// per-scan frame count is meaningless). Ctrl-C is handled one level up.
+async fn listen_loop(
+    backend: &dyn CanBackend,
+    profile: Profile,
+    started: Instant,
+    duration: Option<Duration>,
+    json: bool,
+) -> Result<()> {
+    loop {
+        if let Some(d) = duration {
+            if started.elapsed() >= d {
+                return Ok(());
+            }
+        }
+
+        match backend.recv(POLL_TIMEOUT).await {
+            Ok(frame) => {
+                let ts_ms = started.elapsed().as_millis() as u64;
+                match profile {
+                    Profile::Ams => {
+                        if let Some(record) = decode_frame(&frame) {
+                            if json {
+                                print_record_json(ts_ms, &record);
+                            } else {
+                                print_record_human(ts_ms, &record);
+                            }
+                        }
+                    }
+                    Profile::Ecu => {
+                        if let Some(record) = ecu::decode_frame(&frame) {
+                            if json {
+                                print_ecu_json(ts_ms, &record);
+                            } else {
+                                print_ecu_human(ts_ms, &record);
+                            }
+                        }
+                    }
+                }
+                // Non-pit-diag frames are silently dropped.
+            }
+            Err(TransportError::Timeout(_)) => {
+                // Expected between broadcasts — keep polling.
+            }
+            Err(err) => {
+                return Err(anyhow!("bus error: {err}"));
+            }
+        }
+    }
 }
 
 /// Inner stream loop — reads frames until duration / strict-scan
@@ -790,5 +900,42 @@ mod tests {
         let err = parse_profile("udv").unwrap_err().to_string();
         assert!(err.contains("udv"), "message names the bad profile: {err}");
         assert!(parse_profile("").is_err());
+    }
+
+    // Wrap the subcommand enum so clap can parse it standalone in-test.
+    #[derive(clap::Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        cmd: super::PitDiagCommand,
+    }
+
+    #[test]
+    fn listen_defaults_to_ecu_until_ctrl_c() {
+        use clap::Parser;
+        let cli = TestCli::try_parse_from(["x", "listen"]).unwrap();
+        match cli.cmd {
+            super::PitDiagCommand::Listen(a) => {
+                // ecu is the default because 0x704 is the ungated frame.
+                assert_eq!(a.profile, "ecu");
+                // No duration → listen until Ctrl-C (health-light mode).
+                assert_eq!(a.duration_ms, None);
+            }
+            _ => panic!("expected Listen"),
+        }
+    }
+
+    #[test]
+    fn listen_accepts_profile_and_duration() {
+        use clap::Parser;
+        let cli =
+            TestCli::try_parse_from(["x", "listen", "--profile", "ams", "--duration-ms", "1500"])
+                .unwrap();
+        match cli.cmd {
+            super::PitDiagCommand::Listen(a) => {
+                assert_eq!(a.profile, "ams");
+                assert_eq!(a.duration_ms, Some(1500));
+            }
+            _ => panic!("expected Listen"),
+        }
     }
 }
