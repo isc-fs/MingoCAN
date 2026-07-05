@@ -24,6 +24,7 @@ import { readConfig } from './config';
 let adapterItem: vscode.StatusBarItem | undefined;
 let flashItem: vscode.StatusBarItem | undefined;
 let toolsItem: vscode.StatusBarItem | undefined;
+let healthItem: vscode.StatusBarItem | undefined;
 
 const FLASH_TOOLTIP_BASE =
     'Run `iscFs.buildCommand` (default `cmake --build build`) and then flash ' +
@@ -51,6 +52,46 @@ export function setFlashIdle(): void {
     if (flashItem !== undefined) {
         flashItem.text = FLASH_IDLE_TEXT;
     }
+}
+
+/** The board-health picture as of the last passive listen (refresh).
+ *  `null` hides the light (nothing heard / never refreshed). */
+export interface HealthLight {
+    /** Board label, e.g. "ECU". */
+    role: string;
+    level: 'ok' | 'warn';
+    /** Extra context for the tooltip (fw/uptime, or the warn reasons). */
+    detail: string;
+}
+
+/**
+ * Update the passive board-health traffic-light. Driven off the tree
+ * refresh's `pit-diag listen` window — NOT a continuous poll, because a
+ * single CAN adapter can't be held open by a health listener and be free
+ * to flash at the same time. So this shows the app's health *as of the
+ * last discover*; clicking it re-listens. `undefined` hides it (no app
+ * board heard). No-op before the item is registered.
+ */
+export function setHealthLight(light: HealthLight | undefined): void {
+    if (healthItem === undefined) {
+        return;
+    }
+    if (light === undefined) {
+        healthItem.hide();
+        return;
+    }
+    if (light.level === 'warn') {
+        healthItem.text = `$(error) ${light.role}`;
+        healthItem.tooltip = `${light.role} app unhealthy — ${light.detail}\nClick to re-check.`;
+        healthItem.backgroundColor = new vscode.ThemeColor(
+            'statusBarItem.errorBackground',
+        );
+    } else {
+        healthItem.text = `$(pulse) ${light.role}`;
+        healthItem.tooltip = `${light.role} app healthy — ${light.detail}\nClick to re-check.`;
+        healthItem.backgroundColor = undefined;
+    }
+    healthItem.show();
 }
 
 /**
@@ -105,6 +146,13 @@ export function registerStatusBarItem(context: vscode.ExtensionContext): void {
     toolsItem.tooltip = 'Reveal the ISC MingoCAN tools sidebar';
     toolsItem.show();
     context.subscriptions.push(toolsItem);
+
+    // Board-health traffic-light — hidden until a refresh hears an
+    // app-mode board's 0x704. Click to re-listen. Rightmost of the group.
+    healthItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 47);
+    healthItem.command = 'iscFs.refreshDevices';
+    healthItem.name = 'ISC MingoCAN: board health';
+    context.subscriptions.push(healthItem);
 
     updateAdapterPill(currentSnapshot());
 
