@@ -39,15 +39,15 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use can_flasher::pit_diag::ecu::{
-    self, EcuBrakeFrame, EcuFsmState, EcuFwInfoFrame, EcuHealthFrame, EcuInvState,
+    self, EcuBrakeFrame, EcuDvFrame, EcuFsmState, EcuFwInfoFrame, EcuHealthFrame, EcuInvState,
     EcuInverterFrame, EcuInverterTempsFrame, EcuPedalsFrame, EcuPitDiagFrame, EcuResetCause,
     EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::{
-    build_arm_frame, decode_frame, AcuCurrentsFrame, BalanceMaskAFrame, BalanceMaskBFrame,
-    BootDiagFrame, CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame, FwIdFrame, JumpReason,
-    ModeLock, NtcTempFrame, PackFrame, PerIcPecFrame, PitDiagFrame, PollTimingFrame,
-    RelayStatusFrame, AMS_ACK_ID,
+    build_arm_frame, decode_frame, AcuCurrentsFrame, AmsHealthFrame, BalanceMaskAFrame,
+    BalanceMaskBFrame, BootDiagFrame, CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame,
+    FwIdFrame, JumpReason, ModeLock, NtcTempFrame, PackFrame, PerIcPecFrame, PitDiagFrame,
+    PollTimingFrame, RelayStatusFrame, AMS_ACK_ID,
 };
 use can_flasher::protocol::CanFrame;
 use can_flasher::transport::open_backend;
@@ -401,6 +401,7 @@ pub enum PitDiagEvent {
         rtds_active: bool,
         ok_precharge: bool,
         start_button: bool,
+        dv_mode: bool,
         torque_pct: u8,
         v_cell_min_mv: u16,
         torque_cmd: i16,
@@ -450,6 +451,30 @@ pub enum PitDiagEvent {
         uptime_s: u8,
         last_fault: u8,
         last_fault_name: String,
+    },
+    /// ECU `0x707` — DV (driverless) integration view (#109). The `dv_mode`
+    /// latch itself rides `EcuStatus`; this carries the handshake around it.
+    EcuDv {
+        dv_r2d_req: bool,
+        dv_cmd_fresh: bool,
+        ts_active: bool,
+        brake_over_limit: bool,
+        r2d_confirm: bool,
+        dv_torque_pct: u8,
+        motor_rpm_mech: i16,
+    },
+    /// AMS `0x6CA` — ungated firmware health (#411). Field names mirror
+    /// `EcuHealth` so the frontend renders both boards' health uniformly.
+    AmsHealth {
+        free_heap: u16,
+        min_free_heap: u16,
+        task_control: bool,
+        task_can_rx: bool,
+        task_can_tx: bool,
+        task_diag: bool,
+        reset_cause: String,
+        uptime_s: u8,
+        last_fault: u8,
     },
 }
 
@@ -576,6 +601,30 @@ impl PitDiagEvent {
                 pack_voltage_mv,
                 filtered_ma,
             },
+            // Reuses the ECU reset-cause names (same enum table) + the
+            // ecuHealth-style task field names, so the frontend health
+            // rendering is board-agnostic.
+            PitDiagFrame::Health(AmsHealthFrame {
+                free_heap,
+                min_free_heap,
+                task_main,
+                task_can_rx,
+                task_can_tx,
+                task_housekeeping,
+                reset_cause,
+                uptime_s,
+                last_fault,
+            }) => Self::AmsHealth {
+                free_heap,
+                min_free_heap,
+                task_control: task_main,
+                task_can_rx,
+                task_can_tx,
+                task_diag: task_housekeeping,
+                reset_cause: ecu_reset_cause_name(EcuResetCause::from_byte(reset_cause)),
+                uptime_s,
+                last_fault,
+            },
         }
     }
 
@@ -593,6 +642,7 @@ impl PitDiagEvent {
                 rtds_active,
                 ok_precharge,
                 start_button,
+                dv_mode,
                 torque_pct,
                 v_cell_min_mv,
                 torque_cmd,
@@ -604,6 +654,7 @@ impl PitDiagEvent {
                 rtds_active,
                 ok_precharge,
                 start_button,
+                dv_mode,
                 torque_pct,
                 v_cell_min_mv,
                 torque_cmd,
@@ -680,6 +731,23 @@ impl PitDiagEvent {
                 uptime_s,
                 last_fault,
                 last_fault_name: ecu_last_fault_name(last_fault),
+            },
+            EcuPitDiagFrame::Dv(EcuDvFrame {
+                dv_r2d_req,
+                dv_cmd_fresh,
+                ts_active,
+                brake_over_limit,
+                r2d_confirm,
+                dv_torque_pct,
+                motor_rpm_mech,
+            }) => Self::EcuDv {
+                dv_r2d_req,
+                dv_cmd_fresh,
+                ts_active,
+                brake_over_limit,
+                r2d_confirm,
+                dv_torque_pct,
+                motor_rpm_mech,
             },
         }
     }

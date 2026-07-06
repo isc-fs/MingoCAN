@@ -557,6 +557,36 @@ pub struct PackFrame {
     pub filtered_ma: i32,
 }
 
+/// `0x6CA` — ungated 1 Hz firmware-health frame (IFS08-CE-AMS #411). Emitted
+/// from AcuCanTask regardless of the pit-diag arm state, so a passive listener
+/// (`cf pit-diag listen`) reads AMS liveness the instant the board powers up —
+/// the AMS parity of the ECU's `0x704`. Byte layout mirrors it exactly.
+pub const AMS_FW_HEALTH_ID: u16 = 0x6CA;
+
+/// `0x6CA` — AMS firmware health. Mirrors the ECU `EcuHealthFrame`; the task
+/// bits map the AMS's always-run tasks (main / CAN-RX / CAN-TX / housekeeping).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AmsHealthFrame {
+    /// Current free heap, bytes (big-endian).
+    pub free_heap: u16,
+    /// Minimum free heap ever observed, bytes (big-endian).
+    pub min_free_heap: u16,
+    /// Main / safety task stepped since the previous health frame.
+    pub task_main: bool,
+    /// CAN-RX task stepped.
+    pub task_can_rx: bool,
+    /// CAN-TX task stepped.
+    pub task_can_tx: bool,
+    /// Housekeeping (BMS-poll) task stepped.
+    pub task_housekeeping: bool,
+    /// Reset-cause byte — same enum table as the ECU (0=Unknown…6=LowPower).
+    pub reset_cause: u8,
+    /// Seconds since boot (wraps at 255).
+    pub uptime_s: u8,
+    /// Sticky last-fault sentinel latched across the reset (`0x00` = none).
+    pub last_fault: u8,
+}
+
 /// A decoded pit-diag frame, dispatched by CAN ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PitDiagFrame {
@@ -592,6 +622,8 @@ pub enum PitDiagFrame {
     AcuCurrents(AcuCurrentsFrame),
     /// `0x4A1` — always-on pack voltage + filtered pack current.
     Pack(PackFrame),
+    /// `0x6CA` — ungated firmware health (#411), for passive `listen`.
+    Health(AmsHealthFrame),
 }
 
 // ---- Encode / decode --------------------------------------------
@@ -627,6 +659,26 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
     if id == AMS_ACK_ID {
         let enabled = payload.first().copied().unwrap_or(0) == 0x01;
         return Some(PitDiagFrame::Ack { enabled });
+    }
+
+    // Ungated firmware-health frame (#411) — always-on, no arm required, so
+    // `cf pit-diag listen` sees it passively. Mirrors the ECU 0x704 layout.
+    if id == AMS_FW_HEALTH_ID {
+        if payload.len() < 8 {
+            return None;
+        }
+        let live = payload[4];
+        return Some(PitDiagFrame::Health(AmsHealthFrame {
+            free_heap: u16::from_be_bytes([payload[0], payload[1]]),
+            min_free_heap: u16::from_be_bytes([payload[2], payload[3]]),
+            task_main: (live & 0x01) != 0,
+            task_can_rx: (live & 0x02) != 0,
+            task_can_tx: (live & 0x04) != 0,
+            task_housekeeping: (live & 0x08) != 0,
+            reset_cause: payload[5],
+            uptime_s: payload[6],
+            last_fault: payload[7],
+        }));
     }
 
     // Cell-voltage stream — 24 frames, 4 cells/frame, BE u16 mV.
@@ -901,6 +953,26 @@ mod tests {
             decode_frame(&frame),
             Some(PitDiagFrame::Ack { enabled: true })
         );
+    }
+
+    #[test]
+    fn decodes_ungated_fw_health() {
+        // 0x6CA (#411): free=0x2000, min=0x1000 (BE), live=0b0111
+        // (main+rx+tx, not housekeeping), reset=5 (WWDG), uptime=99, fault=0.
+        let p = [0x20, 0x00, 0x10, 0x00, 0b0111, 5, 99, 0x00];
+        let frame = CanFrame::new(AMS_FW_HEALTH_ID, &p).unwrap();
+        match decode_frame(&frame).unwrap() {
+            PitDiagFrame::Health(h) => {
+                assert_eq!(h.free_heap, 0x2000);
+                assert_eq!(h.min_free_heap, 0x1000);
+                assert!(h.task_main && h.task_can_rx && h.task_can_tx);
+                assert!(!h.task_housekeeping);
+                assert_eq!(h.reset_cause, 5);
+                assert_eq!(h.uptime_s, 99);
+                assert_eq!(h.last_fault, 0);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
     }
 
     #[test]
