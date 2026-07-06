@@ -145,10 +145,11 @@ pub struct StreamArgs {
 
 #[derive(Debug, Args)]
 pub struct ListenArgs {
-    /// Which board's frames to decode: `ecu` (0x700–0x706) or `ams`.
-    /// Defaults to `ecu` — the ungated 0x704 health frame is the whole
-    /// point of a passive listen.
-    #[arg(long, default_value = "ecu")]
+    /// Which board's frames to decode: `ecu` (0x700–0x707), `ams`
+    /// (incl. the ungated 0x6CA health), or `all`/`both` to decode
+    /// whichever is on the bus. Defaults to `all` — a passive listen
+    /// wants to hear any board's ungated health (ECU 0x704 / AMS 0x6CA).
+    #[arg(long, default_value = "all")]
     pub profile: String,
 
     /// Stop after this many milliseconds. Omit to listen until Ctrl-C
@@ -246,7 +247,13 @@ async fn run_stream(args: StreamArgs, global: &GlobalFlags) -> Result<()> {
 // ---- listen (passive) -------------------------------------------
 
 async fn run_listen(args: ListenArgs, global: &GlobalFlags) -> Result<()> {
-    let profile = parse_profile(&args.profile)?;
+    // `None` = decode both boards (the `all`/`both` default); `Some(p)` pins
+    // one. Passive listen is send-silent so decoding everything is free —
+    // ECU IDs (0x7xx) and AMS IDs (0x6xx/0x4xx) never overlap.
+    let decode = match args.profile.to_ascii_lowercase().as_str() {
+        "all" | "both" => None,
+        _ => Some(parse_profile(&args.profile)?),
+    };
     let backend = open(global)?;
 
     // No arm — this path is deliberately send-silent so it can run
@@ -265,7 +272,7 @@ async fn run_listen(args: ListenArgs, global: &GlobalFlags) -> Result<()> {
             }
             Ok(())
         }
-        result = listen_loop(&*backend, profile, started, duration, global.json) => result,
+        result = listen_loop(&*backend, decode, started, duration, global.json) => result,
     }
 }
 
@@ -276,11 +283,13 @@ async fn run_listen(args: ListenArgs, global: &GlobalFlags) -> Result<()> {
 /// per-scan frame count is meaningless). Ctrl-C is handled one level up.
 async fn listen_loop(
     backend: &dyn CanBackend,
-    profile: Profile,
+    decode: Option<Profile>,
     started: Instant,
     duration: Option<Duration>,
     json: bool,
 ) -> Result<()> {
+    let want_ecu = decode != Some(Profile::Ams);
+    let want_ams = decode != Some(Profile::Ecu);
     loop {
         if let Some(d) = duration {
             if started.elapsed() >= d {
@@ -291,23 +300,24 @@ async fn listen_loop(
         match backend.recv(POLL_TIMEOUT).await {
             Ok(frame) => {
                 let ts_ms = started.elapsed().as_millis() as u64;
-                match profile {
-                    Profile::Ams => {
-                        if let Some(record) = decode_frame(&frame) {
-                            if json {
-                                print_record_json(ts_ms, &record);
-                            } else {
-                                print_record_human(ts_ms, &record);
-                            }
+                // Try each enabled decoder; IDs don't overlap, so at most one
+                // matches. Both enabled = the `all` default.
+                if want_ecu {
+                    if let Some(record) = ecu::decode_frame(&frame) {
+                        if json {
+                            print_ecu_json(ts_ms, &record);
+                        } else {
+                            print_ecu_human(ts_ms, &record);
                         }
+                        continue;
                     }
-                    Profile::Ecu => {
-                        if let Some(record) = ecu::decode_frame(&frame) {
-                            if json {
-                                print_ecu_json(ts_ms, &record);
-                            } else {
-                                print_ecu_human(ts_ms, &record);
-                            }
+                }
+                if want_ams {
+                    if let Some(record) = decode_frame(&frame) {
+                        if json {
+                            print_record_json(ts_ms, &record);
+                        } else {
+                            print_record_human(ts_ms, &record);
                         }
                     }
                 }
@@ -546,6 +556,21 @@ fn print_record_human(ts_ms: u64, record: &PitDiagFrame) {
                 f64::from(p.filtered_ma) / 1000.0,
             );
         }
+        PitDiagFrame::Health(h) => {
+            println!(
+                "{prefix} health heap={}/{} tasks[main={} rx={} tx={} hk={}] reset={:?} \
+                 uptime={}s last_fault=0x{:02X}",
+                h.free_heap,
+                h.min_free_heap,
+                h.task_main as u8,
+                h.task_can_rx as u8,
+                h.task_can_tx as u8,
+                h.task_housekeeping as u8,
+                ecu::EcuResetCause::from_byte(h.reset_cause),
+                h.uptime_s,
+                h.last_fault,
+            );
+        }
     }
 }
 
@@ -674,6 +699,22 @@ fn print_record_json(ts_ms: u64, record: &PitDiagFrame) {
                 p.pack_voltage_mv, p.filtered_ma,
             );
         }
+        // Field names match `ecuHealth` (taskControl/…/taskDiag) so the same
+        // consumer parser handles both boards' health uniformly.
+        PitDiagFrame::Health(h) => {
+            println!(
+                r#"{{"tsMs":{ts_ms},"kind":"amsHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskDiag":{},"resetCause":"{:?}","uptimeS":{},"lastFault":{}}}"#,
+                h.free_heap,
+                h.min_free_heap,
+                h.task_main,
+                h.task_can_rx,
+                h.task_can_tx,
+                h.task_housekeeping,
+                ecu::EcuResetCause::from_byte(h.reset_cause),
+                h.uptime_s,
+                h.last_fault,
+            );
+        }
     }
 }
 
@@ -686,7 +727,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
         F::Ack { enabled } => eprintln!("{prefix} ack enabled={enabled}"),
         F::Status(s) => println!(
             "{prefix} status fsm={:?} inv={:?} torque={}% vcell_min={}mV tcmd={} \
-             [ev23={} t11={} rtds={} preok={} start={}]",
+             [ev23={} t11={} rtds={} preok={} start={} dv={}]",
             s.fsm_state,
             s.inv_state,
             s.torque_pct,
@@ -697,6 +738,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             s.rtds_active as u8,
             s.ok_precharge as u8,
             s.start_button as u8,
+            s.dv_mode as u8,
         ),
         F::Pedals(p) => println!(
             "{prefix} pedals apps1={}({}%) apps2={}({}%) brake_raw={}",
@@ -738,6 +780,16 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.uptime_s,
             h.last_fault,
         ),
+        F::Dv(d) => println!(
+            "{prefix} dv    mode_torque={}% rpm={} [r2d_req={} cmd_fresh={} ts={} brk_lim={} r2d_ok={}]",
+            d.dv_torque_pct,
+            d.motor_rpm_mech,
+            d.dv_r2d_req as u8,
+            d.dv_cmd_fresh as u8,
+            d.ts_active as u8,
+            d.brake_over_limit as u8,
+            d.r2d_confirm as u8,
+        ),
     }
 }
 
@@ -752,7 +804,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             println!(r#"{{"tsMs":{ts_ms},"kind":"ack","enabled":{enabled}}}"#);
         }
         F::Status(s) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuStatus","fsmState":"{:?}","invState":"{:?}","ev23":{},"t11_8_9":{},"rtdsActive":{},"okPrecharge":{},"startButton":{},"torquePct":{},"vCellMinMv":{},"torqueCmd":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuStatus","fsmState":"{:?}","invState":"{:?}","ev23":{},"t11_8_9":{},"rtdsActive":{},"okPrecharge":{},"startButton":{},"dvMode":{},"torquePct":{},"vCellMinMv":{},"torqueCmd":{}}}"#,
             s.fsm_state,
             s.inv_state,
             s.ev_2_3,
@@ -760,6 +812,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             s.rtds_active,
             s.ok_precharge,
             s.start_button,
+            s.dv_mode,
             s.torque_pct,
             s.v_cell_min_mv,
             s.torque_cmd,
@@ -801,6 +854,16 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.reset_cause,
             h.uptime_s,
             h.last_fault,
+        ),
+        F::Dv(d) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"ecuDv","dvR2dReq":{},"dvCmdFresh":{},"tsActive":{},"brakeOverLimit":{},"r2dConfirm":{},"dvTorquePct":{},"motorRpmMech":{}}}"#,
+            d.dv_r2d_req,
+            d.dv_cmd_fresh,
+            d.ts_active,
+            d.brake_over_limit,
+            d.r2d_confirm,
+            d.dv_torque_pct,
+            d.motor_rpm_mech,
         ),
     }
 }
@@ -910,13 +973,14 @@ mod tests {
     }
 
     #[test]
-    fn listen_defaults_to_ecu_until_ctrl_c() {
+    fn listen_defaults_to_all_until_ctrl_c() {
         use clap::Parser;
         let cli = TestCli::try_parse_from(["x", "listen"]).unwrap();
         match cli.cmd {
             super::PitDiagCommand::Listen(a) => {
-                // ecu is the default because 0x704 is the ungated frame.
-                assert_eq!(a.profile, "ecu");
+                // `all` is the default — a passive listen wants any board's
+                // ungated health (ECU 0x704 / AMS 0x6CA).
+                assert_eq!(a.profile, "all");
                 // No duration → listen until Ctrl-C (health-light mode).
                 assert_eq!(a.duration_ms, None);
             }

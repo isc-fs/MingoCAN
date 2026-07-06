@@ -191,6 +191,7 @@
         rtdsActive: boolean;
         okPrecharge: boolean;
         startButton: boolean;
+        dvMode: boolean;
         torquePct: number;
         vCellMinMv: number;
         torqueCmd: number;
@@ -235,6 +236,15 @@
         lastFault: number;
         lastFaultName: string;
     }
+    interface EcuDvSnapshot {
+        dvR2dReq: boolean;
+        dvCmdFresh: boolean;
+        tsActive: boolean;
+        brakeOverLimit: boolean;
+        r2dConfirm: boolean;
+        dvTorquePct: number;
+        motorRpmMech: number;
+    }
 
     let ecuStatus = $state<EcuStatusSnapshot | null>(null);
     let ecuPedals = $state<EcuPedalsSnapshot | null>(null);
@@ -243,6 +253,7 @@
     let ecuInvTemps = $state<EcuInvTempsSnapshot | null>(null);
     let ecuFw = $state<EcuFwSnapshot | null>(null);
     let ecuHealth = $state<EcuHealthSnapshot | null>(null);
+    let ecuDv = $state<EcuDvSnapshot | null>(null);
 
     // APPS plausibility: FSAE T11.8.9 trips at >10% disagreement
     // between the two pedal channels. Surface the live delta so the
@@ -452,6 +463,7 @@
         ecuInvTemps = null;
         ecuFw = null;
         ecuHealth = null;
+        ecuDv = null;
         framesThisScan = 0;
         lastScanFrames = 0;
         try {
@@ -601,6 +613,7 @@
                     rtdsActive: event.rtdsActive,
                     okPrecharge: event.okPrecharge,
                     startButton: event.startButton,
+                    dvMode: event.dvMode,
                     torquePct: event.torquePct,
                     vCellMinMv: event.vCellMinMv,
                     torqueCmd: event.torqueCmd,
@@ -659,6 +672,17 @@
                 };
                 // 0x704 is 1 Hz, not part of the 100 ms cyclic scan —
                 // don't count it toward frames/scan.
+            } else if (event.kind === 'ecuDv') {
+                ecuDv = {
+                    dvR2dReq: event.dvR2dReq,
+                    dvCmdFresh: event.dvCmdFresh,
+                    tsActive: event.tsActive,
+                    brakeOverLimit: event.brakeOverLimit,
+                    r2dConfirm: event.r2dConfirm,
+                    dvTorquePct: event.dvTorquePct,
+                    motorRpmMech: event.motorRpmMech,
+                };
+                framesThisScan += 1;
             }
             // Ack events come during arm/disarm; they're handled by
             // the status listener, not counted toward a scan window.
@@ -941,6 +965,12 @@
                             <span class="pill pill-{ecuInvTone(ecuStatus.invState)}">
                                 inv: {ecuStatus.invState}
                             </span>
+                            <span
+                                class="pill pill-{ecuStatus.dvMode ? 'warning' : 'info'}"
+                                title="Drive mode latched at ready-to-drive (0x700 dv_mode). Driverless = uDV torque source; Manual = pedals."
+                            >
+                                {ecuStatus.dvMode ? 'driverless' : 'manual'}
+                            </span>
                         </div>
                         <div class="flags">
                             <span class="flag" class:on={ecuStatus.ev23}>EV 2.3</span>
@@ -1136,6 +1166,41 @@
                         </div>
                     {:else}
                         <p class="muted small">No health frame yet (arrives at 1 Hz).</p>
+                    {/if}
+                </div>
+
+                <!-- DV / autonomy (0x707) — the ECU's view of the uDV
+                     handshake. `driverless` on the FSM card above means the
+                     0x507 torque here is the torque source, not the pedals. -->
+                <div class="card">
+                    <h3 class="card-h">DV</h3>
+                    {#if ecuDv !== null}
+                        <div class="flags">
+                            <span class="flag" class:on={ecuDv.dvR2dReq}>R2D req</span>
+                            <span class="flag" class:on={ecuDv.dvCmdFresh}>
+                                Cmd stream
+                            </span>
+                            <span class="flag" class:on={ecuDv.tsActive}>TS active</span>
+                            <span class="flag" class:on={ecuDv.brakeOverLimit}>
+                                EBS brake
+                            </span>
+                            <span class="flag" class:on={ecuDv.r2dConfirm}>R2D ✓</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>DV torque</span>
+                                <strong>{ecuDv.dvTorquePct}%</strong>
+                            </span>
+                            <span class="stat">
+                                <span>motor</span>
+                                <strong>{ecuDv.motorRpmMech} rpm</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">
+                            No DV frame yet. Streams at 10 Hz while armed;
+                            the flags stay low until the uDV drives the bus.
+                        </p>
                     {/if}
                 </div>
             </div>
