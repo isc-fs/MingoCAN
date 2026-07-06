@@ -291,6 +291,17 @@
             ecuInverter !== null,
     );
 
+    // True once any AMS frame has landed — gates the cell / NTC / diag
+    // panels vs the "arm to begin" hint, mirroring `ecuHasData` so both
+    // tabs behave the same when idle.
+    const amsHasData = $derived(
+        fsm !== null ||
+            poll !== null ||
+            balance !== null ||
+            cellsMv.some((v) => v !== null) ||
+            ntcsC.some((v) => v !== null),
+    );
+
     // Is cell `idx` discharging? Mirrors BalanceState::is_discharging
     // in the library: low 64 from dccLo (BigInt), 64..=94 from dccHi.
     function isDischarging(idx: number): boolean {
@@ -1183,6 +1194,23 @@
         </div>
     {/if}
 
+    {#if !amsHasData}
+        <div class="card placeholder-card">
+            <h3>AMS pit-diag</h3>
+            <p class="muted">
+                {#if armState.kind === 'armed'}
+                    Armed — waiting for the first frames from the AMS…
+                {:else}
+                    Connect the AMS and hit
+                    <strong>Enable AMS pit-diag</strong>. Arming emits
+                    <code>0x7F0#DEADBEEF</code>; the AMS then streams cell
+                    voltages, NTC temperatures, and FSM / balance
+                    diagnostics.
+                {/if}
+            </p>
+        </div>
+    {:else}
+
     <!--
         Safety net: when the observed frames/scan count drifts from
         the expected total by more than ±2, banner a warning. This
@@ -1572,6 +1600,7 @@
             {/each}
         </div>
     </section>
+    {/if}
     {/if}
 </div>
 
