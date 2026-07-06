@@ -66,15 +66,19 @@ pub const ECU_INVERTER_TEMPS_ID: u16 = 0x706;
 /// `0x704` — firmware health (heap, per-task liveness, reset cause, faults).
 /// Emitted at 1 Hz (slower than the 100 ms cyclic frames) from DiagTask.
 pub const ECU_HEALTH_ID: u16 = 0x704;
+/// `0x707` — the ECU's view of the DV (driverless) integration (#109):
+/// R2D/torque-stream freshness + the TX-side autonomy handshake verdicts +
+/// the conditioned autonomous torque. 100 ms while armed.
+pub const ECU_DV_ID: u16 = 0x707;
 
 /// Inverter temperature sentinel — raw `0xFF` (= 205 °C after the −50
 /// offset) means the NX/EMC inverter reports that sensor as disconnected.
 pub const ECU_INV_TEMP_DISCONNECTED_C: i16 = 205;
 
 /// Number of CYCLIC (100 ms) stream frames emitted per scan when armed:
-/// status / pedals / inverter / fwinfo / brake / inverter-temps. The
-/// `0x704` health frame is acyclic-ish (1 Hz) and not counted here.
-pub const ECU_EXPECTED_FRAMES_PER_SCAN: usize = 6;
+/// status / pedals / inverter / fwinfo / brake / inverter-temps / dv (#109).
+/// The `0x704` health frame is acyclic-ish (1 Hz) and not counted here.
+pub const ECU_EXPECTED_FRAMES_PER_SCAN: usize = 7;
 
 // ---- Enums -------------------------------------------------------
 
@@ -200,6 +204,8 @@ pub struct EcuStatusFrame {
     pub ok_precharge: bool,
     /// Byte 2 bit 4 — start button pressed.
     pub start_button: bool,
+    /// Byte 2 bit 5 — DV (driverless) drive latched this cycle (#109).
+    pub dv_mode: bool,
     /// Commanded torque, percent.
     pub torque_pct: u8,
     /// Minimum cell voltage seen by the AMS, millivolts (big-endian).
@@ -299,6 +305,27 @@ pub struct EcuHealthFrame {
     pub last_fault: u8,
 }
 
+/// `0x707` — the ECU's view of the DV (driverless) integration (#109). The
+/// `dv_mode` latch itself rides `0x700` (`EcuStatusFrame::dv_mode`); this frame
+/// carries the handshake around it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuDvFrame {
+    /// uDV `0x510` R2D request is set AND fresh.
+    pub dv_r2d_req: bool,
+    /// uDV `0x507` torque stream is fresh.
+    pub dv_cmd_fresh: bool,
+    /// ECU TX `0x504` — tractive-system-active view.
+    pub ts_active: bool,
+    /// ECU TX `0x505` — EBS hard-braking verdict.
+    pub brake_over_limit: bool,
+    /// ECU TX `0x511` — R2D confirmed (== DV drive latched).
+    pub r2d_confirm: bool,
+    /// Conditioned autonomous torque actually applied, percent (0..100).
+    pub dv_torque_pct: u8,
+    /// Mechanical rpm streamed to the uDV on `0x506` (signed, little-endian).
+    pub motor_rpm_mech: i16,
+}
+
 /// A decoded ECU pit-diag frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EcuPitDiagFrame {
@@ -321,6 +348,8 @@ pub enum EcuPitDiagFrame {
     FwInfo(EcuFwInfoFrame),
     /// `0x704` — firmware health.
     Health(EcuHealthFrame),
+    /// `0x707` — DV (driverless) integration view.
+    Dv(EcuDvFrame),
 }
 
 // ---- Encode / decode ---------------------------------------------
@@ -366,6 +395,7 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 rtds_active: (flags & 0x04) != 0,
                 ok_precharge: (flags & 0x08) != 0,
                 start_button: (flags & 0x10) != 0,
+                dv_mode: (flags & 0x20) != 0,
                 torque_pct: p[3],
                 v_cell_min_mv: u16::from_be_bytes([p[4], p[5]]),
                 torque_cmd: i16::from_be_bytes([p[6], p[7]]),
@@ -441,6 +471,21 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 reset_cause: EcuResetCause::from_byte(p[5]),
                 uptime_s: p[6],
                 last_fault: p[7],
+            }))
+        }
+        ECU_DV_ID => {
+            if p.len() < 4 {
+                return None;
+            }
+            let flags = p[0];
+            Some(EcuPitDiagFrame::Dv(EcuDvFrame {
+                dv_r2d_req: (flags & 0x01) != 0,
+                dv_cmd_fresh: (flags & 0x02) != 0,
+                ts_active: (flags & 0x04) != 0,
+                brake_over_limit: (flags & 0x08) != 0,
+                r2d_confirm: (flags & 0x10) != 0,
+                dv_torque_pct: p[1],
+                motor_rpm_mech: i16::from_le_bytes([p[2], p[3]]),
             }))
         }
         _ => None,
@@ -596,6 +641,38 @@ mod tests {
                 assert_eq!(h.last_fault, 0xF5);
             }
             other => panic!("expected Health, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_carries_dv_mode() {
+        // byte2 = 0x30 → bit4 start_button + bit5 dv_mode (#109); rtds clear.
+        let p = [5, 4, 0x30, 60, 0xAC, 0x00, 0x00, 0x00];
+        let frame = CanFrame::new(ECU_STATUS_ID, &p).unwrap();
+        match decode_frame(&frame).unwrap() {
+            EcuPitDiagFrame::Status(s) => {
+                assert!(s.dv_mode);
+                assert!(s.start_button);
+                assert!(!s.rtds_active);
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dv_frame_decodes() {
+        // byte0 flags = bits 0,1,4 (r2d_req + cmd_fresh + r2d_confirm);
+        // ts_active/brake_over_limit clear. torque 80%, rpm 1500 (LE).
+        let p = [0b0001_0011u8, 80, 0xDC, 0x05, 0, 0, 0, 0];
+        let frame = CanFrame::new(ECU_DV_ID, &p).unwrap();
+        match decode_frame(&frame).unwrap() {
+            EcuPitDiagFrame::Dv(d) => {
+                assert!(d.dv_r2d_req && d.dv_cmd_fresh && d.r2d_confirm);
+                assert!(!d.ts_active && !d.brake_over_limit);
+                assert_eq!(d.dv_torque_pct, 80);
+                assert_eq!(d.motor_rpm_mech, 1500);
+            }
+            other => panic!("expected Dv, got {other:?}"),
         }
     }
 
