@@ -22,10 +22,20 @@ import { type Config, readConfig } from './config';
 import type { DiscoverRow } from './discover';
 import { fetchDevices, formatNodeId, formatRowDetail } from './discover';
 import { getOutputChannel } from './output';
+import {
+    listenForAppNodes,
+    logAppNodes,
+    type AppNode,
+} from './pitDiagListen';
+import { setHealthLight } from './statusBar';
 
 // ---- Tree-item kinds ----
 
-export type IscFsTreeNode = AdapterNode | DeviceNode | StatusNode;
+export type IscFsTreeNode = AdapterNode | DeviceNode | AppDeviceNode | StatusNode;
+
+/** A device row under an adapter — either a bootloader board (from
+ *  `discover`) or an app-running board (from a passive `pit-diag listen`). */
+export type DeviceChild = DeviceNode | AppDeviceNode;
 
 export class AdapterNode {
     readonly kind = 'adapter';
@@ -33,7 +43,7 @@ export class AdapterNode {
         public readonly adapter: AdapterEntry,
         public readonly active: boolean,
         /** `null` while children haven't been loaded yet. */
-        public readonly children: DeviceNode[] | null,
+        public readonly children: DeviceChild[] | null,
         /** Error from the last `discover` attempt for this adapter, if any. */
         public readonly error: string | null,
     ) {}
@@ -43,6 +53,16 @@ export class DeviceNode {
     readonly kind = 'device';
     constructor(
         public readonly row: DiscoverRow,
+        public readonly adapter: AdapterEntry,
+    ) {}
+}
+
+/** A board detected running its application firmware via passive listen
+ *  (the ungated health frame — ECU 0x704 / AMS 0x6CA), not the bootloader. */
+export class AppDeviceNode {
+    readonly kind = 'appDevice';
+    constructor(
+        public readonly node: AppNode,
         public readonly adapter: AdapterEntry,
     ) {}
 }
@@ -108,7 +128,15 @@ export class DeviceTreeProvider implements vscode.TreeDataProvider<IscFsTreeNode
         for (const entry of entries) {
             if (active !== null && entry === active) {
                 const { devices, error } = await refreshActiveAdapter(cfg, cwd);
-                nodes.push(new AdapterNode(entry, true, devices, error));
+                // After the bootloader discover, do a short send-silent
+                // `pit-diag listen` to surface any app-running board on the
+                // same bus. Skipped when discover itself failed (bad
+                // adapter/bus — no point listening).
+                const appNodes = error === null ? await listenForAppNodes(cfg, cwd) : [];
+                logAppNodes(appNodes);
+                const merged = mergeChildren(devices, appNodes, entry);
+                nodes.push(new AdapterNode(entry, true, merged, error));
+                updateHealthLight(appNodes);
             } else {
                 nodes.push(new AdapterNode(entry, false, null, null));
             }
@@ -129,6 +157,8 @@ export class DeviceTreeProvider implements vscode.TreeDataProvider<IscFsTreeNode
                 return adapterTreeItem(node);
             case 'device':
                 return deviceTreeItem(node);
+            case 'appDevice':
+                return appDeviceTreeItem(node);
             case 'status':
                 return statusTreeItem(node);
         }
@@ -161,8 +191,8 @@ export class DeviceTreeProvider implements vscode.TreeDataProvider<IscFsTreeNode
             if (element.children.length === 0) {
                 return [
                     new StatusNode(
-                        '(no devices in bootloader mode)',
-                        'Discover only sees devices in the bootloader. A board running its application firmware won’t appear here — reset it into the bootloader to discover/flash it.',
+                        '(no boards found)',
+                        'No board answered the bootloader discover, and no app-mode board was heard broadcasting on the bus. Power a board on, or reset it into the bootloader to flash it.',
                     ),
                 ];
             }
@@ -195,6 +225,55 @@ async function refreshActiveAdapter(
             error: err instanceof Error ? err.message : String(err),
         };
     }
+}
+
+/** Merge bootloader devices with app-mode listen results. A board can't
+ *  be in both states at once, but if a node-id somehow appears in both,
+ *  the bootloader row wins (discover is authoritative for BL state). */
+function mergeChildren(
+    devices: DeviceNode[],
+    appNodes: AppNode[],
+    adapter: AdapterEntry,
+): DeviceChild[] {
+    const blIds = new Set(devices.map((d) => d.row.node_id));
+    const appChildren = appNodes
+        .filter((n) => !blIds.has(n.nodeId))
+        .map((n) => new AppDeviceNode(n, adapter));
+    return [...devices, ...appChildren];
+}
+
+/** Reflect the passive-listen result onto the status-bar health-light.
+ *  With no app board heard, hide the light. */
+function updateHealthLight(appNodes: AppNode[]): void {
+    if (appNodes.length === 0) {
+        setHealthLight(undefined);
+        return;
+    }
+    const unhealthy = appNodes.filter((n) => n.health === 'warn');
+    if (unhealthy.length > 0) {
+        // Any unhealthy board wins the light. Name the offender(s) + reasons.
+        setHealthLight({
+            role: unhealthy.map((n) => n.role).join(' + '),
+            level: 'warn',
+            detail: unhealthy
+                .map((n) => `${n.role}: ${n.reasons.join('; ')}`)
+                .join(' · '),
+        });
+        return;
+    }
+    // All healthy — list the boards heard with a compact fw/uptime line.
+    const detail = appNodes
+        .map((n) => {
+            const fw = n.fwVersion !== undefined ? ` v${n.fwVersion}` : '';
+            const up = n.uptimeS !== undefined ? ` (up ${n.uptimeS}s)` : '';
+            return `${n.role}${fw}${up}`;
+        })
+        .join(' · ');
+    setHealthLight({
+        role: appNodes.map((n) => n.role).join(' + '),
+        level: 'ok',
+        detail,
+    });
 }
 
 // ---- TreeItem builders ----
@@ -240,6 +319,50 @@ function deviceTreeItem(node: DeviceNode): vscode.TreeItem {
         .filter((line): line is string => line !== null)
         .join('\n');
     return item;
+}
+
+function appDeviceTreeItem(node: AppDeviceNode): vscode.TreeItem {
+    const app = node.node;
+    const id = formatNodeId(app.nodeId);
+    const item = new vscode.TreeItem(
+        `${app.role} ${id}`,
+        vscode.TreeItemCollapsibleState.None,
+    );
+    const fw = app.fwVersion !== undefined ? `v${app.fwVersion}` : '';
+    const uptime = app.uptimeS !== undefined ? `up ${app.uptimeS}s` : '';
+    item.description = ['app', fw, uptime].filter((s) => s.length > 0).join(' · ');
+    // $(pulse) distinguishes an app-running board from a bootloader board
+    // ($(circuit-board)); a warn state swaps to $(warning) + theme color.
+    if (app.health === 'warn') {
+        item.iconPath = new vscode.ThemeIcon(
+            'warning',
+            new vscode.ThemeColor('problemsWarningIcon.foreground'),
+        );
+    } else {
+        item.iconPath = new vscode.ThemeIcon('pulse');
+    }
+    item.contextValue = 'iscFsAppDevice';
+    item.tooltip = [
+        `${app.role} (${id}) — running application firmware`,
+        app.fwVersion !== undefined ? `Firmware: v${app.fwVersion}` : null,
+        app.gitHash !== undefined ? `Git: ${app.gitHash.slice(0, 8)}` : null,
+        app.resetCause !== undefined ? `Reset: ${app.resetCause}` : null,
+        app.uptimeS !== undefined ? `Uptime: ${app.uptimeS}s` : null,
+        app.lastFault !== undefined
+            ? `Last fault: 0x${app.lastFault.toString(16).toUpperCase()}`
+            : null,
+        app.tasks !== undefined
+            ? `Tasks: ctrl=${bit(app.tasks.control)} rx=${bit(app.tasks.canRx)} tx=${bit(app.tasks.canTx)} diag=${bit(app.tasks.diag)}`
+            : null,
+        app.health === 'warn' ? `⚠ ${app.reasons.join('; ')}` : '✓ healthy',
+    ]
+        .filter((line): line is string => line !== null)
+        .join('\n');
+    return item;
+}
+
+function bit(alive: boolean): string {
+    return alive ? '1' : '0';
 }
 
 function statusTreeItem(node: StatusNode): vscode.TreeItem {
