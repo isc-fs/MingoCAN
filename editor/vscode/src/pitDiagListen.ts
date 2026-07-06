@@ -1,22 +1,24 @@
 // Passive app-mode detection via `cf pit-diag listen`.
 //
-// `discover` only sees bootloader-mode boards. But the ECU app
-// broadcasts 0x704 health ungated at 1 Hz (+ 0x703 fwinfo / 0x700
-// status), so a short, send-silent `pit-diag listen` window tells us
-// whether the app is running and how healthy it is — without arming
-// anything or perturbing a live car.
+// `discover` only sees bootloader-mode boards. But both the ECU (0x704,
+// 1 Hz) and the AMS (0x6CA, 1 Hz) broadcast a firmware-health frame
+// ungated, so a short, send-silent `pit-diag listen --profile all`
+// window tells us which apps are running and how healthy they are —
+// without arming anything or perturbing a live car.
 //
-// The pit-diag frames are ECU-fixed CAN IDs (0x700–0x706) with no
-// node-id field, so an `ecu`-profile listen identifies exactly one
-// board: the ECU (node 0x1 by the team scheme). We fold whatever frames
-// arrive in the window into a single AppNode.
+// The pit-diag frames are fixed per-board CAN IDs with no node-id field,
+// so the frame kind identifies the board: `ecu*` → ECU (node 0x1),
+// `amsHealth` → AMS (node 0x2). We fold the window into one AppNode per
+// board heard. (Both boards' health reuses the same NDJSON field names,
+// so the folding + rollup is board-agnostic.)
 
 import { buildGlobalArgv, type Config } from './config';
 import { spawnCommand } from './cli';
 import { getOutputChannel } from './output';
 
-/** ECU node-id (team scheme) — the board an `ecu`-profile listen hears. */
+/** Team node-id scheme — the frame kind tells us which board we heard. */
 const ECU_NODE_ID = 0x1;
+const AMS_NODE_ID = 0x2;
 
 export type HealthLevel = 'ok' | 'warn';
 
@@ -46,10 +48,11 @@ export interface AppNode {
 const BAD_RESET_CAUSES = new Set(['Iwdg', 'Wwdg']);
 
 /**
- * Run one short passive-listen window and fold the frames into at most
- * one AppNode (the ECU). Returns `[]` when nothing was heard (no app
- * running, or the bus/adapter is quiet). Best-effort — a spawn/parse
- * failure yields `[]`, never throws; the tree stays a discover-only view.
+ * Run one short passive-listen window and fold the frames into an AppNode
+ * per board heard (ECU and/or AMS). Returns `[]` when nothing was heard
+ * (no app running, or the bus/adapter is quiet). Best-effort — a
+ * spawn/parse failure yields `[]`, never throws; the tree stays a
+ * discover-only view.
  */
 export async function listenForAppNodes(
     cfg: Config,
@@ -61,12 +64,14 @@ export async function listenForAppNodes(
         return [];
     }
 
+    // `--profile all` decodes both the ECU (0x704) and AMS (0x6CA) ungated
+    // health in one window — their IDs never overlap.
     const argv = [
         ...buildGlobalArgv(cfg),
         'pit-diag',
         'listen',
         '--profile',
-        'ecu',
+        'all',
         '--duration-ms',
         String(durationMs),
     ];
@@ -85,16 +90,16 @@ export async function listenForAppNodes(
     return foldFrames(stdout);
 }
 
-/** Parse the NDJSON listen output into an AppNode list. Exported for
- *  unit testing. */
+/** Parse the NDJSON listen output into one AppNode per board heard
+ *  (ECU and/or AMS). Exported for unit testing. */
 export function foldFrames(stdout: string): AppNode[] {
-    let heard = false;
-    const node: AppNode = {
-        nodeId: ECU_NODE_ID,
-        role: 'ECU',
-        health: 'ok',
-        reasons: [],
-    };
+    // A board only materialises once we hear one of its frames.
+    let ecu: AppNode | undefined;
+    let ams: AppNode | undefined;
+    const ensureEcu = (): AppNode =>
+        (ecu ??= { nodeId: ECU_NODE_ID, role: 'ECU', health: 'ok', reasons: [] });
+    const ensureAms = (): AppNode =>
+        (ams ??= { nodeId: AMS_NODE_ID, role: 'AMS', health: 'ok', reasons: [] });
 
     for (const line of stdout.split('\n')) {
         const trimmed = line.trim();
@@ -116,42 +121,59 @@ export function foldFrames(stdout: string): AppNode[] {
             continue;
         }
         switch (kind) {
+            // Health frames — same field names for both boards (ecuHealth /
+            // amsHealth), so one applier serves both.
             case 'ecuHealth':
-                heard = true;
-                node.resetCause = str(ev.resetCause);
-                node.uptimeS = num(ev.uptimeS);
-                node.lastFault = num(ev.lastFault);
-                node.tasks = {
-                    control: bool(ev.taskControl),
-                    canRx: bool(ev.taskCanRx),
-                    canTx: bool(ev.taskCanTx),
-                    diag: bool(ev.taskDiag),
-                };
+                applyHealth(ensureEcu(), ev);
+                break;
+            case 'amsHealth':
+                applyHealth(ensureAms(), ev);
                 break;
             case 'ecuFwInfo':
-                heard = true;
-                node.fwVersion = `${num(ev.fwMajor) ?? 0}.${num(ev.fwMinor) ?? 0}.${num(ev.fwPatch) ?? 0}`;
-                node.gitHash = hexHash(ev.gitHash);
+                applyFwInfo(ensureEcu(), ev);
                 break;
+            // Any other decoded frame just proves that board's app is alive.
             case 'ecuStatus':
             case 'ecuPedals':
             case 'ecuInverter':
             case 'ecuBrake':
             case 'ecuInverterTemps':
-                // Any decoded ECU frame proves the app is alive, even if
-                // we don't surface its fields on the node.
-                heard = true;
+            case 'ecuDv':
+                ensureEcu();
                 break;
             default:
                 break;
         }
     }
 
-    if (!heard) {
-        return [];
+    const nodes: AppNode[] = [];
+    for (const node of [ecu, ams]) {
+        if (node !== undefined) {
+            rollUpHealth(node);
+            nodes.push(node);
+        }
     }
-    rollUpHealth(node);
-    return [node];
+    return nodes;
+}
+
+/** Apply a health frame (ecuHealth / amsHealth — identical shape). */
+function applyHealth(node: AppNode, ev: Record<string, unknown>): void {
+    node.resetCause = str(ev.resetCause);
+    node.uptimeS = num(ev.uptimeS);
+    node.lastFault = num(ev.lastFault);
+    node.tasks = {
+        control: bool(ev.taskControl),
+        canRx: bool(ev.taskCanRx),
+        canTx: bool(ev.taskCanTx),
+        diag: bool(ev.taskDiag),
+    };
+}
+
+/** Apply an ecuFwInfo frame (ECU only — the AMS ungated frame carries no
+ *  firmware identity). */
+function applyFwInfo(node: AppNode, ev: Record<string, unknown>): void {
+    node.fwVersion = `${num(ev.fwMajor) ?? 0}.${num(ev.fwMinor) ?? 0}.${num(ev.fwPatch) ?? 0}`;
+    node.gitHash = hexHash(ev.gitHash);
 }
 
 /** Derive the `health` level + the human reasons behind a `warn`. */

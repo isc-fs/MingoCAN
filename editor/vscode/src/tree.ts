@@ -58,7 +58,7 @@ export class DeviceNode {
 }
 
 /** A board detected running its application firmware via passive listen
- *  (0x704/0x703/0x700), not the bootloader. */
+ *  (the ungated health frame — ECU 0x704 / AMS 0x6CA), not the bootloader. */
 export class AppDeviceNode {
     readonly kind = 'appDevice';
     constructor(
@@ -245,16 +245,35 @@ function mergeChildren(
 /** Reflect the passive-listen result onto the status-bar health-light.
  *  With no app board heard, hide the light. */
 function updateHealthLight(appNodes: AppNode[]): void {
-    const app = appNodes[0];
-    if (app === undefined) {
+    if (appNodes.length === 0) {
         setHealthLight(undefined);
         return;
     }
-    const fw = app.fwVersion !== undefined ? `v${app.fwVersion}` : 'unknown fw';
-    const uptime = app.uptimeS !== undefined ? `, up ${app.uptimeS}s` : '';
-    const detail =
-        app.health === 'warn' ? app.reasons.join('; ') : `${fw}${uptime}`;
-    setHealthLight({ role: app.role, level: app.health, detail });
+    const unhealthy = appNodes.filter((n) => n.health === 'warn');
+    if (unhealthy.length > 0) {
+        // Any unhealthy board wins the light. Name the offender(s) + reasons.
+        setHealthLight({
+            role: unhealthy.map((n) => n.role).join(' + '),
+            level: 'warn',
+            detail: unhealthy
+                .map((n) => `${n.role}: ${n.reasons.join('; ')}`)
+                .join(' · '),
+        });
+        return;
+    }
+    // All healthy — list the boards heard with a compact fw/uptime line.
+    const detail = appNodes
+        .map((n) => {
+            const fw = n.fwVersion !== undefined ? ` v${n.fwVersion}` : '';
+            const up = n.uptimeS !== undefined ? ` (up ${n.uptimeS}s)` : '';
+            return `${n.role}${fw}${up}`;
+        })
+        .join(' · ');
+    setHealthLight({
+        role: appNodes.map((n) => n.role).join(' + '),
+        level: 'ok',
+        detail,
+    });
 }
 
 // ---- TreeItem builders ----
