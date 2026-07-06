@@ -760,7 +760,7 @@
 <div class="view">
     <header>
         <div>
-            <h2>Pit diag</h2>
+            <h2>Telemetry</h2>
             {#if profile === 'ams'}
                 <p class="muted">
                     AMS observer mode. Arming emits <code>0x7F0#DEADBEEF</code>;

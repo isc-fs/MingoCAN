@@ -579,9 +579,9 @@
                 disabled={pitDiagBusy
                     || !(status === 'running' || status === 'paused')}
                 onclick={togglePitDiag}
-                title="Transmit the pit-diag arm/disarm command through this adapter — both the AMS (0x7F0) and ECU (0x7E0), so whichever board is on the bus starts its diagnostic stream (cell voltages / NTCs / FSM for the AMS; APPS / brake / inverter for the ECU) and the Signals decode fills in — no need to leave the monitor."
+                title="Transmit the telemetry arm/disarm command through this adapter — both the AMS (0x7F0) and ECU (0x7E0), so whichever board is on the bus starts its telemetry stream (cell voltages / NTCs / FSM for the AMS; APPS / brake / inverter for the ECU) and the Signals decode fills in — no need to leave the monitor."
             >
-                {pitDiagArmed ? '⏹ Disarm pit-diag' : '⚡ Arm pit-diag'}
+                {pitDiagArmed ? '⏹ Stop telemetry' : '⚡ Activate telemetry'}
             </button>
         </div>
 

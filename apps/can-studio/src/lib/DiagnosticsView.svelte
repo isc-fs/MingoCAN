@@ -122,7 +122,7 @@
 <div class="view">
     <header>
         <div>
-            <h2>Diagnostics</h2>
+            <h2>Board health</h2>
             <p class="muted">
                 Session health + DTC table. One-shot calls against the
                 configured adapter; nothing streams in the background.

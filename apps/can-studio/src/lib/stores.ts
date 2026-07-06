@@ -60,7 +60,7 @@ export const VIEWS: ViewMeta[] = [
     },
     {
         id: 'diagnostics',
-        label: 'Diagnostics',
+        label: 'Board health',
         status: 'live',
         section: 'observe',
         description: 'DTCs & session health',
@@ -74,7 +74,7 @@ export const VIEWS: ViewMeta[] = [
     },
     {
         id: 'pitDiag',
-        label: 'Pit diag',
+        label: 'Telemetry',
         status: 'live',
         section: 'observe',
         description: 'Live AMS / ECU telemetry',
