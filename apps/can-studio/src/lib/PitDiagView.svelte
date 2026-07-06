@@ -1173,7 +1173,7 @@
                      handshake. `driverless` on the FSM card above means the
                      0x507 torque here is the torque source, not the pedals. -->
                 <div class="card">
-                    <h3 class="card-h">DV / autonomy</h3>
+                    <h3 class="card-h">DV</h3>
                     {#if ecuDv !== null}
                         <div class="flags">
                             <span class="flag" class:on={ecuDv.dvR2dReq}>R2D req</span>
