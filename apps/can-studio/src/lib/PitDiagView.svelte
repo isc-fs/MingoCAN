@@ -815,7 +815,7 @@
             {:else}
                 <p class="muted">
                     Per-ECU diagnostic observer. Select an ECU to arm its
-                    pit-diag stream.
+                    telemetry stream.
                 </p>
             {/if}
         </div>
@@ -857,7 +857,7 @@
     {#if !adapterReady}
         <div class="banner banner-warning gate">
             <span>
-                <strong>No adapter selected.</strong> Pit-diag needs an
+                <strong>No adapter selected.</strong> Telemetry needs an
                 <code>--interface</code>/<code>--channel</code> pair.
             </span>
             <button
@@ -875,16 +875,16 @@
              for it yet, so we don't offer to arm — surfacing a clear
              "why" beats a button that errors. -->
         <div class="card placeholder-card">
-            <h3>uDV pit-diag isn't available yet</h3>
+            <h3>uDV telemetry isn't available yet</h3>
             <p class="muted">
                 The AMS (<code>0x7F0</code> / <code>0x6C0..=0x6C8</code>)
                 and the ECU (<code>0x7E0</code> / <code>0x700..=0x705</code>)
-                each expose a pit-diag arm handshake + decoded stream. The
-                uDV has no pit-diag protocol or frames defined in
+                each expose a telemetry arm handshake + decoded stream. The
+                uDV has no telemetry protocol or frames defined in
                 IFS08-DBCinator yet, so there's nothing to arm or decode.
             </p>
             <p class="muted">
-                Once the firmware team ships a uDV pit-diag stream and
+                Once the firmware team ships a uDV telemetry stream and
                 publishes its frames, this panel grows live readouts like
                 the <strong>AMS</strong> and <strong>ECU</strong> tabs.
                 Until then, switch profiles above, or use the
@@ -902,11 +902,11 @@
                     disabled={!adapterReady}
                     onclick={confirmArm}
                 >
-                    Enable ECU pit-diag
+                    Enable ECU telemetry
                 </button>
             {:else if armState.kind === 'confirming'}
                 <div class="confirm">
-                    <span class="confirm-text">Arm ECU pit-diag stream?</span>
+                    <span class="confirm-text">Arm ECU telemetry stream?</span>
                     <button type="button" class="btn btn-primary" onclick={arm}>
                         Yes, arm
                     </button>
@@ -940,13 +940,13 @@
 
         {#if !ecuHasData}
             <div class="card placeholder-card">
-                <h3>ECU pit-diag</h3>
+                <h3>ECU telemetry</h3>
                 <p class="muted">
                     {#if armState.kind === 'armed'}
                         Armed — waiting for the first frames from the ECU…
                     {:else}
                         Connect the ECU and hit
-                        <strong>Enable ECU pit-diag</strong>. Arming emits
+                        <strong>Enable ECU telemetry</strong>. Arming emits
                         <code>0x7E0#DEADBEEF</code>; the ECU then streams APPS,
                         brake, FSM, and inverter telemetry.
                     {/if}
@@ -1215,11 +1215,11 @@
                 disabled={!adapterReady}
                 onclick={confirmArm}
             >
-                Enable AMS pit-diag
+                Enable AMS telemetry
             </button>
         {:else if armState.kind === 'confirming'}
             <div class="confirm">
-                <span class="confirm-text">Arm AMS pit-diag stream?</span>
+                <span class="confirm-text">Arm AMS telemetry stream?</span>
                 <button type="button" class="btn btn-primary" onclick={arm}>
                     Yes, arm
                 </button>
@@ -1261,13 +1261,13 @@
 
     {#if !amsHasData}
         <div class="card placeholder-card">
-            <h3>AMS pit-diag</h3>
+            <h3>AMS telemetry</h3>
             <p class="muted">
                 {#if armState.kind === 'armed'}
                     Armed — waiting for the first frames from the AMS…
                 {:else}
                     Connect the AMS and hit
-                    <strong>Enable AMS pit-diag</strong>. Arming emits
+                    <strong>Enable AMS telemetry</strong>. Arming emits
                     <code>0x7F0#DEADBEEF</code>; the AMS then streams cell
                     voltages, NTC temperatures, and FSM / balance
                     diagnostics.
@@ -1289,7 +1289,7 @@
         <div class="banner banner-warning">
             <strong>Schema drift suspected.</strong>
             Last scan carried {lastScanFrames} frames, expected
-            {AMS_EXPECTED_FRAMES_PER_SCAN}. The AMS firmware's pit-diag
+            {AMS_EXPECTED_FRAMES_PER_SCAN}. The AMS firmware's telemetry
             wire shape may have changed since the host's layout was
             last verified — the panels below may be partial or
             mis-routed. Verify against
