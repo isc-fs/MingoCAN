@@ -220,6 +220,8 @@ export type PitDiagEvent =
           okPrecharge: boolean;
           /** Start button pressed. */
           startButton: boolean;
+          /** DV (driverless) drive latched this cycle (#109). */
+          dvMode: boolean;
           torquePct: number;
           vCellMinMv: number;
           torqueCmd: number;
@@ -279,6 +281,26 @@ export type PitDiagEvent =
           lastFault: number;
           /** "none" | "hardFault" | "stackOverflow" | … */
           lastFaultName: string;
+      }
+    | {
+          /** ECU 0x707 — DV (driverless) integration view (#109). The
+           *  `dvMode` latch itself rides `ecuStatus`; this carries the
+           *  handshake around it. */
+          kind: 'ecuDv';
+          /** uDV 0x510 R2D request set AND fresh. */
+          dvR2dReq: boolean;
+          /** uDV 0x507 torque stream fresh. */
+          dvCmdFresh: boolean;
+          /** ECU TX 0x504 — tractive-system-active view. */
+          tsActive: boolean;
+          /** ECU TX 0x505 — EBS hard-braking verdict. */
+          brakeOverLimit: boolean;
+          /** ECU TX 0x511 — R2D confirmed (== DV drive latched). */
+          r2dConfirm: boolean;
+          /** Conditioned autonomous torque actually applied, 0..100 %. */
+          dvTorquePct: number;
+          /** Mechanical rpm streamed to the uDV on 0x506 (signed). */
+          motorRpmMech: number;
       };
 
 /** The inverter-temperature value that means "sensor disconnected"
