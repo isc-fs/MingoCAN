@@ -306,6 +306,24 @@
         return (mask & (1 << b)) !== 0;
     }
 
+    // AMI mission menu (0x503 index → name); mirrors the uDV firmware
+    // registry (Handover/MISSIONS.md). `-1` (int8 on the wire) = none.
+    const UDV_MISSIONS = [
+        'manual',
+        'acceleration',
+        'skidpad',
+        'autocross',
+        'track drive',
+        'ebs test',
+        'inspection',
+        'shutdown',
+        'aux1',
+        'aux2',
+    ];
+    function missionName(id: number): string {
+        return UDV_MISSIONS[id] ?? `code ${id}`;
+    }
+
     // APPS plausibility: FSAE T11.8.9 trips at >10% disagreement
     // between the two pedal channels. Surface the live delta so the
     // operator can sanity-check the pedal calibration on the bench.
@@ -1083,7 +1101,7 @@
                             <span class="flag" class:on={bit(udvStatus.signals, 0)}>ASMS</span>
                             <span class="flag" class:on={bit(udvStatus.signals, 1)}>TS</span>
                             <span class="flag" class:on={bit(udvStatus.signals, 3)}>EBS</span>
-                            <span class="flag" class:on={bit(udvStatus.signals, 4)}>ABS</span>
+                            <span class="flag" class:on={bit(udvStatus.signals, 4)}>ASB</span>
                             <span class="flag" class:on={bit(udvStatus.signals, 5)}>Brakes</span>
                             <span class="flag" class:on={bit(udvStatus.signals, 7)}>R2D</span>
                             <span class="flag" class:on={bit(udvStatus.signals, 8)}>Standstill</span>
@@ -1092,7 +1110,11 @@
                         <div class="reads">
                             <span class="stat">
                                 <span>mission</span>
-                                <strong>{udvStatus.missionId < 0 ? 'none' : udvStatus.missionId}</strong>
+                                <strong>
+                                    {udvStatus.missionId < 0
+                                        ? 'none'
+                                        : `${udvStatus.missionId} · ${missionName(udvStatus.missionId)}`}
+                                </strong>
                             </span>
                             <span class="stat">
                                 <span>stubs</span>
