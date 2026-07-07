@@ -1,4 +1,4 @@
-//! `cf pit-diag` — terminal-side pit-diag observer (AMS + ECU).
+//! `cf pit-diag` — terminal-side pit-diag observer (AMS / ECU / uDV).
 //!
 //! Four subcommands:
 //!
@@ -22,8 +22,8 @@
 //!    ever splits further, this CLI is the canonical implementation).
 //!
 //! The `--profile` flag selects the board: `ams` (arm `0x7F0`, decode
-//! `0x680–0x6C8`) or `ecu` (arm `0x7E0`, decode `0x700–0x706`). uDV
-//! lands with the slice-5 plugin layer.
+//! `0x680–0x6CA`), `ecu` (arm `0x7E0`, decode `0x700–0x707`), or `udv`
+//! (arm `0x7DE`, decode `0x7A0–0x7A4`).
 
 use std::time::{Duration, Instant};
 
@@ -32,29 +32,31 @@ use clap::{Args, Subcommand};
 
 use crate::cli::{GlobalFlags, InterfaceType};
 use crate::pit_diag::ecu;
+use crate::pit_diag::udv;
 use crate::pit_diag::{
     build_arm_frame, decode_frame, FaultReason, PitDiagFrame, AMS_ACK_ID,
     AMS_EXPECTED_FRAMES_PER_SCAN,
 };
 use crate::transport::{open_backend, CanBackend, TransportError};
 
-/// Which board's pit-diag stream a run targets. AMS and ECU use
-/// different arm IDs (`0x7F0`/`0x7E0`), ACK IDs, and frame layouts, so
-/// the arm handshake + decoder are chosen per profile. uDV lands with
-/// the slice-5 plugin work.
+/// Which board's pit-diag stream a run targets. Each uses different arm
+/// IDs and frame layouts, so the arm handshake + decoder are chosen per
+/// profile: AMS (`0x7F0`, ACK `0x7F1`), ECU (`0x7E0`, ACK `0x7E1`), uDV
+/// (`0x7DE`, sticky — no ACK, no disarm).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Profile {
     Ams,
     Ecu,
+    Udv,
 }
 
 fn parse_profile(profile: &str) -> Result<Profile> {
     match profile {
         "ams" => Ok(Profile::Ams),
         "ecu" => Ok(Profile::Ecu),
+        "udv" => Ok(Profile::Udv),
         other => Err(anyhow!(
-            "unknown pit-diag profile {other:?}: supported profiles are 'ams' and 'ecu' \
-             (uDV lands with the slice-5 plugin work)"
+            "unknown pit-diag profile {other:?}: supported profiles are 'ams', 'ecu', and 'udv'"
         )),
     }
 }
@@ -118,15 +120,16 @@ pub enum PitDiagCommand {
 
 #[derive(Debug, Args)]
 pub struct ProfileArgs {
-    /// Which board's stream to address: `ams` (0x7F0) or `ecu` (0x7E0).
-    /// uDV lands with the slice-5 plugin work.
+    /// Which board's stream to address: `ams` (0x7F0), `ecu` (0x7E0),
+    /// or `udv` (0x7DE).
     #[arg(long, default_value = "ams")]
     pub profile: String,
 }
 
 #[derive(Debug, Args)]
 pub struct StreamArgs {
-    /// Which board's stream to address: `ams` (0x7F0) or `ecu` (0x7E0).
+    /// Which board's stream to address: `ams` (0x7F0), `ecu` (0x7E0),
+    /// or `udv` (0x7DE).
     #[arg(long, default_value = "ams")]
     pub profile: String,
 
@@ -135,7 +138,7 @@ pub struct StreamArgs {
     pub duration: Option<u64>,
 
     /// Fail the run if any 1-second window's frame count drifts from
-    /// the expected per-profile total (58 for AMS, 6 for ECU) by more
+    /// the expected per-profile total (58 AMS, 7 ECU, 4 uDV) by more
     /// than ±2. Off by default because operators inspecting a
     /// known-broken bus want to *see* the wrong count, not have the
     /// tool bail. Enable in CI / scripted bench checks.
@@ -288,8 +291,13 @@ async fn listen_loop(
     duration: Option<Duration>,
     json: bool,
 ) -> Result<()> {
-    let want_ecu = decode != Some(Profile::Ams);
-    let want_ams = decode != Some(Profile::Ecu);
+    // `None` = the `all` default (try every decoder); `Some(p)` pins one.
+    let (want_ams, want_ecu, want_udv) = match decode {
+        None => (true, true, true),
+        Some(Profile::Ams) => (true, false, false),
+        Some(Profile::Ecu) => (false, true, false),
+        Some(Profile::Udv) => (false, false, true),
+    };
     loop {
         if let Some(d) = duration {
             if started.elapsed() >= d {
@@ -318,6 +326,16 @@ async fn listen_loop(
                             print_record_json(ts_ms, &record);
                         } else {
                             print_record_human(ts_ms, &record);
+                        }
+                        continue;
+                    }
+                }
+                if want_udv {
+                    if let Some(record) = udv::decode_frame(&frame) {
+                        if json {
+                            print_udv_json(ts_ms, &record);
+                        } else {
+                            print_udv_human(ts_ms, &record);
                         }
                     }
                 }
@@ -348,6 +366,7 @@ async fn stream_loop(
     let expected_per_scan = match profile {
         Profile::Ams => AMS_EXPECTED_FRAMES_PER_SCAN,
         Profile::Ecu => ecu::ECU_EXPECTED_FRAMES_PER_SCAN,
+        Profile::Udv => udv::UDV_EXPECTED_FRAMES_PER_SCAN,
     };
     let mut frames_this_scan: usize = 0;
     let mut last_scan_at = Instant::now();
@@ -403,6 +422,19 @@ async fn stream_loop(
                                 print_ecu_json(ts_ms, &record);
                             } else {
                                 print_ecu_human(ts_ms, &record);
+                            }
+                        }
+                    }
+                    Profile::Udv => {
+                        if let Some(record) = udv::decode_frame(&frame) {
+                            // fwinfo is ~1 Hz, not part of the cyclic scan.
+                            if !matches!(record, udv::UdvPitDiagFrame::FwInfo(_)) {
+                                frames_this_scan += 1;
+                            }
+                            if json {
+                                print_udv_json(ts_ms, &record);
+                            } else {
+                                print_udv_human(ts_ms, &record);
                             }
                         }
                     }
@@ -868,6 +900,80 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
     }
 }
 
+// ---- uDV output formatting --------------------------------------
+
+fn print_udv_human(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
+    use udv::UdvPitDiagFrame as F;
+    let prefix = format!("[+{:>7.3}s]", (ts_ms as f64) / 1000.0);
+    match record {
+        F::Status(s) => println!(
+            "{prefix} status as={:?} sig=0x{:04X} mission={} ebs={:?} assi={:?} armed={}",
+            s.as_state, s.signals, s.mission_id, s.ebs_init, s.assi, s.diag_armed as u8,
+        ),
+        F::Res(r) => println!(
+            "{prefix} res    status={:?} bits=0x{:02X} radio={} age={}ms steer={:?} raw191=0x{:02X}",
+            r.res_status, r.bits, r.radio_quality, r.res_age_ms, r.steer_motor, r.raw_0x191,
+        ),
+        F::Pipe(p) => println!(
+            "{prefix} pipe   dv=0x{:02X} accel={}% steer={} dv_age={}ms ctrl_age={}ms setup=0x{:02X}",
+            p.dv_status, p.accel_cmd_pct, p.steer_cmd, p.dv_age_ms, p.ctrl_age_ms, p.setup_bits,
+        ),
+        F::Health(h) => println!(
+            "{prefix} health heap={}/{}w tasks=0x{:02X} flags=0x{:02X} stalled={} uptime={}s",
+            h.free_heap_words,
+            h.min_free_heap_words,
+            h.task_mask,
+            h.flags,
+            h.stalled_task,
+            h.uptime_s,
+        ),
+        F::FwInfo(f) => println!(
+            "{prefix} fw     git={:08X} stub=0x{:02X} heap={}KB uptime={}s",
+            f.git_hash, f.stub_mask, f.heap_size_kb, f.uptime_s,
+        ),
+    }
+}
+
+/// NDJSON for the uDV profile. `kind` names follow the `ecu*` convention
+/// (`udvStatus`/`udvRes`/…). Bit masks are emitted raw (the consumer
+/// decodes individual bits), enums as their debug names.
+fn print_udv_json(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
+    use udv::UdvPitDiagFrame as F;
+    match record {
+        F::Status(s) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvStatus","asState":"{:?}","signals":{},"missionId":{},"ebsInit":"{:?}","stubMask":{},"assi":"{:?}","diagArmed":{}}}"#,
+            s.as_state, s.signals, s.mission_id, s.ebs_init, s.stub_mask, s.assi, s.diag_armed,
+        ),
+        F::Res(r) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvRes","raw0x191":{},"resStatus":"{:?}","bits":{},"radioQuality":{},"resAgeMs":{},"steerMotor":"{:?}","lwsStatus":{}}}"#,
+            r.raw_0x191,
+            r.res_status,
+            r.bits,
+            r.radio_quality,
+            r.res_age_ms,
+            r.steer_motor,
+            r.lws_status,
+        ),
+        F::Pipe(p) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvPipe","dvStatus":{},"dvAgeMs":{},"accelCmdPct":{},"steerCmd":{},"ctrlAgeMs":{},"setupBits":{}}}"#,
+            p.dv_status, p.dv_age_ms, p.accel_cmd_pct, p.steer_cmd, p.ctrl_age_ms, p.setup_bits,
+        ),
+        F::Health(h) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvHealth","freeHeapWords":{},"minFreeHeapWords":{},"taskMask":{},"flags":{},"stalledTask":{},"uptimeS":{}}}"#,
+            h.free_heap_words,
+            h.min_free_heap_words,
+            h.task_mask,
+            h.flags,
+            h.stalled_task,
+            h.uptime_s,
+        ),
+        F::FwInfo(f) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvFwInfo","gitHash":{},"stubMask":{},"heapSizeKb":{},"uptimeS":{}}}"#,
+            f.git_hash, f.stub_mask, f.heap_size_kb, f.uptime_s,
+        ),
+    }
+}
+
 // ---- Helpers ----------------------------------------------------
 
 fn open(global: &GlobalFlags) -> Result<Box<dyn CanBackend>> {
@@ -893,13 +999,27 @@ fn map_interface(i: InterfaceType) -> InterfaceType {
 /// `0x7E1` for ECU) with the matching `enabled` flag. Returns `Err` on
 /// timeout / wrong-flavour ACK / bus error.
 async fn arm(backend: &dyn CanBackend, profile: Profile, enable: bool) -> Result<()> {
+    // uDV arm is fire-and-forget: `0x7DE` sticky-enables the stream with no
+    // ACK, and there's no disarm frame (the firmware clears it on reboot).
+    if profile == Profile::Udv {
+        if enable {
+            backend
+                .send(udv::build_arm_frame())
+                .await
+                .map_err(|e| anyhow!("sending uDV arm frame: {e}"))?;
+        }
+        return Ok(());
+    }
+
     let arm_frame = match profile {
         Profile::Ams => build_arm_frame(enable),
         Profile::Ecu => ecu::build_arm_frame(enable),
+        Profile::Udv => unreachable!("handled above"),
     };
     let ack_id = match profile {
         Profile::Ams => AMS_ACK_ID,
         Profile::Ecu => ecu::ECU_ACK_ID,
+        Profile::Udv => unreachable!("handled above"),
     };
 
     backend
@@ -921,6 +1041,7 @@ async fn arm(backend: &dyn CanBackend, profile: Profile, enable: bool) -> Result
                     Profile::Ecu => {
                         matches!(ecu::decode_frame(&frame), Some(ecu::EcuPitDiagFrame::Ack { enabled }) if enabled == enable)
                     }
+                    Profile::Udv => unreachable!("handled above"),
                 };
                 if acked {
                     return Ok(());
@@ -943,6 +1064,7 @@ async fn arm(backend: &dyn CanBackend, profile: Profile, enable: bool) -> Result
         match profile {
             Profile::Ams => "AMS",
             Profile::Ecu => "ECU",
+            Profile::Udv => unreachable!("handled above"),
         },
         ACK_TIMEOUT.as_millis()
     ))
@@ -953,15 +1075,16 @@ mod tests {
     use super::{parse_profile, Profile};
 
     #[test]
-    fn parse_profile_accepts_ams_and_ecu() {
+    fn parse_profile_accepts_ams_ecu_udv() {
         assert_eq!(parse_profile("ams").unwrap(), Profile::Ams);
         assert_eq!(parse_profile("ecu").unwrap(), Profile::Ecu);
+        assert_eq!(parse_profile("udv").unwrap(), Profile::Udv);
     }
 
     #[test]
     fn parse_profile_rejects_unknown() {
-        let err = parse_profile("udv").unwrap_err().to_string();
-        assert!(err.contains("udv"), "message names the bad profile: {err}");
+        let err = parse_profile("xyz").unwrap_err().to_string();
+        assert!(err.contains("xyz"), "message names the bad profile: {err}");
         assert!(parse_profile("").is_err());
     }
 

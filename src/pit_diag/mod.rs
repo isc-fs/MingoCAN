@@ -62,6 +62,7 @@ use crate::protocol::CanFrame;
 /// AMS one decoded in this module. Kept in its own submodule so the
 /// AMS-prefixed symbols here stay unambiguous.
 pub mod ecu;
+pub mod udv;
 
 // ---- Wire-level constants ---------------------------------------
 

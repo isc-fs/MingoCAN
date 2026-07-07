@@ -255,6 +255,57 @@
     let ecuHealth = $state<EcuHealthSnapshot | null>(null);
     let ecuDv = $state<EcuDvSnapshot | null>(null);
 
+    // ---- uDV pit-diag snapshots (0x7A0..=0x7A4) ----
+    interface UdvStatusSnapshot {
+        asState: string;
+        signals: number;
+        missionId: number;
+        ebsInit: string;
+        stubMask: number;
+        assi: string;
+        diagArmed: boolean;
+    }
+    interface UdvResSnapshot {
+        raw191: number;
+        resStatus: string;
+        bits: number;
+        radioQuality: number;
+        resAgeMs: number;
+        steerMotor: string;
+        lwsStatus: number;
+    }
+    interface UdvPipeSnapshot {
+        dvStatus: number;
+        dvAgeMs: number;
+        accelCmdPct: number;
+        steerCmd: number;
+        ctrlAgeMs: number;
+        setupBits: number;
+    }
+    interface UdvHealthSnapshot {
+        freeHeapWords: number;
+        minFreeHeapWords: number;
+        taskMask: number;
+        flags: number;
+        stalledTask: number;
+        uptimeS: number;
+    }
+    interface UdvFwSnapshot {
+        gitHash: number;
+        heapSizeKb: number;
+        uptimeS: number;
+    }
+    let udvStatus = $state<UdvStatusSnapshot | null>(null);
+    let udvRes = $state<UdvResSnapshot | null>(null);
+    let udvPipe = $state<UdvPipeSnapshot | null>(null);
+    let udvHealth = $state<UdvHealthSnapshot | null>(null);
+    let udvFw = $state<UdvFwSnapshot | null>(null);
+
+    // Bit helper for the raw signal / setup / RES masks.
+    function bit(mask: number, b: number): boolean {
+        return (mask & (1 << b)) !== 0;
+    }
+
     // APPS plausibility: FSAE T11.8.9 trips at >10% disagreement
     // between the two pedal channels. Surface the live delta so the
     // operator can sanity-check the pedal calibration on the bench.
@@ -311,6 +362,21 @@
             balance !== null ||
             cellsMv.some((v) => v !== null) ||
             ntcsC.some((v) => v !== null),
+    );
+
+    // True once any uDV frame has landed — gates the panels vs the hint.
+    const udvHasData = $derived(
+        udvStatus !== null ||
+            udvRes !== null ||
+            udvPipe !== null ||
+            udvHealth !== null,
+    );
+
+    // uDV firmware header chip — "uDV git 1a2b3c4d".
+    const udvFwLabel = $derived(
+        udvFw === null
+            ? null
+            : `uDV git ${(udvFw.gitHash >>> 0).toString(16).padStart(8, '0')}`,
     );
 
     // Is cell `idx` discharging? Mirrors BalanceState::is_discharging
@@ -464,6 +530,11 @@
         ecuFw = null;
         ecuHealth = null;
         ecuDv = null;
+        udvStatus = null;
+        udvRes = null;
+        udvPipe = null;
+        udvHealth = null;
+        udvFw = null;
         framesThisScan = 0;
         lastScanFrames = 0;
         try {
@@ -683,6 +754,56 @@
                     motorRpmMech: event.motorRpmMech,
                 };
                 framesThisScan += 1;
+                // ---- uDV profile frames (0x7A0..=0x7A4) ----
+            } else if (event.kind === 'udvStatus') {
+                udvStatus = {
+                    asState: event.asState,
+                    signals: event.signals,
+                    missionId: event.missionId,
+                    ebsInit: event.ebsInit,
+                    stubMask: event.stubMask,
+                    assi: event.assi,
+                    diagArmed: event.diagArmed,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'udvRes') {
+                udvRes = {
+                    raw191: event.raw191,
+                    resStatus: event.resStatus,
+                    bits: event.bits,
+                    radioQuality: event.radioQuality,
+                    resAgeMs: event.resAgeMs,
+                    steerMotor: event.steerMotor,
+                    lwsStatus: event.lwsStatus,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'udvPipe') {
+                udvPipe = {
+                    dvStatus: event.dvStatus,
+                    dvAgeMs: event.dvAgeMs,
+                    accelCmdPct: event.accelCmdPct,
+                    steerCmd: event.steerCmd,
+                    ctrlAgeMs: event.ctrlAgeMs,
+                    setupBits: event.setupBits,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'udvHealth') {
+                udvHealth = {
+                    freeHeapWords: event.freeHeapWords,
+                    minFreeHeapWords: event.minFreeHeapWords,
+                    taskMask: event.taskMask,
+                    flags: event.flags,
+                    stalledTask: event.stalledTask,
+                    uptimeS: event.uptimeS,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'udvFwInfo') {
+                udvFw = {
+                    gitHash: event.gitHash,
+                    heapSizeKb: event.heapSizeKb,
+                    uptimeS: event.uptimeS,
+                };
+                // fwinfo is ~1 Hz — not part of the cyclic scan.
             }
             // Ack events come during arm/disarm; they're handled by
             // the status listener, not counted toward a scan window.
@@ -814,8 +935,10 @@
                 </p>
             {:else}
                 <p class="muted">
-                    Per-ECU diagnostic observer. Select an ECU to arm its
-                    pit-diag stream.
+                    uDV observer mode. Arming emits <code>0x7DE#DEADBEEF</code>
+                    (sticky — no ACK, no disarm; the firmware clears it on
+                    reboot); the uDV then streams AS state, RES, the /dv pipe,
+                    and health at ~10 Hz (<code>0x7A0..=0x7A4</code>).
                 </p>
             {/if}
         </div>
@@ -833,12 +956,18 @@
             >
                 {ecuFwLabel}
             </span>
+        {:else if profile === 'udv' && udvFwLabel !== null}
+            <span
+                class="pill fw-chip mono"
+                title="From the 0x7A4 firmware-ID frame. Compare against the build you flashed."
+            >
+                {udvFwLabel}
+            </span>
         {/if}
     </header>
 
-    <!-- ECU profile selector — AMS is wired end-to-end; ECU / uDV are
-         selectable but render a placeholder until they grow a pit-diag
-         stream + DBCinator frames. -->
+    <!-- Profile selector — AMS / ECU / uDV each expose an arm handshake +
+         decoded telemetry stream. -->
     <div class="profile-tabs" role="radiogroup" aria-label="ECU profile">
         {#each PROFILES as p (p.id)}
             <button
@@ -857,7 +986,7 @@
     {#if !adapterReady}
         <div class="banner banner-warning gate">
             <span>
-                <strong>No adapter selected.</strong> Pit-diag needs an
+                <strong>No adapter selected.</strong> Telemetry needs an
                 <code>--interface</code>/<code>--channel</code> pair.
             </span>
             <button
@@ -871,27 +1000,234 @@
     {/if}
 
     {#if profile === 'udv'}
-        <!-- uDV placeholder. No arm handshake or frame contract exists
-             for it yet, so we don't offer to arm — surfacing a clear
-             "why" beats a button that errors. -->
-        <div class="card placeholder-card">
-            <h3>uDV pit-diag isn't available yet</h3>
-            <p class="muted">
-                The AMS (<code>0x7F0</code> / <code>0x6C0..=0x6C8</code>)
-                and the ECU (<code>0x7E0</code> / <code>0x700..=0x705</code>)
-                each expose a pit-diag arm handshake + decoded stream. The
-                uDV has no pit-diag protocol or frames defined in
-                IFS08-DBCinator yet, so there's nothing to arm or decode.
-            </p>
-            <p class="muted">
-                Once the firmware team ships a uDV pit-diag stream and
-                publishes its frames, this panel grows live readouts like
-                the <strong>AMS</strong> and <strong>ECU</strong> tabs.
-                Until then, switch profiles above, or use the
-                <strong>Bus monitor</strong> / <strong>Signals</strong>
-                views to watch raw or DBC-decoded traffic from any node.
-            </p>
+        <!-- uDV controls. Arm is sticky/fire-and-forget (0x7DE); no ACK,
+             no disarm frame — Disable just tears down the reader. -->
+        <div class="toolbar card card-tight">
+            {#if armState.kind === 'idle' || armState.kind === 'error'}
+                <button
+                    type="button"
+                    class="btn btn-primary"
+                    disabled={!adapterReady}
+                    onclick={confirmArm}
+                >
+                    Enable uDV telemetry
+                </button>
+            {:else if armState.kind === 'confirming'}
+                <div class="confirm">
+                    <span class="confirm-text">Arm uDV telemetry stream?</span>
+                    <button type="button" class="btn btn-primary" onclick={arm}>
+                        Yes, arm
+                    </button>
+                    <button type="button" class="btn" onclick={cancelArm}>
+                        Cancel
+                    </button>
+                </div>
+            {:else if armState.kind === 'arming'}
+                <button type="button" class="btn" disabled>Arming…</button>
+            {:else if armState.kind === 'armed'}
+                <button type="button" class="btn btn-danger" onclick={disarm}>
+                    Disable
+                </button>
+                <span class="stat">
+                    <strong class="status-dot armed">●</strong>
+                    <span>armed</span>
+                </span>
+                <span class="stat">
+                    <span>frames / scan</span>
+                    <strong>{lastScanFrames}</strong>
+                </span>
+            {/if}
         </div>
+
+        {#if armState.kind === 'error'}
+            <div class="banner banner-danger">
+                <strong>Arm failed:</strong>
+                {armState.message}
+            </div>
+        {/if}
+
+        {#if !udvHasData}
+            <div class="card placeholder-card">
+                <h3>uDV telemetry</h3>
+                <p class="muted">
+                    {#if armState.kind === 'armed'}
+                        Armed — waiting for the first frames from the uDV…
+                    {:else}
+                        Connect the uDV and hit
+                        <strong>Enable uDV telemetry</strong>. Arming emits
+                        <code>0x7DE#DEADBEEF</code> (sticky); the uDV then
+                        streams AS state, RES, the /dv pipe, and health.
+                    {/if}
+                </p>
+            </div>
+        {:else}
+            <div class="ecu-grid">
+                <!-- AS status (0x7A0) -->
+                <div class="card">
+                    <h3 class="card-h">Autonomous system</h3>
+                    {#if udvStatus !== null}
+                        <div class="badge-row">
+                            <span
+                                class="pill pill-{udvStatus.asState === 'Emergency'
+                                    ? 'danger'
+                                    : udvStatus.asState === 'Driving'
+                                      ? 'success'
+                                      : 'info'}"
+                            >
+                                {udvStatus.asState}
+                            </span>
+                            <span class="pill pill-info">assi: {udvStatus.assi}</span>
+                            <span class="pill pill-info">ebs: {udvStatus.ebsInit}</span>
+                        </div>
+                        <div class="flags">
+                            <span class="flag" class:on={bit(udvStatus.signals, 0)}>ASMS</span>
+                            <span class="flag" class:on={bit(udvStatus.signals, 1)}>TS</span>
+                            <span class="flag" class:on={bit(udvStatus.signals, 3)}>EBS</span>
+                            <span class="flag" class:on={bit(udvStatus.signals, 4)}>ABS</span>
+                            <span class="flag" class:on={bit(udvStatus.signals, 5)}>Brakes</span>
+                            <span class="flag" class:on={bit(udvStatus.signals, 7)}>R2D</span>
+                            <span class="flag" class:on={bit(udvStatus.signals, 8)}>Standstill</span>
+                            <span class="flag" class:on={bit(udvStatus.signals, 2)}>SDC open</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>mission</span>
+                                <strong>{udvStatus.missionId < 0 ? 'none' : udvStatus.missionId}</strong>
+                            </span>
+                            <span class="stat">
+                                <span>stubs</span>
+                                <strong>
+                                    {bit(udvStatus.stubMask, 0) ? 'EBS ' : ''}{bit(
+                                        udvStatus.stubMask,
+                                        1,
+                                    )
+                                        ? 'DVPC'
+                                        : ''}{udvStatus.stubMask === 0 ? 'none' : ''}
+                                </strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No status frame yet.</p>
+                    {/if}
+                </div>
+
+                <!-- RES + steering (0x7A1) -->
+                <div class="card">
+                    <h3 class="card-h">RES / steering</h3>
+                    {#if udvRes !== null}
+                        <div class="badge-row">
+                            <span
+                                class="pill pill-{udvRes.resStatus === 'Estop'
+                                    ? 'danger'
+                                    : udvRes.resStatus === 'Go'
+                                      ? 'success'
+                                      : 'info'}"
+                            >
+                                RES: {udvRes.resStatus}
+                            </span>
+                            <span
+                                class="pill pill-{udvRes.steerMotor === 'Emergency'
+                                    ? 'danger'
+                                    : udvRes.steerMotor === 'On'
+                                      ? 'success'
+                                      : 'info'}"
+                            >
+                                steer: {udvRes.steerMotor}
+                            </span>
+                        </div>
+                        <div class="flags">
+                            <span class="flag" class:on={bit(udvRes.bits, 0)}>E-stop</span>
+                            <span class="flag" class:on={bit(udvRes.bits, 1)}>Go</span>
+                            <span class="flag" class:on={bit(udvRes.bits, 2)}>Pre-alarm</span>
+                            <span class="flag" class:on={bit(udvRes.bits, 3)}>Brake&gt;lim</span>
+                            <span class="flag" class:on={bit(udvRes.bits, 6)}>TS active</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>radio</span><strong>{udvRes.radioQuality}</strong>
+                            </span>
+                            <span class="stat" class:bad={udvRes.resAgeMs === 65535}>
+                                <span>RES age</span>
+                                <strong>{udvRes.resAgeMs === 65535 ? 'never' : `${udvRes.resAgeMs} ms`}</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No RES frame yet.</p>
+                    {/if}
+                </div>
+
+                <!-- /dv pipe (0x7A2) -->
+                <div class="card">
+                    <h3 class="card-h">/dv pipe</h3>
+                    {#if udvPipe !== null}
+                        <div class="flags">
+                            <span class="flag" class:on={bit(udvPipe.setupBits, 0)}>Setup</span>
+                            <span class="flag" class:on={bit(udvPipe.setupBits, 1)}>Ready</span>
+                            <span class="flag" class:on={bit(udvPipe.setupBits, 2)}>Going</span>
+                            <span class="flag" class:on={bit(udvPipe.setupBits, 3)}>Emergency</span>
+                            <span class="flag" class:on={bit(udvPipe.setupBits, 4)}>Finished</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>accel cmd</span><strong>{udvPipe.accelCmdPct}%</strong>
+                            </span>
+                            <span class="stat">
+                                <span>steer cmd</span><strong>{udvPipe.steerCmd}</strong>
+                            </span>
+                            <span class="stat" class:bad={udvPipe.dvAgeMs === 65535}>
+                                <span>/dv age</span>
+                                <strong>{udvPipe.dvAgeMs === 65535 ? 'never' : `${udvPipe.dvAgeMs} ms`}</strong>
+                            </span>
+                            <span class="stat">
+                                <span>ctrl age</span>
+                                <strong>{udvPipe.ctrlAgeMs === 65535 ? 'never' : `${udvPipe.ctrlAgeMs} ms`}</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No pipe frame yet.</p>
+                    {/if}
+                </div>
+
+                <!-- Firmware health (0x7A3) -->
+                <div class="card">
+                    <h3 class="card-h">Firmware health</h3>
+                    {#if udvHealth !== null}
+                        <div class="flags">
+                            <span class="flag" class:on={bit(udvHealth.taskMask, 0)}>IMU</span>
+                            <span class="flag" class:on={bit(udvHealth.taskMask, 1)}>CAN</span>
+                            <span class="flag" class:on={bit(udvHealth.taskMask, 2)}>APP</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>free heap</span>
+                                <strong class="mono">{udvHealth.freeHeapWords * 4} B</strong>
+                            </span>
+                            <span class="stat">
+                                <span>min heap</span>
+                                <strong class="mono">{udvHealth.minFreeHeapWords * 4} B</strong>
+                            </span>
+                            <span class="stat">
+                                <span>uptime</span><strong>{udvHealth.uptimeS} s</strong>
+                            </span>
+                            <span class="stat" class:bad={udvHealth.stalledTask >= 0}>
+                                <span>stalled task</span>
+                                <strong>{udvHealth.stalledTask < 0 ? 'none' : udvHealth.stalledTask}</strong>
+                            </span>
+                            <span class="stat" class:bad={bit(udvHealth.flags, 0)}>
+                                <span>IWDG reset</span>
+                                <strong>{bit(udvHealth.flags, 0) ? 'yes' : 'no'}</strong>
+                            </span>
+                            <span class="stat" class:bad={bit(udvHealth.flags, 1)}>
+                                <span>emergency</span>
+                                <strong>{bit(udvHealth.flags, 1) ? 'latched' : 'no'}</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No health frame yet.</p>
+                    {/if}
+                </div>
+            </div>
+        {/if}
     {:else if profile === 'ecu'}
         <!-- ECU controls -->
         <div class="toolbar card card-tight">
@@ -902,11 +1238,11 @@
                     disabled={!adapterReady}
                     onclick={confirmArm}
                 >
-                    Enable ECU pit-diag
+                    Enable ECU telemetry
                 </button>
             {:else if armState.kind === 'confirming'}
                 <div class="confirm">
-                    <span class="confirm-text">Arm ECU pit-diag stream?</span>
+                    <span class="confirm-text">Arm ECU telemetry stream?</span>
                     <button type="button" class="btn btn-primary" onclick={arm}>
                         Yes, arm
                     </button>
@@ -940,13 +1276,13 @@
 
         {#if !ecuHasData}
             <div class="card placeholder-card">
-                <h3>ECU pit-diag</h3>
+                <h3>ECU telemetry</h3>
                 <p class="muted">
                     {#if armState.kind === 'armed'}
                         Armed — waiting for the first frames from the ECU…
                     {:else}
                         Connect the ECU and hit
-                        <strong>Enable ECU pit-diag</strong>. Arming emits
+                        <strong>Enable ECU telemetry</strong>. Arming emits
                         <code>0x7E0#DEADBEEF</code>; the ECU then streams APPS,
                         brake, FSM, and inverter telemetry.
                     {/if}
@@ -1215,11 +1551,11 @@
                 disabled={!adapterReady}
                 onclick={confirmArm}
             >
-                Enable AMS pit-diag
+                Enable AMS telemetry
             </button>
         {:else if armState.kind === 'confirming'}
             <div class="confirm">
-                <span class="confirm-text">Arm AMS pit-diag stream?</span>
+                <span class="confirm-text">Arm AMS telemetry stream?</span>
                 <button type="button" class="btn btn-primary" onclick={arm}>
                     Yes, arm
                 </button>
@@ -1261,13 +1597,13 @@
 
     {#if !amsHasData}
         <div class="card placeholder-card">
-            <h3>AMS pit-diag</h3>
+            <h3>AMS telemetry</h3>
             <p class="muted">
                 {#if armState.kind === 'armed'}
                     Armed — waiting for the first frames from the AMS…
                 {:else}
                     Connect the AMS and hit
-                    <strong>Enable AMS pit-diag</strong>. Arming emits
+                    <strong>Enable AMS telemetry</strong>. Arming emits
                     <code>0x7F0#DEADBEEF</code>; the AMS then streams cell
                     voltages, NTC temperatures, and FSM / balance
                     diagnostics.
@@ -1289,7 +1625,7 @@
         <div class="banner banner-warning">
             <strong>Schema drift suspected.</strong>
             Last scan carried {lastScanFrames} frames, expected
-            {AMS_EXPECTED_FRAMES_PER_SCAN}. The AMS firmware's pit-diag
+            {AMS_EXPECTED_FRAMES_PER_SCAN}. The AMS firmware's telemetry
             wire shape may have changed since the host's layout was
             last verified — the panels below may be partial or
             mis-routed. Verify against
