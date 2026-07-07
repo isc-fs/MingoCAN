@@ -43,6 +43,9 @@ use can_flasher::pit_diag::ecu::{
     EcuInverterFrame, EcuInverterTempsFrame, EcuPedalsFrame, EcuPitDiagFrame, EcuResetCause,
     EcuStatusFrame, ECU_ACK_ID,
 };
+use can_flasher::pit_diag::udv::{
+    self, UdvFwInfoFrame, UdvHealthFrame, UdvPipeFrame, UdvResFrame, UdvStatusFrame,
+};
 use can_flasher::pit_diag::{
     build_arm_frame, decode_frame, AcuCurrentsFrame, AmsHealthFrame, BalanceMaskAFrame,
     BalanceMaskBFrame, BootDiagFrame, CellVoltageFrame, FaultReason, FsmState, FsmStatusFrame,
@@ -107,6 +110,7 @@ fn default_profile() -> String {
 enum Profile {
     Ams,
     Ecu,
+    Udv,
 }
 
 impl Profile {
@@ -116,25 +120,31 @@ impl Profile {
         match s {
             "ams" => Ok(Self::Ams),
             "ecu" => Ok(Self::Ecu),
+            "udv" => Ok(Self::Udv),
             other => Err(format!(
-                "pit-diag is not implemented for profile '{other}' yet — only 'ams' and 'ecu' have an arm handshake and frame stream"
+                "pit-diag is not implemented for profile '{other}' yet"
             )),
         }
     }
 
-    /// CAN ID this profile ACKs arm/disarm commands on.
-    fn ack_id(self) -> u16 {
+    /// CAN ID this profile ACKs arm/disarm commands on. `None` for uDV,
+    /// which sticky-enables with no ACK.
+    fn ack_id(self) -> Option<u16> {
         match self {
-            Self::Ams => AMS_ACK_ID,
-            Self::Ecu => ECU_ACK_ID,
+            Self::Ams => Some(AMS_ACK_ID),
+            Self::Ecu => Some(ECU_ACK_ID),
+            Self::Udv => None,
         }
     }
 
     /// Build the arm (or disarm) frame for this profile's firmware.
-    fn arm_frame(self, enable: bool) -> CanFrame {
+    /// `None` for a uDV *disarm* — the firmware has no disarm frame (it
+    /// clears the sticky flag on reboot).
+    fn arm_frame(self, enable: bool) -> Option<CanFrame> {
         match self {
-            Self::Ams => build_arm_frame(enable),
-            Self::Ecu => ecu::build_arm_frame(enable),
+            Self::Ams => Some(build_arm_frame(enable)),
+            Self::Ecu => Some(ecu::build_arm_frame(enable)),
+            Self::Udv => enable.then(udv::build_arm_frame),
         }
     }
 
@@ -144,6 +154,7 @@ impl Profile {
         match self {
             Self::Ams => decode_frame(frame).map(PitDiagEvent::from_library),
             Self::Ecu => ecu::decode_frame(frame).map(PitDiagEvent::from_ecu),
+            Self::Udv => udv::decode_frame(frame).map(PitDiagEvent::from_udv),
         }
     }
 }
@@ -476,6 +487,53 @@ pub enum PitDiagEvent {
         uptime_s: u8,
         last_fault: u8,
     },
+
+    // ---- uDV profile (0x7A0..=0x7A4) ----
+    /// uDV `0x7A0` — AS state + 10-bit signal mask + mission + EBS-init + ASSI.
+    UdvStatus {
+        as_state: String,
+        signals: u16,
+        mission_id: i8,
+        ebs_init: String,
+        stub_mask: u8,
+        assi: String,
+        diag_armed: bool,
+    },
+    /// uDV `0x7A1` — RES status/bits, radio, frame age, steering.
+    UdvRes {
+        raw191: u8,
+        res_status: String,
+        bits: u8,
+        radio_quality: u8,
+        res_age_ms: u16,
+        steer_motor: String,
+        lws_status: u8,
+    },
+    /// uDV `0x7A2` — /dv pipe: status + control commands + ages + setup bits.
+    UdvPipe {
+        dv_status: u8,
+        dv_age_ms: u16,
+        accel_cmd_pct: i8,
+        steer_cmd: i8,
+        ctrl_age_ms: u16,
+        setup_bits: u8,
+    },
+    /// uDV `0x7A3` — health (heap in words, task mask, reset flags, uptime).
+    UdvHealth {
+        free_heap_words: u16,
+        min_free_heap_words: u16,
+        task_mask: u8,
+        flags: u8,
+        stalled_task: i8,
+        uptime_s: u8,
+    },
+    /// uDV `0x7A4` — firmware identity (git hash + stub mask + heap size).
+    UdvFwInfo {
+        git_hash: u32,
+        stub_mask: u8,
+        heap_size_kb: u8,
+        uptime_s: u8,
+    },
 }
 
 impl PitDiagEvent {
@@ -751,6 +809,90 @@ impl PitDiagEvent {
             },
         }
     }
+
+    /// Map a decoded uDV library frame into a UI event. Bit masks pass
+    /// through raw (the frontend decodes bits); enums stringify to their
+    /// debug names so the frontend can switch on / display them.
+    fn from_udv(frame: udv::UdvPitDiagFrame) -> Self {
+        use udv::UdvPitDiagFrame as F;
+        match frame {
+            F::Status(UdvStatusFrame {
+                as_state,
+                signals,
+                mission_id,
+                ebs_init,
+                stub_mask,
+                assi,
+                diag_armed,
+            }) => Self::UdvStatus {
+                as_state: format!("{as_state:?}"),
+                signals,
+                mission_id,
+                ebs_init: format!("{ebs_init:?}"),
+                stub_mask,
+                assi: format!("{assi:?}"),
+                diag_armed,
+            },
+            F::Res(UdvResFrame {
+                raw_0x191,
+                res_status,
+                bits,
+                radio_quality,
+                res_age_ms,
+                steer_motor,
+                lws_status,
+            }) => Self::UdvRes {
+                raw191: raw_0x191,
+                res_status: format!("{res_status:?}"),
+                bits,
+                radio_quality,
+                res_age_ms,
+                steer_motor: format!("{steer_motor:?}"),
+                lws_status,
+            },
+            F::Pipe(UdvPipeFrame {
+                dv_status,
+                dv_age_ms,
+                accel_cmd_pct,
+                steer_cmd,
+                ctrl_age_ms,
+                setup_bits,
+            }) => Self::UdvPipe {
+                dv_status,
+                dv_age_ms,
+                accel_cmd_pct,
+                steer_cmd,
+                ctrl_age_ms,
+                setup_bits,
+            },
+            F::Health(UdvHealthFrame {
+                free_heap_words,
+                min_free_heap_words,
+                task_mask,
+                flags,
+                stalled_task,
+                uptime_s,
+            }) => Self::UdvHealth {
+                free_heap_words,
+                min_free_heap_words,
+                task_mask,
+                flags,
+                stalled_task,
+                uptime_s,
+            },
+            F::FwInfo(UdvFwInfoFrame {
+                git_hash,
+                stub_mask,
+                heap_size_kb,
+                uptime_s,
+            }) => Self::UdvFwInfo {
+                git_hash,
+                stub_mask,
+                heap_size_kb,
+                uptime_s,
+            },
+        }
+    }
 }
 
 // ---- Commands ---------------------------------------------------
@@ -767,7 +909,6 @@ pub async fn pit_diag_enable(
     // the view renders as its "not available yet" placeholder rather
     // than attempting to arm.
     let profile = Profile::parse(&request.profile)?;
-    let ack_id = profile.ack_id();
 
     // Idempotency — stop any prior session first. Mirrors bus_monitor.
     {
@@ -789,48 +930,54 @@ pub async fn pit_diag_enable(
     // success. If the board isn't on the bus or doesn't have the
     // pit-diag firmware, this surfaces as a clean error in the UI
     // rather than a silent "armed but nothing arriving".
-    backend
-        .send(profile.arm_frame(true))
-        .await
-        .map_err(|e| format!("sending arm frame: {e}"))?;
-
-    let started = Instant::now();
-    let mut acked_enabled = false;
-    while started.elapsed() < ACK_TIMEOUT {
-        match backend.recv(STREAM_POLL_TIMEOUT).await {
-            Ok(frame) if frame.id == ack_id => {
-                if let Some(PitDiagEvent::Ack { enabled }) = profile.decode_event(&frame) {
-                    acked_enabled = enabled;
-                    // Surface the ACK to the frontend immediately
-                    // so an enabled=true ACK is visible before any
-                    // stream frames land.
-                    let _ = app.emit(FRAME_EVENT, &PitDiagEvent::Ack { enabled });
-                    if enabled {
-                        break;
-                    }
-                }
-            }
-            Ok(_) => {
-                // Frame from some other ID — ignore during arm wait.
-            }
-            Err(err) => {
-                let msg = err.to_string().to_lowercase();
-                if msg.contains("timed out")
-                    || msg.contains("timeout")
-                    || msg.contains("would block")
-                {
-                    continue; // poll cycle expired without a frame
-                }
-                return Err(format!("waiting for ACK: {err}"));
-            }
-        }
+    if let Some(arm) = profile.arm_frame(true) {
+        backend
+            .send(arm)
+            .await
+            .map_err(|e| format!("sending arm frame: {e}"))?;
     }
 
-    if !acked_enabled {
-        return Err(format!(
-            "no ACK from the board within {}ms — is it on the bus, with pit-diag firmware?",
-            ACK_TIMEOUT.as_millis()
-        ));
+    // AMS/ECU ACK the arm; uDV sticky-enables with no ACK, so we skip the
+    // wait and go straight to streaming (there's nothing to confirm).
+    if let Some(ack_id) = profile.ack_id() {
+        let started = Instant::now();
+        let mut acked_enabled = false;
+        while started.elapsed() < ACK_TIMEOUT {
+            match backend.recv(STREAM_POLL_TIMEOUT).await {
+                Ok(frame) if frame.id == ack_id => {
+                    if let Some(PitDiagEvent::Ack { enabled }) = profile.decode_event(&frame) {
+                        acked_enabled = enabled;
+                        // Surface the ACK to the frontend immediately
+                        // so an enabled=true ACK is visible before any
+                        // stream frames land.
+                        let _ = app.emit(FRAME_EVENT, &PitDiagEvent::Ack { enabled });
+                        if enabled {
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Frame from some other ID — ignore during arm wait.
+                }
+                Err(err) => {
+                    let msg = err.to_string().to_lowercase();
+                    if msg.contains("timed out")
+                        || msg.contains("timeout")
+                        || msg.contains("would block")
+                    {
+                        continue; // poll cycle expired without a frame
+                    }
+                    return Err(format!("waiting for ACK: {err}"));
+                }
+            }
+        }
+
+        if !acked_enabled {
+            return Err(format!(
+                "no ACK from the board within {}ms — is it on the bus, with pit-diag firmware?",
+                ACK_TIMEOUT.as_millis()
+            ));
+        }
     }
 
     // ---- Streaming task ----
@@ -912,8 +1059,14 @@ pub async fn pit_diag_disable(
     // still falls through to the task teardown.
     let interface = parse_interface(&request.interface)?;
     if let Ok(profile) = Profile::parse(&request.profile) {
-        if let Ok(backend) = open_backend(interface, request.channel.as_deref(), request.bitrate) {
-            let _ = backend.send(profile.arm_frame(false)).await;
+        // uDV has no disarm frame (`arm_frame(false)` → None); the stream
+        // stops when the reader task is torn down below + on the next reboot.
+        if let Some(disarm) = profile.arm_frame(false) {
+            if let Ok(backend) =
+                open_backend(interface, request.channel.as_deref(), request.bitrate)
+            {
+                let _ = backend.send(disarm).await;
+            }
         }
     }
 

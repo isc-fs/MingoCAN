@@ -301,6 +301,66 @@ export type PitDiagEvent =
           dvTorquePct: number;
           /** Mechanical rpm streamed to the uDV on 0x506 (signed). */
           motorRpmMech: number;
+      }
+    | {
+          /** uDV 0x7A0 — AS state + 10-bit signal mask + mission + EBS-init
+           *  + ASSI. Enum fields are debug names ("Driving"/"Ready"/…). */
+          kind: 'udvStatus';
+          asState: string;
+          /** Raw signal bitmask (b0 ASMS, b1 TS, b2 SDC_open, b3 EBS_act,
+           *  b4 ABS_ok, b5 brakes, b6 mission_sel, b7 R2D, b8 standstill,
+           *  b9 finished). */
+          signals: number;
+          missionId: number;
+          ebsInit: string;
+          /** Stub mask: b0 EBS, b1 DVPC. */
+          stubMask: number;
+          assi: string;
+          diagArmed: boolean;
+      }
+    | {
+          /** uDV 0x7A1 — RES + steering. `bits`: b0 estop, b1 go,
+           *  b2 pre_alarm, b3 brake_over_limit, b4 listen_go,
+           *  b5 sdc_res_open, b6 ts_active_can. */
+          kind: 'udvRes';
+          raw191: number;
+          resStatus: string;
+          bits: number;
+          radioQuality: number;
+          /** RES frame age ms (65535 = never). */
+          resAgeMs: number;
+          steerMotor: string;
+          lwsStatus: number;
+      }
+    | {
+          /** uDV 0x7A2 — /dv pipe. `setupBits`: b0 in_progress, b1 ready,
+           *  b2 going, b3 emergency, b4 finished. */
+          kind: 'udvPipe';
+          dvStatus: number;
+          dvAgeMs: number;
+          accelCmdPct: number;
+          steerCmd: number;
+          ctrlAgeMs: number;
+          setupBits: number;
+      }
+    | {
+          /** uDV 0x7A3 — health. Heap in words (×4 = bytes). `taskMask`:
+           *  b0 IMU, b1 CAN, b2 APP. `flags`: b0 IWDG-reset, b1 emergency. */
+          kind: 'udvHealth';
+          freeHeapWords: number;
+          minFreeHeapWords: number;
+          taskMask: number;
+          flags: number;
+          stalledTask: number;
+          uptimeS: number;
+      }
+    | {
+          /** uDV 0x7A4 — firmware identity. */
+          kind: 'udvFwInfo';
+          gitHash: number;
+          stubMask: number;
+          heapSizeKb: number;
+          uptimeS: number;
       };
 
 /** The inverter-temperature value that means "sensor disconnected"
