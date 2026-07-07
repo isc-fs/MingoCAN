@@ -2,9 +2,9 @@
 //
 // Wraps the `can_flasher::pit_diag` library module(s) with a Tauri
 // command surface and a streaming task, generalized over a `Profile`:
-// AMS (0x7F0 arm / 0x6C0..=0x6C8 stream) and ECU (0x7E0 arm /
-// 0x700..=0x705 stream). uDV has no firmware protocol yet and is
-// rejected with a typed "not implemented" message. Two commands:
+// AMS (0x7F0 arm / 0x6C0..=0x6CA), ECU (0x7E0 arm / 0x700..=0x707), and
+// uDV (0x7DE arm / 0x7A0..=0x7A4 — sticky, no ACK, no disarm). Two
+// commands:
 //
 //   pit_diag_enable(request)   sends the profile's arm frame, waits
 //                              for the ACK on the profile's ACK ID,
@@ -91,9 +91,7 @@ pub struct PitDiagRequest {
     pub interface: String,
     pub channel: Option<String>,
     pub bitrate: u32,
-    /// Which ECU profile to arm. Slice 1 only supports `"ams"`; the
-    /// field lives in the request from day one so the slice-5 plugin
-    /// layer doesn't need a wire-protocol bump.
+    /// Which board's stream to arm: `"ams"`, `"ecu"`, or `"udv"`.
     #[serde(default = "default_profile")]
     pub profile: String,
 }
