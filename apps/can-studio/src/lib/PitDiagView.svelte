@@ -327,6 +327,21 @@
     let calibConfirming = $state<boolean>(false);
     let calibBusy = $state<boolean>(false);
     let calibError = $state<string | null>(null);
+    // The calibration flow lives in a modal (#439 follow-up): the uDV
+    // panel just has a trigger; the live angle + phase guidance + results
+    // only appear once the operator opens it.
+    let calibModalOpen = $state<boolean>(false);
+
+    function openCalibModal(): void {
+        calibError = null;
+        calibConfirming = true;
+        calibModalOpen = true;
+    }
+    function closeCalibModal(): void {
+        // Hide the modal; does not abort a running calibration (use Abort).
+        calibModalOpen = false;
+        calibConfirming = false;
+    }
 
     async function startCalibration(): Promise<void> {
         calibConfirming = false;
@@ -644,6 +659,7 @@
         calibConfirming = false;
         calibBusy = false;
         calibError = null;
+        calibModalOpen = false;
         framesThisScan = 0;
         lastScanFrames = 0;
         try {
@@ -1485,6 +1501,8 @@
     {/if}
 </div>
 
+{@render calibModal()}
+
 <!-- Reusable board card sets — rendered both on the per-board tabs
      above and stacked together in the "All" cockpit. -->
 {#snippet amsStateCards()}
@@ -2076,109 +2094,14 @@
             <div class="card card-tight calib-card">
                 <div class="calib-head">
                     <h3 class="card-h">Steering calibration</h3>
-                    {#if calibBusy}
-                        <button type="button" class="btn" disabled>Triggering…</button>
-                    {:else if calibConfirming}
-                        <div class="confirm">
-                            <span class="confirm-text">
-                                Car elevated? The steering will home and sweep.
-                            </span>
-                            <button type="button" class="btn btn-primary" onclick={startCalibration}>
-                                Yes, calibrate
-                            </button>
-                            <button type="button" class="btn" onclick={() => (calibConfirming = false)}>
-                                Cancel
-                            </button>
-                        </div>
-                    {:else}
-                        <button
-                            type="button"
-                            class="btn btn-primary"
-                            onclick={() => (calibConfirming = true)}
-                        >
-                            Calibrate steering
-                        </button>
-                        {#if udvCalib !== null && udvCalib.phase >= 1 && udvCalib.phase <= 8}
-                            <button type="button" class="btn btn-danger" onclick={abortCalibration}>
-                                Abort
-                            </button>
-                        {/if}
-                    {/if}
-                </div>
-
-                {#if calibError !== null}
-                    <div class="banner banner-danger">{calibError}</div>
-                {/if}
-
-                <!-- Step-by-step operator guidance (#439), keyed on the
-                     0x7A6 phase — turns the blind trigger self-guiding. -->
-                {#if udvCalib !== null && calibGuidance(udvCalib.phase) !== ''}
-                    <p
-                        class="calib-step"
-                        class:ok={udvCalib.phase === 9}
-                        class:fail={udvCalib.phase === 10}
+                    <button
+                        type="button"
+                        class="btn btn-primary"
+                        onclick={openCalibModal}
                     >
-                        {#if udvCalib.phase === 9}✅ {:else if udvCalib.phase === 10}❌ {/if}
-                        {calibGuidance(udvCalib.phase)}
-                        {#if udvCalib.phase === 10 && udvCalib.error !== 0}
-                            ({udvCalib.errorName})
-                        {/if}
-                    </p>
-                {/if}
-
-                <!-- Live LWS wheel angle (#439 / 0x7A7): the primary capture
-                     readout — watch it climb toward a stop and hold. -->
-                {#if udvSteer !== null}
-                    {@const f = lwsFill(udvSteer.lwsRawDdeg / 10)}
-                    <div class="lws">
-                        <div class="lws-head">
-                            <span class="lws-angle mono">
-                                {(udvSteer.lwsRawDdeg / 10).toFixed(1)}°
-                            </span>
-                            <span class="lws-cap muted small">LWS wheel angle</span>
-                            <span
-                                class="pill pill-{udvSteer.motorState === -1
-                                    ? 'danger'
-                                    : udvSteer.motorState === 2
-                                      ? 'warning'
-                                      : udvSteer.motorState === 1
-                                        ? 'success'
-                                        : 'info'}"
-                            >
-                                motor: {udvSteer.motorStateName}
-                            </span>
-                        </div>
-                        <div class="lws-bar">
-                            <div class="lws-tick"></div>
-                            <div
-                                class="lws-fill"
-                                style="left: {f.left}%; width: {f.width}%"
-                            ></div>
-                        </div>
-                        <div class="reads">
-                            <span class="stat">
-                                <span>actual</span>
-                                <strong>{(udvSteer.steerActualDdeg / 10).toFixed(1)}°</strong>
-                            </span>
-                            <span class="stat">
-                                <span>target</span>
-                                <strong>{(udvSteer.steerTargetDdeg / 10).toFixed(1)}°</strong>
-                            </span>
-                            <span class="stat">
-                                <span>LWS status</span>
-                                <strong class="mono">
-                                    0x{udvSteer.lwsStatus
-                                        .toString(16)
-                                        .toUpperCase()
-                                        .padStart(2, '0')}
-                                </strong>
-                            </span>
-                        </div>
-                    </div>
-                {/if}
-
-                {#if udvCalib !== null}
-                    <div class="badge-row">
+                        Calibrate steering…
+                    </button>
+                    {#if udvCalib !== null}
                         <span
                             class="pill pill-{udvCalib.phase === 9
                                 ? 'success'
@@ -2188,32 +2111,195 @@
                         >
                             {udvCalib.phaseName}
                         </span>
-                        {#if udvCalib.error !== 0}
-                            <span class="pill pill-danger">error: {udvCalib.errorName}</span>
-                        {/if}
-                    </div>
-                    <div class="reads">
-                        <span class="stat">
-                            <span>center</span>
-                            <strong>{(udvCalib.centerDdeg / 10).toFixed(1)}°</strong>
-                        </span>
-                        <span class="stat">
-                            <span>half-range</span>
-                            <strong>{(udvCalib.halfRangeDdeg / 10).toFixed(1)}°</strong>
-                        </span>
-                        <span class="stat">
-                            <span>limit</span>
-                            <strong>{(udvCalib.limitDdeg / 10).toFixed(1)}°</strong>
-                        </span>
-                    </div>
-                {:else if udvSteer === null}
-                    <p class="muted small">
-                        Elevate the car, click Calibrate, then follow the wheel to each
-                        end-stop; the steering homes and sweeps to ±limit. Progress
-                        appears here.
-                    </p>
-                {/if}
+                    {/if}
+                </div>
+                <p class="muted small">
+                    Opens a guided pop-up: elevate the car, then follow the live
+                    wheel angle to each end-stop. Results are saved on the uDV.
+                </p>
             </div>
+{/snippet}
+
+<!-- Steering-calibration modal (#439 follow-up). Rendered once at the
+     top of the view; opened from the trigger in the uDV panel / cockpit.
+     Reads the same live udvCalib / udvSteer state that streams while
+     pit-diag is armed. -->
+{#snippet calibModal()}
+    {#if calibModalOpen}
+        <div
+            class="modal-backdrop"
+            role="button"
+            tabindex="-1"
+            onclick={closeCalibModal}
+            onkeydown={(e) => {
+                if (e.key === 'Escape') closeCalibModal();
+            }}
+        >
+            <div
+                class="modal calib-modal"
+                role="dialog"
+                tabindex="-1"
+                aria-modal="true"
+                aria-label="Steering calibration"
+                onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => e.stopPropagation()}
+            >
+                <div class="modal-head">
+                    <h3 class="card-h">Steering calibration</h3>
+                    <button
+                        type="button"
+                        class="modal-close"
+                        aria-label="Close"
+                        onclick={closeCalibModal}
+                    >
+                        ×
+                    </button>
+                </div>
+
+                <div class="modal-body">
+                    {#if calibError !== null}
+                        <div class="banner banner-danger">{calibError}</div>
+                    {/if}
+
+                    {#if calibConfirming}
+                        <p class="calib-step">
+                            Car elevated? The steering will home and sweep to each
+                            end-stop.
+                        </p>
+                        <p class="muted small">
+                            After you confirm, turn the wheel fully to each stop
+                            when prompted (hold ~2&nbsp;s, &gt; 30°), then return it
+                            near centre. Hands clear during the automatic sweep.
+                        </p>
+                    {:else}
+                        <!-- Step-by-step operator guidance, keyed on the 0x7A6
+                             phase — turns the blind trigger self-guiding. -->
+                        {#if calibBusy}
+                            <p class="calib-step">Triggering…</p>
+                        {:else if udvCalib !== null && calibGuidance(udvCalib.phase) !== ''}
+                            <p
+                                class="calib-step"
+                                class:ok={udvCalib.phase === 9}
+                                class:fail={udvCalib.phase === 10}
+                            >
+                                {#if udvCalib.phase === 9}✅ {:else if udvCalib.phase === 10}❌ {/if}
+                                {calibGuidance(udvCalib.phase)}
+                                {#if udvCalib.phase === 10 && udvCalib.error !== 0}
+                                    ({udvCalib.errorName})
+                                {/if}
+                            </p>
+                        {/if}
+
+                        <!-- Live LWS wheel angle (0x7A7): the primary capture
+                             readout — watch it climb toward a stop and hold. -->
+                        {#if udvSteer !== null}
+                            {@const f = lwsFill(udvSteer.lwsRawDdeg / 10)}
+                            <div class="lws">
+                                <div class="lws-head">
+                                    <span class="lws-angle mono">
+                                        {(udvSteer.lwsRawDdeg / 10).toFixed(1)}°
+                                    </span>
+                                    <span class="lws-cap muted small">LWS wheel angle</span>
+                                    <span
+                                        class="pill pill-{udvSteer.motorState === -1
+                                            ? 'danger'
+                                            : udvSteer.motorState === 2
+                                              ? 'warning'
+                                              : udvSteer.motorState === 1
+                                                ? 'success'
+                                                : 'info'}"
+                                    >
+                                        motor: {udvSteer.motorStateName}
+                                    </span>
+                                </div>
+                                <div class="lws-bar">
+                                    <div class="lws-tick"></div>
+                                    <div
+                                        class="lws-fill"
+                                        style="left: {f.left}%; width: {f.width}%"
+                                    ></div>
+                                </div>
+                                <div class="reads">
+                                    <span class="stat">
+                                        <span>actual</span>
+                                        <strong>{(udvSteer.steerActualDdeg / 10).toFixed(1)}°</strong>
+                                    </span>
+                                    <span class="stat">
+                                        <span>target</span>
+                                        <strong>{(udvSteer.steerTargetDdeg / 10).toFixed(1)}°</strong>
+                                    </span>
+                                    <span class="stat">
+                                        <span>LWS status</span>
+                                        <strong class="mono">
+                                            0x{udvSteer.lwsStatus
+                                                .toString(16)
+                                                .toUpperCase()
+                                                .padStart(2, '0')}
+                                        </strong>
+                                    </span>
+                                </div>
+                            </div>
+                        {/if}
+
+                        {#if udvCalib !== null}
+                            <div class="badge-row">
+                                <span
+                                    class="pill pill-{udvCalib.phase === 9
+                                        ? 'success'
+                                        : udvCalib.phase === 10
+                                          ? 'danger'
+                                          : 'info'}"
+                                >
+                                    {udvCalib.phaseName}
+                                </span>
+                                {#if udvCalib.error !== 0}
+                                    <span class="pill pill-danger">error: {udvCalib.errorName}</span>
+                                {/if}
+                            </div>
+                            <div class="reads">
+                                <span class="stat">
+                                    <span>center</span>
+                                    <strong>{(udvCalib.centerDdeg / 10).toFixed(1)}°</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>half-range</span>
+                                    <strong>{(udvCalib.halfRangeDdeg / 10).toFixed(1)}°</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>limit</span>
+                                    <strong>{(udvCalib.limitDdeg / 10).toFixed(1)}°</strong>
+                                </span>
+                            </div>
+                        {:else if udvSteer === null}
+                            <p class="muted small">
+                                Waiting for the first calibration frames from the uDV…
+                            </p>
+                        {/if}
+                    {/if}
+                </div>
+
+                <div class="modal-foot">
+                    {#if calibConfirming}
+                        <button type="button" class="btn btn-primary" onclick={startCalibration}>
+                            Yes, calibrate
+                        </button>
+                        <button type="button" class="btn" onclick={closeCalibModal}>
+                            Cancel
+                        </button>
+                    {:else}
+                        {#if udvCalib !== null && udvCalib.phase >= 1 && udvCalib.phase <= 8}
+                            <button type="button" class="btn btn-danger" onclick={abortCalibration}>
+                                Abort
+                            </button>
+                        {/if}
+                        <button type="button" class="btn" onclick={closeCalibModal}>
+                            Close
+                        </button>
+                    {/if}
+                </div>
+            </div>
+        </div>
+    {/if}
 {/snippet}
 
 {#snippet udvCards()}
@@ -2841,6 +2927,63 @@
         transition:
             left 80ms linear,
             width 80ms linear;
+    }
+    /* Calibration modal (#439 follow-up) — a focused pop-up so the live
+       angle + guidance only appear once the operator opts in. */
+    .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: var(--space-4);
+        background: rgb(0 0 0 / 0.5);
+    }
+    .modal {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+        width: min(560px, 100%);
+        max-height: 90vh;
+        overflow-y: auto;
+        padding: var(--space-4);
+        background: var(--surface, var(--bg));
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg, 10px);
+        box-shadow: 0 12px 40px rgb(0 0 0 / 0.35);
+    }
+    .modal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-3);
+    }
+    .modal-head .card-h {
+        margin: 0;
+    }
+    .modal-close {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 1.5rem;
+        line-height: 1;
+        padding: 0 var(--space-1);
+        cursor: pointer;
+    }
+    .modal-close:hover {
+        color: var(--text);
+    }
+    .modal-body {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+    }
+    .modal-foot {
+        display: flex;
+        justify-content: flex-end;
+        gap: var(--space-3);
     }
     .flags {
         display: flex;
