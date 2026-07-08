@@ -57,7 +57,7 @@ export interface PitDiagRequest {
      * with a clean "not implemented" error), so the view shows a
      * placeholder rather than arming.
      */
-    profile: 'ams' | 'ecu' | 'udv';
+    profile: 'ams' | 'ecu' | 'udv' | 'all';
 }
 
 /** The ECU profiles the pit-diag view can target. Only `ams` is

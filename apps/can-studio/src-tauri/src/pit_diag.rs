@@ -117,6 +117,10 @@ enum Profile {
     Ams,
     Ecu,
     Udv,
+    /// The side-by-side cockpit: arm all three streams and decode every
+    /// frame with all three decoders (their IDs never overlap). Best-effort
+    /// arm — no single ACK to wait for; absent boards just stay empty.
+    All,
 }
 
 impl Profile {
@@ -127,40 +131,59 @@ impl Profile {
             "ams" => Ok(Self::Ams),
             "ecu" => Ok(Self::Ecu),
             "udv" => Ok(Self::Udv),
+            "all" => Ok(Self::All),
             other => Err(format!(
                 "pit-diag is not implemented for profile '{other}' yet"
             )),
         }
     }
 
-    /// CAN ID this profile ACKs arm/disarm commands on. `None` for uDV,
-    /// which sticky-enables with no ACK.
+    /// CAN ID this profile ACKs arm/disarm commands on. `None` for uDV
+    /// (sticky, no ACK) and `All` (best-effort multi-arm, no single ACK).
     fn ack_id(self) -> Option<u16> {
         match self {
             Self::Ams => Some(AMS_ACK_ID),
             Self::Ecu => Some(ECU_ACK_ID),
-            Self::Udv => None,
+            Self::Udv | Self::All => None,
         }
     }
 
-    /// Build the arm (or disarm) frame for this profile's firmware.
-    /// `None` for a uDV *disarm* — the firmware has no disarm frame (it
-    /// clears the sticky flag on reboot).
-    fn arm_frame(self, enable: bool) -> Option<CanFrame> {
+    /// Arm (or disarm) frame(s) for this profile. One each for AMS/ECU, one
+    /// (arm-only) for uDV, and all three for `All`. Disarm omits uDV (no
+    /// disarm frame — firmware clears the sticky flag on reboot).
+    fn arm_frames(self, enable: bool) -> Vec<CanFrame> {
         match self {
-            Self::Ams => Some(build_arm_frame(enable)),
-            Self::Ecu => Some(ecu::build_arm_frame(enable)),
-            Self::Udv => enable.then(udv::build_arm_frame),
+            Self::Ams => vec![build_arm_frame(enable)],
+            Self::Ecu => vec![ecu::build_arm_frame(enable)],
+            Self::Udv => {
+                if enable {
+                    vec![udv::build_arm_frame()]
+                } else {
+                    vec![]
+                }
+            }
+            Self::All => {
+                let mut v = vec![build_arm_frame(enable), ecu::build_arm_frame(enable)];
+                if enable {
+                    v.push(udv::build_arm_frame());
+                }
+                v
+            }
         }
     }
 
     /// Decode a raw frame into a UI event for this profile, or `None`
-    /// if the frame isn't part of this profile's stream.
+    /// if the frame isn't part of this profile's stream. `All` tries every
+    /// decoder (IDs don't overlap, so at most one matches).
     fn decode_event(self, frame: &CanFrame) -> Option<PitDiagEvent> {
         match self {
             Self::Ams => decode_frame(frame).map(PitDiagEvent::from_library),
             Self::Ecu => ecu::decode_frame(frame).map(PitDiagEvent::from_ecu),
             Self::Udv => udv::decode_frame(frame).map(PitDiagEvent::from_udv),
+            Self::All => ecu::decode_frame(frame)
+                .map(PitDiagEvent::from_ecu)
+                .or_else(|| decode_frame(frame).map(PitDiagEvent::from_library))
+                .or_else(|| udv::decode_frame(frame).map(PitDiagEvent::from_udv)),
         }
     }
 }
@@ -989,7 +1012,7 @@ pub async fn pit_diag_enable(
     // success. If the board isn't on the bus or doesn't have the
     // pit-diag firmware, this surfaces as a clean error in the UI
     // rather than a silent "armed but nothing arriving".
-    if let Some(arm) = profile.arm_frame(true) {
+    for arm in profile.arm_frames(true) {
         backend
             .send(arm)
             .await
@@ -1164,13 +1187,16 @@ pub async fn pit_diag_disable(
     // still falls through to the task teardown.
     let interface = parse_interface(&request.interface)?;
     if let Ok(profile) = Profile::parse(&request.profile) {
-        // uDV has no disarm frame (`arm_frame(false)` → None); the stream
-        // stops when the reader task is torn down below + on the next reboot.
-        if let Some(disarm) = profile.arm_frame(false) {
+        // uDV has no disarm frame; the stream stops when the reader task is
+        // torn down below + on the next reboot. `All` disarms AMS + ECU.
+        let disarms = profile.arm_frames(false);
+        if !disarms.is_empty() {
             if let Ok(backend) =
                 open_backend(interface, request.channel.as_deref(), request.bitrate)
             {
-                let _ = backend.send(disarm).await;
+                for disarm in disarms {
+                    let _ = backend.send(disarm).await;
+                }
             }
         }
     }
