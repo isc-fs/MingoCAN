@@ -78,6 +78,7 @@ pub fn run() {
             bus_monitor::bus_monitor_arm_pit_diag,
             pit_diag::pit_diag_enable,
             pit_diag::pit_diag_disable,
+            pit_diag::pit_diag_udv_calibrate,
             dbc::dbc_load,
             dbc::dbc_unload,
             dbc::dbc_status,

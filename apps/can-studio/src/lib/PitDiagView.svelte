@@ -43,6 +43,7 @@
         onPitDiagFrame,
         onPitDiagStatus,
         pitDiagDisable,
+        pitDiagUdvCalibrate,
         pitDiagEnable,
         writeCellsInto,
         writeNtcsInto,
@@ -295,11 +296,47 @@
         heapSizeKb: number;
         uptimeS: number;
     }
+    interface UdvCalibSnapshot {
+        phase: number;
+        phaseName: string;
+        error: number;
+        errorName: string;
+        centerDdeg: number;
+        halfRangeDdeg: number;
+        limitDdeg: number;
+    }
     let udvStatus = $state<UdvStatusSnapshot | null>(null);
     let udvRes = $state<UdvResSnapshot | null>(null);
     let udvPipe = $state<UdvPipeSnapshot | null>(null);
     let udvHealth = $state<UdvHealthSnapshot | null>(null);
     let udvFw = $state<UdvFwSnapshot | null>(null);
+    let udvCalib = $state<UdvCalibSnapshot | null>(null);
+    // Steering-calibration control state (#428). `confirming` shows the
+    // "car elevated?" gate; `busy` disables the trigger between click + the
+    // first status frame.
+    let calibConfirming = $state<boolean>(false);
+    let calibBusy = $state<boolean>(false);
+    let calibError = $state<string | null>(null);
+
+    async function startCalibration(): Promise<void> {
+        calibConfirming = false;
+        calibBusy = true;
+        calibError = null;
+        try {
+            await pitDiagUdvCalibrate(true);
+        } catch (err) {
+            calibError = err instanceof Error ? err.message : String(err);
+        } finally {
+            calibBusy = false;
+        }
+    }
+    async function abortCalibration(): Promise<void> {
+        try {
+            await pitDiagUdvCalibrate(false);
+        } catch (err) {
+            calibError = err instanceof Error ? err.message : String(err);
+        }
+    }
 
     // Bit helper for the raw signal / setup / RES masks.
     function bit(mask: number, b: number): boolean {
@@ -553,6 +590,10 @@
         udvPipe = null;
         udvHealth = null;
         udvFw = null;
+        udvCalib = null;
+        calibConfirming = false;
+        calibBusy = false;
+        calibError = null;
         framesThisScan = 0;
         lastScanFrames = 0;
         try {
@@ -822,7 +863,19 @@
                     uptimeS: event.uptimeS,
                 };
                 // fwinfo is ~1 Hz — not part of the cyclic scan.
+            } else if (event.kind === 'udvCalib') {
+                udvCalib = {
+                    phase: event.phase,
+                    phaseName: event.phaseName,
+                    error: event.error,
+                    errorName: event.errorName,
+                    centerDdeg: event.centerDdeg,
+                    halfRangeDdeg: event.halfRangeDdeg,
+                    limitDdeg: event.limitDdeg,
+                };
+                // calib is calibration-only — not part of the cyclic scan.
             }
+            // udvCanHealth (0x7A5) flows through but isn't surfaced yet.
             // Ack events come during arm/disarm; they're handled by
             // the status listener, not counted toward a scan window.
         });
@@ -1079,6 +1132,84 @@
                 </p>
             </div>
         {:else}
+            <!-- Steering end-stop calibration (#428). Gated: only shown
+                 while pit-diag is armed and 0x7A0.. frames are arriving
+                 (this whole branch). Triggers 0x7DF; progress from 0x7A6. -->
+            <div class="card card-tight calib-card">
+                <div class="calib-head">
+                    <h3 class="card-h">Steering calibration</h3>
+                    {#if calibBusy}
+                        <button type="button" class="btn" disabled>Triggering…</button>
+                    {:else if calibConfirming}
+                        <div class="confirm">
+                            <span class="confirm-text">
+                                Car elevated? The steering will home and sweep.
+                            </span>
+                            <button type="button" class="btn btn-primary" onclick={startCalibration}>
+                                Yes, calibrate
+                            </button>
+                            <button type="button" class="btn" onclick={() => (calibConfirming = false)}>
+                                Cancel
+                            </button>
+                        </div>
+                    {:else}
+                        <button
+                            type="button"
+                            class="btn btn-primary"
+                            onclick={() => (calibConfirming = true)}
+                        >
+                            Calibrate steering
+                        </button>
+                        {#if udvCalib !== null && udvCalib.phase >= 1 && udvCalib.phase <= 8}
+                            <button type="button" class="btn btn-danger" onclick={abortCalibration}>
+                                Abort
+                            </button>
+                        {/if}
+                    {/if}
+                </div>
+
+                {#if calibError !== null}
+                    <div class="banner banner-danger">{calibError}</div>
+                {/if}
+
+                {#if udvCalib !== null}
+                    <div class="badge-row">
+                        <span
+                            class="pill pill-{udvCalib.phase === 9
+                                ? 'success'
+                                : udvCalib.phase === 10
+                                  ? 'danger'
+                                  : 'info'}"
+                        >
+                            {udvCalib.phaseName}
+                        </span>
+                        {#if udvCalib.error !== 0}
+                            <span class="pill pill-danger">error: {udvCalib.errorName}</span>
+                        {/if}
+                    </div>
+                    <div class="reads">
+                        <span class="stat">
+                            <span>center</span>
+                            <strong>{(udvCalib.centerDdeg / 10).toFixed(1)}°</strong>
+                        </span>
+                        <span class="stat">
+                            <span>half-range</span>
+                            <strong>{(udvCalib.halfRangeDdeg / 10).toFixed(1)}°</strong>
+                        </span>
+                        <span class="stat">
+                            <span>limit</span>
+                            <strong>{(udvCalib.limitDdeg / 10).toFixed(1)}°</strong>
+                        </span>
+                    </div>
+                {:else}
+                    <p class="muted small">
+                        Elevate the car, click Calibrate, then follow the wheel to each
+                        end-stop; the steering homes and sweeps to ±limit. Progress
+                        appears here.
+                    </p>
+                {/if}
+            </div>
+
             <div class="ecu-grid">
                 <!-- AS status (0x7A0) -->
                 <div class="card">
@@ -2377,6 +2508,21 @@
         flex-wrap: wrap;
         gap: var(--space-2);
         margin-bottom: var(--space-2);
+    }
+    .calib-card {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+        margin-bottom: var(--space-3);
+    }
+    .calib-head {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--space-3);
+    }
+    .calib-head .card-h {
+        margin: 0;
     }
     .flags {
         display: flex;

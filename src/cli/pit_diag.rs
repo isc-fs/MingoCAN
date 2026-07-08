@@ -23,7 +23,7 @@
 //!
 //! The `--profile` flag selects the board: `ams` (arm `0x7F0`, decode
 //! `0x680–0x6CA`), `ecu` (arm `0x7E0`, decode `0x700–0x707`), or `udv`
-//! (arm `0x7DE`, decode `0x7A0–0x7A4`).
+//! (arm `0x7DE`, decode `0x7A0–0x7A6`).
 
 use std::time::{Duration, Instant};
 
@@ -427,8 +427,12 @@ async fn stream_loop(
                     }
                     Profile::Udv => {
                         if let Some(record) = udv::decode_frame(&frame) {
-                            // fwinfo is ~1 Hz, not part of the cyclic scan.
-                            if !matches!(record, udv::UdvPitDiagFrame::FwInfo(_)) {
+                            // fwinfo (~1 Hz) + calib (calibration-only) aren't
+                            // part of the cyclic scan.
+                            if !matches!(
+                                record,
+                                udv::UdvPitDiagFrame::FwInfo(_) | udv::UdvPitDiagFrame::Calib(_)
+                            ) {
                                 frames_this_scan += 1;
                             }
                             if json {
@@ -931,6 +935,21 @@ fn print_udv_human(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
             "{prefix} fw     git={:08X} stub=0x{:02X} heap={}KB uptime={}s",
             f.git_hash, f.stub_mask, f.heap_size_kb, f.uptime_s,
         ),
+        F::CanHealth(c) => println!(
+            "{prefix} canhlt flags=0x{:02X} lec={} tec={} rec={} res_rx={} nmt={} ack_err={}",
+            c.flags, c.last_error_code, c.tx_err_count, c.rx_err_count, c.res_rx_count,
+            c.nmt_count, c.ack_error as u8,
+        ),
+        F::Calib(c) => println!(
+            "{prefix} calib  phase={} ({}) error={} ({}) center={:.1}° half={:.1}° limit={:.1}°",
+            c.phase,
+            udv::calib_phase_name(c.phase),
+            c.error,
+            udv::calib_error_name(c.error),
+            f64::from(c.center_ddeg) * 0.1,
+            f64::from(c.half_range_ddeg) * 0.1,
+            f64::from(c.limit_ddeg) * 0.1,
+        ),
     }
 }
 
@@ -970,6 +989,20 @@ fn print_udv_json(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
         F::FwInfo(f) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"udvFwInfo","gitHash":{},"stubMask":{},"heapSizeKb":{},"uptimeS":{}}}"#,
             f.git_hash, f.stub_mask, f.heap_size_kb, f.uptime_s,
+        ),
+        F::CanHealth(c) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvCanHealth","flags":{},"lastErrorCode":{},"txErrCount":{},"rxErrCount":{},"resRxCount":{},"nmtCount":{},"ackError":{}}}"#,
+            c.flags,
+            c.last_error_code,
+            c.tx_err_count,
+            c.rx_err_count,
+            c.res_rx_count,
+            c.nmt_count,
+            c.ack_error,
+        ),
+        F::Calib(c) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvCalib","phase":{},"error":{},"centerDdeg":{},"halfRangeDdeg":{},"limitDdeg":{}}}"#,
+            c.phase, c.error, c.center_ddeg, c.half_range_ddeg, c.limit_ddeg,
         ),
     }
 }
