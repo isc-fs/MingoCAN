@@ -21,6 +21,8 @@
 //!   - `0x7A5` can-health: FDCAN1 protocol status + error counters (#111).
 //!   - `0x7A6` calib: steering end-stop calibration status (#428), and the
 //!     `0x7DF` trigger (tool → uDV) — see [`build_calib_trigger`].
+//!   - `0x7A7` steer: live LWS wheel angle + steer actual/target + motor
+//!     state (uDV #123, can-flasher #439) — feedback during calibration.
 //!
 //! Bit masks (`signals`, `res_bits`, `setup_bits`, `task_mask`, …) are kept
 //! raw here; the consumer decodes individual bits for display, mirroring how
@@ -51,6 +53,10 @@ pub const UDV_CANHEALTH_ID: u16 = 0x7A5;
 /// `0x7A6` — steering end-stop calibration status (IFS08-DV-uDV #113,
 /// can-flasher #428). ~10–20 Hz while a calibration is running.
 pub const UDV_CALIB_ID: u16 = 0x7A6;
+/// `0x7A7` — live steering angle: LWS raw wheel angle + steer actual/target
+/// (all deci-degrees) + LWS status byte + motor state (uDV #123,
+/// can-flasher #439). ~10 Hz on FDCAN2; drives the calibration live readout.
+pub const UDV_STEER_ID: u16 = 0x7A7;
 
 /// `0x7DF` — steering-calibration trigger (tool → uDV, #428). DLC 1;
 /// honoured only while pit-diag is armed. See [`build_calib_trigger`].
@@ -303,6 +309,25 @@ pub struct UdvCalibFrame {
     pub limit_ddeg: i16,
 }
 
+/// `0x7A7` — live steering angle (uDV #123, #439). All three angles are
+/// deci-degrees (×0.1° — divide by 10 for degrees). `lws_raw_ddeg` is the
+/// primary readout during calibration: the operator watches it climb toward
+/// an end-stop and hold. `motor_state` is signed — see
+/// [`steer_motor_state_name`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdvSteerFrame {
+    /// LWS raw wheel angle, deci-degrees (signed) — the live capture value.
+    pub lws_raw_ddeg: i16,
+    /// Steer actual position, deci-degrees (signed).
+    pub steer_actual_ddeg: i16,
+    /// Steer target, deci-degrees (signed).
+    pub steer_target_ddeg: i16,
+    /// LWS status byte (raw).
+    pub lws_status: u8,
+    /// Motor state: −1 emergency · 0 off · 1 on · 2 calibrating.
+    pub motor_state: i8,
+}
+
 /// A decoded uDV pit-diag frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UdvPitDiagFrame {
@@ -320,6 +345,8 @@ pub enum UdvPitDiagFrame {
     CanHealth(UdvCanHealthFrame),
     /// `0x7A6` — steering-calibration status.
     Calib(UdvCalibFrame),
+    /// `0x7A7` — live steering angle.
+    Steer(UdvSteerFrame),
 }
 
 /// Name for a `0x7A6` calibration phase byte.
@@ -349,6 +376,18 @@ pub fn calib_error_name(error: u8) -> &'static str {
         6 => "divergence",
         7 => "aborted",
         8 => "emergency",
+        _ => "unknown",
+    }
+}
+
+/// Name for a `0x7A7` motor-state byte (signed).
+#[must_use]
+pub fn steer_motor_state_name(state: i8) -> &'static str {
+    match state {
+        -1 => "emergency",
+        0 => "off",
+        1 => "on",
+        2 => "calibrating",
         _ => "unknown",
     }
 }
@@ -472,6 +511,18 @@ pub fn decode_frame(frame: &CanFrame) -> Option<UdvPitDiagFrame> {
                 limit_ddeg: i16::from_le_bytes([p[6], p[7]]),
             }))
         }
+        UDV_STEER_ID => {
+            if p.len() < 8 {
+                return None;
+            }
+            Some(UdvPitDiagFrame::Steer(UdvSteerFrame {
+                lws_raw_ddeg: i16::from_le_bytes([p[0], p[1]]),
+                steer_actual_ddeg: i16::from_le_bytes([p[2], p[3]]),
+                steer_target_ddeg: i16::from_le_bytes([p[4], p[5]]),
+                lws_status: p[6],
+                motor_state: p[7] as i8,
+            }))
+        }
         _ => None,
     }
 }
@@ -584,6 +635,32 @@ mod tests {
                 assert_eq!(c.limit_ddeg, -50);
             }
             other => panic!("expected Calib, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn steer_decodes_signed_angles_and_motor_state() {
+        // lws=+455 (45.5°), actual=-10, target=+900, status=0x03, motor=2 (calibrating).
+        let p = [0xC7, 0x01, 0xF6, 0xFF, 0x84, 0x03, 0x03, 0x02];
+        match decode_frame(&CanFrame::new(UDV_STEER_ID, &p).unwrap()).unwrap() {
+            UdvPitDiagFrame::Steer(s) => {
+                assert_eq!(s.lws_raw_ddeg, 455);
+                assert_eq!(s.steer_actual_ddeg, -10);
+                assert_eq!(s.steer_target_ddeg, 900);
+                assert_eq!(s.lws_status, 0x03);
+                assert_eq!(s.motor_state, 2);
+                assert_eq!(steer_motor_state_name(s.motor_state), "calibrating");
+            }
+            other => panic!("expected Steer, got {other:?}"),
+        }
+        // motor=-1 decodes as emergency.
+        let p = [0; 7].iter().copied().chain([0xFFu8]).collect::<Vec<_>>();
+        match decode_frame(&CanFrame::new(UDV_STEER_ID, &p).unwrap()).unwrap() {
+            UdvPitDiagFrame::Steer(s) => {
+                assert_eq!(s.motor_state, -1);
+                assert_eq!(steer_motor_state_name(s.motor_state), "emergency");
+            }
+            other => panic!("expected Steer, got {other:?}"),
         }
     }
 

@@ -306,12 +306,21 @@
         halfRangeDdeg: number;
         limitDdeg: number;
     }
+    interface UdvSteerSnapshot {
+        lwsRawDdeg: number;
+        steerActualDdeg: number;
+        steerTargetDdeg: number;
+        lwsStatus: number;
+        motorState: number;
+        motorStateName: string;
+    }
     let udvStatus = $state<UdvStatusSnapshot | null>(null);
     let udvRes = $state<UdvResSnapshot | null>(null);
     let udvPipe = $state<UdvPipeSnapshot | null>(null);
     let udvHealth = $state<UdvHealthSnapshot | null>(null);
     let udvFw = $state<UdvFwSnapshot | null>(null);
     let udvCalib = $state<UdvCalibSnapshot | null>(null);
+    let udvSteer = $state<UdvSteerSnapshot | null>(null);
     // Steering-calibration control state (#428). `confirming` shows the
     // "car elevated?" gate; `busy` disables the trigger between click + the
     // first status frame.
@@ -360,6 +369,44 @@
     ];
     function missionName(id: number): string {
         return UDV_MISSIONS[id] ?? `code ${id}`;
+    }
+
+    // Steering-calibration operator guidance, keyed on the 0x7A6 phase
+    // byte (#439). Turns the blind Calibrate button into a self-guiding
+    // step-by-step. Phases 4–8 are the automated homing/sweep.
+    function calibGuidance(phase: number): string {
+        switch (phase) {
+            case 0:
+                return 'Ready — elevate the car, then press Calibrate.';
+            case 1:
+                return 'Turn the wheel FULLY to one stop and hold ~2 s.';
+            case 2:
+                return 'Now turn FULLY to the OTHER stop and hold ~2 s.';
+            case 3:
+                return 'Return the wheel near centre (within ±15°).';
+            case 4:
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+                return 'Homing / verification sweep — hands clear, motor moving.';
+            case 9:
+                return 'Calibrated & saved.';
+            case 10:
+                return 'Calibration failed.';
+            default:
+                return '';
+        }
+    }
+
+    // Live-angle bar geometry (#439). The bar is centred at 0°; a valid
+    // end-stop must exceed 30°, and full lock is well under this, so
+    // ±130° keeps the needle on-scale without clipping.
+    const LWS_BAR_MAX_DEG = 130;
+    function lwsFill(deg: number): { left: number; width: number } {
+        const clamped = Math.max(-LWS_BAR_MAX_DEG, Math.min(LWS_BAR_MAX_DEG, deg));
+        const pos = (clamped / LWS_BAR_MAX_DEG) * 50; // −50…+50 around the 50% centre
+        return pos >= 0 ? { left: 50, width: pos } : { left: 50 + pos, width: -pos };
     }
 
     // APPS plausibility: FSAE T11.8.9 trips at >10% disagreement
@@ -425,7 +472,8 @@
         udvStatus !== null ||
             udvRes !== null ||
             udvPipe !== null ||
-            udvHealth !== null,
+            udvHealth !== null ||
+            udvSteer !== null,
     );
 
     // uDV firmware header chip — "uDV git 1a2b3c4d".
@@ -592,6 +640,7 @@
         udvHealth = null;
         udvFw = null;
         udvCalib = null;
+        udvSteer = null;
         calibConfirming = false;
         calibBusy = false;
         calibError = null;
@@ -875,6 +924,15 @@
                     limitDdeg: event.limitDdeg,
                 };
                 // calib is calibration-only — not part of the cyclic scan.
+            } else if (event.kind === 'udvSteer') {
+                udvSteer = {
+                    lwsRawDdeg: event.lwsRawDdeg,
+                    steerActualDdeg: event.steerActualDdeg,
+                    steerTargetDdeg: event.steerTargetDdeg,
+                    lwsStatus: event.lwsStatus,
+                    motorState: event.motorState,
+                    motorStateName: event.motorStateName,
+                };
             }
             // udvCanHealth (0x7A5) flows through but isn't surfaced yet.
             // Ack events come during arm/disarm; they're handled by
@@ -2052,6 +2110,73 @@
                     <div class="banner banner-danger">{calibError}</div>
                 {/if}
 
+                <!-- Step-by-step operator guidance (#439), keyed on the
+                     0x7A6 phase — turns the blind trigger self-guiding. -->
+                {#if udvCalib !== null && calibGuidance(udvCalib.phase) !== ''}
+                    <p
+                        class="calib-step"
+                        class:ok={udvCalib.phase === 9}
+                        class:fail={udvCalib.phase === 10}
+                    >
+                        {#if udvCalib.phase === 9}✅ {:else if udvCalib.phase === 10}❌ {/if}
+                        {calibGuidance(udvCalib.phase)}
+                        {#if udvCalib.phase === 10 && udvCalib.error !== 0}
+                            ({udvCalib.errorName})
+                        {/if}
+                    </p>
+                {/if}
+
+                <!-- Live LWS wheel angle (#439 / 0x7A7): the primary capture
+                     readout — watch it climb toward a stop and hold. -->
+                {#if udvSteer !== null}
+                    {@const f = lwsFill(udvSteer.lwsRawDdeg / 10)}
+                    <div class="lws">
+                        <div class="lws-head">
+                            <span class="lws-angle mono">
+                                {(udvSteer.lwsRawDdeg / 10).toFixed(1)}°
+                            </span>
+                            <span class="lws-cap muted small">LWS wheel angle</span>
+                            <span
+                                class="pill pill-{udvSteer.motorState === -1
+                                    ? 'danger'
+                                    : udvSteer.motorState === 2
+                                      ? 'warning'
+                                      : udvSteer.motorState === 1
+                                        ? 'success'
+                                        : 'info'}"
+                            >
+                                motor: {udvSteer.motorStateName}
+                            </span>
+                        </div>
+                        <div class="lws-bar">
+                            <div class="lws-tick"></div>
+                            <div
+                                class="lws-fill"
+                                style="left: {f.left}%; width: {f.width}%"
+                            ></div>
+                        </div>
+                        <div class="reads">
+                            <span class="stat">
+                                <span>actual</span>
+                                <strong>{(udvSteer.steerActualDdeg / 10).toFixed(1)}°</strong>
+                            </span>
+                            <span class="stat">
+                                <span>target</span>
+                                <strong>{(udvSteer.steerTargetDdeg / 10).toFixed(1)}°</strong>
+                            </span>
+                            <span class="stat">
+                                <span>LWS status</span>
+                                <strong class="mono">
+                                    0x{udvSteer.lwsStatus
+                                        .toString(16)
+                                        .toUpperCase()
+                                        .padStart(2, '0')}
+                                </strong>
+                            </span>
+                        </div>
+                    </div>
+                {/if}
+
                 {#if udvCalib !== null}
                     <div class="badge-row">
                         <span
@@ -2081,7 +2206,7 @@
                             <strong>{(udvCalib.limitDdeg / 10).toFixed(1)}°</strong>
                         </span>
                     </div>
-                {:else}
+                {:else if udvSteer === null}
                     <p class="muted small">
                         Elevate the car, click Calibrate, then follow the wheel to each
                         end-stop; the steering homes and sweeps to ±limit. Progress
@@ -2653,6 +2778,69 @@
     }
     .calib-head .card-h {
         margin: 0;
+    }
+    /* Per-phase operator guidance (#439) — the loud "do this now" line. */
+    .calib-step {
+        margin: 0;
+        font-size: var(--text-lg, 1.15rem);
+        font-weight: 600;
+        line-height: 1.4;
+        color: var(--text);
+    }
+    .calib-step.ok {
+        color: var(--success);
+    }
+    .calib-step.fail {
+        color: var(--danger);
+    }
+    /* Live LWS wheel-angle readout (#439 / 0x7A7). */
+    .lws {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+    }
+    .lws-head {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: var(--space-3);
+    }
+    .lws-angle {
+        font-size: 2rem;
+        font-weight: 700;
+        line-height: 1;
+        color: var(--text);
+    }
+    .lws-cap {
+        margin-right: auto;
+    }
+    /* Centre-origin bar: a full-width track with a centre tick, and a fill
+       that grows left or right from the middle with the signed angle. */
+    .lws-bar {
+        position: relative;
+        height: 12px;
+        border-radius: var(--radius-sm, 4px);
+        background: var(--bg);
+        border: 1px solid var(--border);
+        overflow: hidden;
+    }
+    .lws-tick {
+        position: absolute;
+        left: 50%;
+        top: 0;
+        bottom: 0;
+        width: 1px;
+        background: var(--text-muted);
+        opacity: 0.6;
+    }
+    .lws-fill {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        background: var(--accent);
+        transition:
+            left 80ms linear,
+            width 80ms linear;
     }
     .flags {
         display: flex;

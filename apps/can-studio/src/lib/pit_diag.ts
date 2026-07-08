@@ -385,6 +385,18 @@ export type PitDiagEvent =
           centerDdeg: number;
           halfRangeDdeg: number;
           limitDdeg: number;
+      }
+    | {
+          /** uDV 0x7A7 — live steering angle (uDV #123, #439). Angles are
+           *  deci-degrees (÷10 = degrees). `motorState` is signed
+           *  (−1 emergency / 0 off / 1 on / 2 calibrating). */
+          kind: 'udvSteer';
+          lwsRawDdeg: number;
+          steerActualDdeg: number;
+          steerTargetDdeg: number;
+          lwsStatus: number;
+          motorState: number;
+          motorStateName: string;
       };
 
 /** The inverter-temperature value that means "sensor disconnected"

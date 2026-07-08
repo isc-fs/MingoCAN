@@ -950,6 +950,15 @@ fn print_udv_human(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
             f64::from(c.half_range_ddeg) * 0.1,
             f64::from(c.limit_ddeg) * 0.1,
         ),
+        F::Steer(s) => println!(
+            "{prefix} steer  lws={:.1}° actual={:.1}° target={:.1}° status=0x{:02X} motor={} ({})",
+            f64::from(s.lws_raw_ddeg) * 0.1,
+            f64::from(s.steer_actual_ddeg) * 0.1,
+            f64::from(s.steer_target_ddeg) * 0.1,
+            s.lws_status,
+            s.motor_state,
+            udv::steer_motor_state_name(s.motor_state),
+        ),
     }
 }
 
@@ -1003,6 +1012,10 @@ fn print_udv_json(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
         F::Calib(c) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"udvCalib","phase":{},"error":{},"centerDdeg":{},"halfRangeDdeg":{},"limitDdeg":{}}}"#,
             c.phase, c.error, c.center_ddeg, c.half_range_ddeg, c.limit_ddeg,
+        ),
+        F::Steer(s) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvSteer","lwsRawDdeg":{},"steerActualDdeg":{},"steerTargetDdeg":{},"lwsStatus":{},"motorState":{}}}"#,
+            s.lws_raw_ddeg, s.steer_actual_ddeg, s.steer_target_ddeg, s.lws_status, s.motor_state,
         ),
     }
 }
