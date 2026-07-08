@@ -167,8 +167,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux builds on the OLDEST supported distro (Ubuntu 22.04, glibc 2.35)
+          # so binaries run on 22.04+. glibc isn't forward-compatible and AppImages
+          # don't bundle it; ubuntu-latest (24.04, glibc 2.39) binaries fail on 22.04
+          # with "GLIBC_2.39 not found". Do not bump.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             archive_ext: tar.gz
             bin_ext: ''
             apt_deps: libudev-dev pkg-config
@@ -183,7 +187,7 @@ jobs:
             bin_ext: '.exe'
             apt_deps: ''
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             archive_ext: tar.gz
             bin_ext: ''
             apt_deps: libudev-dev pkg-config
@@ -320,7 +324,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             apt_deps: >-
               libwebkit2gtk-4.1-dev
               libgtk-3-dev
