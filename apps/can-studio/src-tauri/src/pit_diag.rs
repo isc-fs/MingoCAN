@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -44,7 +44,8 @@ use can_flasher::pit_diag::ecu::{
     EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::udv::{
-    self, UdvFwInfoFrame, UdvHealthFrame, UdvPipeFrame, UdvResFrame, UdvStatusFrame,
+    self, UdvCalibFrame, UdvCanHealthFrame, UdvFwInfoFrame, UdvHealthFrame, UdvPipeFrame,
+    UdvResFrame, UdvStatusFrame,
 };
 use can_flasher::pit_diag::{
     build_arm_frame, decode_frame, AcuCurrentsFrame, AmsHealthFrame, BalanceMaskAFrame,
@@ -81,6 +82,13 @@ pub struct PitDiagState {
 struct Running {
     stop_signal: Arc<Notify>,
     task: JoinHandle<()>,
+    /// The profile this session armed — gates profile-specific TX (e.g. the
+    /// uDV steering-calibration trigger).
+    profile: Profile,
+    /// Push a frame here to have the streaming task send it on the shared
+    /// backend (the reader owns the adapter, so out-of-band sends must route
+    /// through it — one owner per adapter on PCAN/Vector).
+    tx: mpsc::UnboundedSender<CanFrame>,
 }
 
 // ---- Request from frontend --------------------------------------
@@ -532,6 +540,27 @@ pub enum PitDiagEvent {
         heap_size_kb: u8,
         uptime_s: u8,
     },
+    /// uDV `0x7A5` — FDCAN1 CAN-health (bus-off / err counters / RES-rx).
+    UdvCanHealth {
+        flags: u8,
+        last_error_code: u8,
+        tx_err_count: u8,
+        rx_err_count: u8,
+        res_rx_count: u16,
+        nmt_count: u8,
+        ack_error: bool,
+    },
+    /// uDV `0x7A6` — steering end-stop calibration status (#428). Angles
+    /// are deci-degrees (×0.1°); `*_name` are the decoded phase/error.
+    UdvCalib {
+        phase: u8,
+        phase_name: String,
+        error: u8,
+        error_name: String,
+        center_ddeg: i16,
+        half_range_ddeg: i16,
+        limit_ddeg: i16,
+    },
 }
 
 impl PitDiagEvent {
@@ -889,6 +918,38 @@ impl PitDiagEvent {
                 heap_size_kb,
                 uptime_s,
             },
+            F::CanHealth(UdvCanHealthFrame {
+                flags,
+                last_error_code,
+                tx_err_count,
+                rx_err_count,
+                res_rx_count,
+                nmt_count,
+                ack_error,
+            }) => Self::UdvCanHealth {
+                flags,
+                last_error_code,
+                tx_err_count,
+                rx_err_count,
+                res_rx_count,
+                nmt_count,
+                ack_error,
+            },
+            F::Calib(UdvCalibFrame {
+                phase,
+                error,
+                center_ddeg,
+                half_range_ddeg,
+                limit_ddeg,
+            }) => Self::UdvCalib {
+                phase,
+                phase_name: udv::calib_phase_name(phase).to_string(),
+                error,
+                error_name: udv::calib_error_name(error).to_string(),
+                center_ddeg,
+                half_range_ddeg,
+                limit_ddeg,
+            },
         }
     }
 }
@@ -983,6 +1044,10 @@ pub async fn pit_diag_enable(
     let stop_for_task = stop_signal.clone();
     let app_for_task = app.clone();
     let profile_label = request.profile.clone();
+    // Out-of-band TX: the reader owns the adapter, so commands that need to
+    // send (the uDV calibration trigger) push frames here for the task to
+    // send between recvs.
+    let (tx, mut tx_rx) = mpsc::unbounded_channel::<CanFrame>();
 
     let task = tokio::spawn(async move {
         let _ = app_for_task.emit(
@@ -999,6 +1064,17 @@ pub async fn pit_diag_enable(
                 _ = &mut stop => {
                     let _ = app_for_task.emit(STATUS_EVENT, &PitDiagStatus::Stopped);
                     return;
+                }
+                maybe_frame = tx_rx.recv() => {
+                    // Out-of-band send (e.g. the uDV calibration trigger).
+                    if let Some(frame) = maybe_frame {
+                        if let Err(err) = backend.send(frame).await {
+                            let _ = app_for_task.emit(
+                                STATUS_EVENT,
+                                &PitDiagStatus::Error { message: format!("send failed: {err}") },
+                            );
+                        }
+                    }
                 }
                 result = backend.recv(STREAM_POLL_TIMEOUT) => {
                     match result {
@@ -1040,7 +1116,38 @@ pub async fn pit_diag_enable(
     });
 
     let mut slot = state.inner.lock().await;
-    *slot = Some(Running { stop_signal, task });
+    *slot = Some(Running {
+        stop_signal,
+        task,
+        profile,
+        tx,
+    });
+    Ok(())
+}
+
+/// Trigger (or abort) the uDV steering end-stop calibration (#428). Only
+/// valid while a uDV pit-diag session is armed — the trigger routes through
+/// the running reader task (it owns the adapter), and the firmware ignores
+/// it unless armed. `start = false` sends the abort.
+#[tauri::command]
+pub async fn pit_diag_udv_calibrate(
+    state: State<'_, PitDiagState>,
+    start: bool,
+) -> Result<(), String> {
+    let slot = state.inner.lock().await;
+    let running = slot
+        .as_ref()
+        .ok_or("no pit-diag session is armed — arm the uDV telemetry first")?;
+    if running.profile != Profile::Udv {
+        return Err(
+            "steering calibration is a uDV action — switch to the uDV profile and arm it"
+                .to_string(),
+        );
+    }
+    running
+        .tx
+        .send(udv::build_calib_trigger(start))
+        .map_err(|_| "the uDV session ended — re-arm and try again".to_string())?;
     Ok(())
 }
 
