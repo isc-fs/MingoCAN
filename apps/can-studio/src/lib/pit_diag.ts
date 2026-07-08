@@ -361,6 +361,30 @@ export type PitDiagEvent =
           stubMask: number;
           heapSizeKb: number;
           uptimeS: number;
+      }
+    | {
+          /** uDV 0x7A5 — FDCAN1 CAN-health. `flags`: b0 bus-off,
+           *  b1 error-passive, b2 warning. */
+          kind: 'udvCanHealth';
+          flags: number;
+          lastErrorCode: number;
+          txErrCount: number;
+          rxErrCount: number;
+          resRxCount: number;
+          nmtCount: number;
+          ackError: boolean;
+      }
+    | {
+          /** uDV 0x7A6 — steering end-stop calibration status (#428).
+           *  Angles are deci-degrees (÷10 = degrees). */
+          kind: 'udvCalib';
+          phase: number;
+          phaseName: string;
+          error: number;
+          errorName: string;
+          centerDdeg: number;
+          halfRangeDdeg: number;
+          limitDdeg: number;
       };
 
 /** The inverter-temperature value that means "sensor disconnected"
@@ -375,6 +399,12 @@ export function pitDiagEnable(request: PitDiagRequest): Promise<void> {
 
 export function pitDiagDisable(request: PitDiagRequest): Promise<void> {
     return invoke<void>('pit_diag_disable', { request });
+}
+
+/** Trigger (or abort) the uDV steering end-stop calibration (#428). Only
+ *  valid while a uDV pit-diag session is armed. */
+export function pitDiagUdvCalibrate(start: boolean): Promise<void> {
+    return invoke<void>('pit_diag_udv_calibrate', { start });
 }
 
 export function onPitDiagFrame(
