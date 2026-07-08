@@ -45,7 +45,7 @@ use can_flasher::pit_diag::ecu::{
 };
 use can_flasher::pit_diag::udv::{
     self, UdvCalibFrame, UdvCanHealthFrame, UdvFwInfoFrame, UdvHealthFrame, UdvPipeFrame,
-    UdvResFrame, UdvStatusFrame,
+    UdvResFrame, UdvStatusFrame, UdvSteerFrame,
 };
 use can_flasher::pit_diag::{
     build_arm_frame, decode_frame, AcuCurrentsFrame, AmsHealthFrame, BalanceMaskAFrame,
@@ -584,6 +584,17 @@ pub enum PitDiagEvent {
         half_range_ddeg: i16,
         limit_ddeg: i16,
     },
+    /// uDV `0x7A7` — live steering angle (uDV #123, #439). Angles are
+    /// deci-degrees (×0.1°); `motor_state` is signed (−1/0/1/2) with
+    /// `motor_state_name` the decoded label.
+    UdvSteer {
+        lws_raw_ddeg: i16,
+        steer_actual_ddeg: i16,
+        steer_target_ddeg: i16,
+        lws_status: u8,
+        motor_state: i8,
+        motor_state_name: String,
+    },
 }
 
 impl PitDiagEvent {
@@ -972,6 +983,20 @@ impl PitDiagEvent {
                 center_ddeg,
                 half_range_ddeg,
                 limit_ddeg,
+            },
+            F::Steer(UdvSteerFrame {
+                lws_raw_ddeg,
+                steer_actual_ddeg,
+                steer_target_ddeg,
+                lws_status,
+                motor_state,
+            }) => Self::UdvSteer {
+                lws_raw_ddeg,
+                steer_actual_ddeg,
+                steer_target_ddeg,
+                lws_status,
+                motor_state,
+                motor_state_name: udv::steer_motor_state_name(motor_state).to_string(),
             },
         }
     }
