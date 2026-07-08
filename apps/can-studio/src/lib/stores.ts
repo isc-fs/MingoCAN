@@ -77,7 +77,7 @@ export const VIEWS: ViewMeta[] = [
         label: 'Telemetry',
         status: 'live',
         section: 'observe',
-        description: 'Live AMS / ECU telemetry',
+        description: 'Live AMS / ECU / uDV telemetry',
     },
     {
         id: 'settings',
