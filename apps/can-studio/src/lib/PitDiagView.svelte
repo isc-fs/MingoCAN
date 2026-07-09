@@ -35,7 +35,6 @@
         AMS_CELLS_PER_MODULE,
         AMS_EXPECTED_FRAMES_PER_SCAN,
         AMS_NUM_CELLS,
-        AMS_NUM_ICS,
         AMS_NTC_PER_MODULE,
         AMS_NUM_MODULES,
         AMS_NUM_NTCS,
@@ -95,12 +94,6 @@
         tSweepFailMask: number;
     }
 
-    interface BootSnapshot {
-        jumpReason: string;
-        appInitProgress: number;
-        fdcan1StartResult: number;
-    }
-
     interface CrashSnapshot {
         stackOverflowSeen: boolean;
         watermarkLowByte: number;
@@ -137,15 +130,9 @@
     let fsm = $state<FsmSnapshot | null>(null);
     let poll = $state<PollSnapshot | null>(null);
 
-    // Per-IC PEC error counts — 10 ICs (2 per module). Arrives as
-    // two frames (0x6C7 ICs 0..7, 0x6C8 ICs 8..9); we splice each
-    // into the pack-wide array as it lands. `null` = not yet seen.
-    let icPec = $state<(number | null)[]>(new Array(AMS_NUM_ICS).fill(null));
-
-    // Diag frames added once the AMS 0x6C2..0x6C6 block was decoded
-    // (slices 2b/3). Balance (0x6C2/0x6C3) is decoded on the wire but not
-    // surfaced — balancing only runs on the charger, off this app.
-    let boot = $state<BootSnapshot | null>(null);
+    // Balance (0x6C2/0x6C3), per-IC PEC (0x6C7/0x6C8), and boot
+    // diagnostics (0x6C4) are decoded on the wire but not surfaced on this
+    // bench view — see the count-only handler branch below.
     let crash = $state<CrashSnapshot | null>(null);
     let fw = $state<FwSnapshot | null>(null);
 
@@ -675,10 +662,8 @@
         // arm cycle.
         cellsMv = new Array(AMS_NUM_CELLS).fill(null);
         ntcsC = new Array(AMS_NUM_NTCS).fill(null);
-        icPec = new Array(AMS_NUM_ICS).fill(null);
         fsm = null;
         poll = null;
-        boot = null;
         crash = null;
         fw = null;
         relays = null;
@@ -778,29 +763,16 @@
                     tSweepFailMask: event.tSweepFailMask,
                 };
                 framesThisScan += 1;
-            } else if (event.kind === 'perIcPec') {
-                // Splice this frame's ICs into the pack-wide array.
-                const next = icPec.slice();
-                for (let i = 0; i < event.valid; i++) {
-                    const idx = event.firstIc + i;
-                    if (idx < AMS_NUM_ICS) next[idx] = event.counts[i];
-                }
-                icPec = next;
-                framesThisScan += 1;
             } else if (
+                event.kind === 'perIcPec' ||
                 event.kind === 'balanceMaskA' ||
-                event.kind === 'balanceMaskB'
+                event.kind === 'balanceMaskB' ||
+                event.kind === 'bootDiag'
             ) {
-                // Balance (0x6C2/0x6C3) isn't surfaced — balancing only runs
-                // on the charger. Still count the frames so the scan-rate
-                // drift check stays calibrated.
-                framesThisScan += 1;
-            } else if (event.kind === 'bootDiag') {
-                boot = {
-                    jumpReason: event.jumpReason,
-                    appInitProgress: event.appInitProgress,
-                    fdcan1StartResult: event.fdcan1StartResult,
-                };
+                // Per-IC PEC (0x6C7/0x6C8), balance (0x6C2/0x6C3), and boot
+                // diagnostics (0x6C4) aren't surfaced on this bench view.
+                // Still count the frames so the scan-rate drift check stays
+                // calibrated.
                 framesThisScan += 1;
             } else if (event.kind === 'postMortem') {
                 crash = {
@@ -1096,13 +1068,6 @@
                   ` · node 0x${fw.blNodeId.toString(16).toUpperCase().padStart(2, '0')}`,
     );
 
-    // app_init_progress milestone 7 = clean self-exit; anything less
-    // means the app didn't reach a clean boot.
-    function bootTone(p: BootSnapshot): 'success' | 'warning' {
-        return p.appInitProgress >= 7 && p.fdcan1StartResult === 0
-            ? 'success'
-            : 'warning';
-    }
 </script>
 
 <div class="view">
@@ -1744,76 +1709,6 @@
                 Relay bits are GPIO read-backs (what the firmware drives the
                 coils to), not a physical-closed confirmation. Current sign:
                 + discharge / − charge.
-            </p>
-        </section>
-    {/if}
-
-    <!-- Per-IC PEC counts (0x6C7 / 0x6C8) -->
-    {#if icPec.some((c) => c !== null)}
-        <section class="card">
-            <div class="card-header">
-                <h3>Per-IC PEC errors</h3>
-                <span class="muted small mono">0x6C7 / 0x6C8</span>
-            </div>
-            <div class="ic-row">
-                {#each icPec as count, ic (ic)}
-                    <div
-                        class="ic-cell"
-                        class:flagged={count !== null && count > 0}
-                        title="IC {ic} (module {Math.floor(ic / 2) + 1} {ic % 2 === 0
-                            ? 'upper'
-                            : 'lower'}) — {count ?? '—'} PEC errors"
-                    >
-                        <span class="ic-idx">IC{ic}</span>
-                        <span class="ic-count mono">{count ?? '—'}</span>
-                    </div>
-                {/each}
-            </div>
-            <p class="muted small ic-hint">
-                Saturating per-IC CRC-error counter on the slave-bus link.
-                IC <code>2m</code>/<code>2m+1</code> = upper/lower of module
-                <code>m</code>. Any non-zero count points at ISO-SPI integrity
-                on that chain.
-            </p>
-        </section>
-    {/if}
-
-    <!-- Boot diagnostics (0x6C4). -->
-    {#if boot !== null}
-        <section class="card">
-            <div class="card-header">
-                <h3>Boot diagnostics</h3>
-                <span class="muted small mono">0x6C4</span>
-            </div>
-            <div class="diag-grid">
-                <div class="diag-cell">
-                    <span class="diag-label">Jump reason</span>
-                    <span class="pill">{boot.jumpReason}</span>
-                </div>
-                <div class="diag-cell">
-                    <span class="diag-label">Init progress</span>
-                    <span class="pill pill-{bootTone(boot)} mono">
-                        {boot.appInitProgress}/7
-                    </span>
-                </div>
-                <div class="diag-cell">
-                    <span class="diag-label">FDCAN start</span>
-                    <span
-                        class="pill mono"
-                        class:pill-success={boot.fdcan1StartResult === 0}
-                        class:pill-danger={boot.fdcan1StartResult !== 0}
-                    >
-                        {boot.fdcan1StartResult === 0
-                            ? 'HAL_OK'
-                            : `0x${boot.fdcan1StartResult.toString(16).toUpperCase()}`}
-                    </span>
-                </div>
-            </div>
-            <p class="muted small boot-hint">
-                Init progress 7 = the app booted through every milestone.
-                A jump reason of <code>canTrigger</code>/<code>manual</code>
-                means it came up from the bootloader rather than a cold
-                power-on.
             </p>
         </section>
     {/if}
@@ -2827,44 +2722,6 @@
         font-weight: 600;
     }
 
-    /* Per-IC PEC grid — 10 compact tiles, one per monitor IC. Tile
-       turns danger-toned when its count is non-zero. */
-    .ic-row {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
-        gap: var(--space-2);
-    }
-    .ic-cell {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 2px;
-        padding: var(--space-2);
-        border: 1px solid var(--border);
-        border-radius: var(--radius-md);
-        background: var(--surface);
-        cursor: help;
-    }
-    .ic-cell.flagged {
-        border-color: var(--danger);
-        background: var(--danger-soft);
-    }
-    .ic-idx {
-        font-size: var(--text-xs);
-        color: var(--text-muted);
-    }
-    .ic-count {
-        font-size: var(--text-base);
-        color: var(--text);
-    }
-    .ic-cell.flagged .ic-count {
-        color: var(--danger);
-        font-weight: 600;
-    }
-    .ic-hint {
-        margin: var(--space-3) 0 0;
-    }
-
     /* Firmware-ID header chip — sits top-right of the view header. */
     .fw-chip {
         align-self: flex-start;
@@ -2876,10 +2733,6 @@
         color: var(--text-muted);
         cursor: help;
         font-size: var(--text-xs);
-    }
-
-    .boot-hint {
-        margin: var(--space-3) 0 0;
     }
 
     /* Pack-spread bar — fills proportional to spread in mV,
