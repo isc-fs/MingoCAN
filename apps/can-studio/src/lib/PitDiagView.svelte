@@ -95,15 +95,6 @@
         tSweepFailMask: number;
     }
 
-    interface BalanceSnapshot {
-        /** Cells 0..=63 discharge mask. BigInt — full u64. */
-        dccLo: bigint;
-        /** Cells 64..=94 discharge mask (low 31 bits). */
-        dccHi: number;
-        cyclesTotal: number;
-        cyclesActive: number;
-    }
-
     interface BootSnapshot {
         jumpReason: string;
         appInitProgress: number;
@@ -152,9 +143,8 @@
     let icPec = $state<(number | null)[]>(new Array(AMS_NUM_ICS).fill(null));
 
     // Diag frames added once the AMS 0x6C2..0x6C6 block was decoded
-    // (slices 2b/3). Balance arrives split across two frames; we keep
-    // the latest half of each and reassemble for the discharge grid.
-    let balance = $state<BalanceSnapshot | null>(null);
+    // (slices 2b/3). Balance (0x6C2/0x6C3) is decoded on the wire but not
+    // surfaced — balancing only runs on the charger, off this app.
     let boot = $state<BootSnapshot | null>(null);
     let crash = $state<CrashSnapshot | null>(null);
     let fw = $state<FwSnapshot | null>(null);
@@ -403,6 +393,21 @@
         return UDV_MISSIONS[id] ?? `code ${id}`;
     }
 
+    // Bench-stub mask (0x7A0 byte5). Mirrors the uDV firmware
+    // pit_diag.cpp stub_mask(): b0 EBS-init, b1 DVPC, b2 EBS-sensors,
+    // b3 SDC, b4 steering. Any bit set = a stubbed (non-flight) image.
+    const UDV_STUBS = [
+        'EBS-init',
+        'DVPC',
+        'EBS-sensors',
+        'SDC',
+        'steering',
+    ];
+    function udvStubNames(mask: number): string {
+        const on = UDV_STUBS.filter((_, b) => bit(mask, b));
+        return on.length ? on.join(', ') : 'none';
+    }
+
     // Steering-calibration operator guidance, keyed on the 0x7A6 phase
     // byte (#439). Turns the blind Calibrate button into a self-guiding
     // step-by-step. Phases 4–8 are the automated homing/sweep.
@@ -526,7 +531,6 @@
     const amsHasData = $derived(
         fsm !== null ||
             poll !== null ||
-            balance !== null ||
             cellsMv.some((v) => v !== null) ||
             ntcsC.some((v) => v !== null),
     );
@@ -546,15 +550,6 @@
             ? null
             : `uDV git ${(udvFw.gitHash >>> 0).toString(16).padStart(8, '0')}`,
     );
-
-    // Is cell `idx` discharging? Mirrors BalanceState::is_discharging
-    // in the library: low 64 from dccLo (BigInt), 64..=94 from dccHi.
-    function isDischarging(idx: number): boolean {
-        if (balance === null) return false;
-        if (idx < 64) return ((balance.dccLo >> BigInt(idx)) & 1n) === 1n;
-        if (idx < AMS_NUM_CELLS) return ((balance.dccHi >>> (idx - 64)) & 1) === 1;
-        return false;
-    }
 
     // Scan-rate tracking — counts EVERY pit-diag frame received in
     // a 1 Hz window. Compared against AMS_EXPECTED_FRAMES_PER_SCAN
@@ -683,7 +678,6 @@
         icPec = new Array(AMS_NUM_ICS).fill(null);
         fsm = null;
         poll = null;
-        balance = null;
         boot = null;
         crash = null;
         fw = null;
@@ -793,22 +787,13 @@
                 }
                 icPec = next;
                 framesThisScan += 1;
-            } else if (event.kind === 'balanceMaskA') {
-                // Keep the hi half if we already have it; replace lo.
-                balance = {
-                    dccLo: BigInt(event.dccLo),
-                    dccHi: balance?.dccHi ?? 0,
-                    cyclesTotal: balance?.cyclesTotal ?? 0,
-                    cyclesActive: balance?.cyclesActive ?? 0,
-                };
-                framesThisScan += 1;
-            } else if (event.kind === 'balanceMaskB') {
-                balance = {
-                    dccLo: balance?.dccLo ?? 0n,
-                    dccHi: event.dccHi,
-                    cyclesTotal: event.cyclesTotal,
-                    cyclesActive: event.cyclesActive,
-                };
+            } else if (
+                event.kind === 'balanceMaskA' ||
+                event.kind === 'balanceMaskB'
+            ) {
+                // Balance (0x6C2/0x6C3) isn't surfaced — balancing only runs
+                // on the charger. Still count the frames so the scan-rate
+                // drift check stays calibrated.
                 framesThisScan += 1;
             } else if (event.kind === 'bootDiag') {
                 boot = {
@@ -1110,14 +1095,6 @@
                   ` · ${fw.gitHash.map((b) => b.toString(16).padStart(2, '0')).join('')}` +
                   ` · node 0x${fw.blNodeId.toString(16).toUpperCase().padStart(2, '0')}`,
     );
-
-    // How many cells are actively discharging right now.
-    const dischargingCount = $derived.by(() => {
-        if (balance === null) return 0;
-        let n = 0;
-        for (let i = 0; i < AMS_NUM_CELLS; i++) if (isDischarging(i)) n += 1;
-        return n;
-    });
 
     // app_init_progress milestone 7 = clean self-exit; anything less
     // means the app didn't reach a clean boot.
@@ -1797,41 +1774,6 @@
                 IC <code>2m</code>/<code>2m+1</code> = upper/lower of module
                 <code>m</code>. Any non-zero count points at ISO-SPI integrity
                 on that chain.
-            </p>
-        </section>
-    {/if}
-
-    <!-- Balance (0x6C2 / 0x6C3) — which cells are actively discharging. -->
-    {#if balance !== null}
-        <section class="card">
-            <div class="card-header">
-                <h3>Cell balancing</h3>
-                <span class="muted small">
-                    {dischargingCount}/{AMS_NUM_CELLS} discharging ·
-                    {balance.cyclesActive}/{balance.cyclesTotal} cycles active
-                </span>
-            </div>
-            <div class="grid">
-                {#each Array(AMS_NUM_MODULES) as _, m (m)}
-                    <div class="grid-row" role="row">
-                        <span class="row-label">M{m + 1}</span>
-                        {#each Array(AMS_CELLS_PER_MODULE) as _, s (s)}
-                            {@const idx = m * AMS_CELLS_PER_MODULE + s}
-                            <div
-                                class="tile bal-tile"
-                                class:discharging={isDischarging(idx)}
-                                title="Cell {idx + 1} — {isDischarging(idx)
-                                    ? 'discharging'
-                                    : 'idle'}"
-                            ></div>
-                        {/each}
-                    </div>
-                {/each}
-            </div>
-            <p class="muted small bal-hint">
-                Highlighted = DCC (discharge) bit set this scan. Heavy
-                discharge on a handful of cells is normal mid-balance; the
-                pack-spread bar below should be shrinking while it runs.
             </p>
         </section>
     {/if}
@@ -2543,16 +2485,13 @@
                                         : `${udvStatus.missionId} · ${missionName(udvStatus.missionId)}`}
                                 </strong>
                             </span>
-                            <span class="stat">
+                            <span
+                                class="stat"
+                                class:bad={udvStatus.stubMask !== 0}
+                                title="Compiled-in bench stubs (0x7A0). Any set = a stubbed, non-flight image — revert to 0 before racing."
+                            >
                                 <span>stubs</span>
-                                <strong>
-                                    {bit(udvStatus.stubMask, 0) ? 'EBS ' : ''}{bit(
-                                        udvStatus.stubMask,
-                                        1,
-                                    )
-                                        ? 'DVPC'
-                                        : ''}{udvStatus.stubMask === 0 ? 'none' : ''}
-                                </strong>
+                                <strong>{udvStubNames(udvStatus.stubMask)}</strong>
                             </span>
                         </div>
                     {:else}
@@ -2939,18 +2878,6 @@
         font-size: var(--text-xs);
     }
 
-    /* Balance grid reuses the cell-V tile grid; the discharging
-       state lights the tile accent-amber (active DCC). */
-    .bal-tile {
-        height: 22px;
-        background: var(--bg);
-        border: 1px solid var(--border);
-    }
-    .bal-tile.discharging {
-        background: var(--accent);
-        border-color: var(--accent);
-    }
-    .bal-hint,
     .boot-hint {
         margin: var(--space-3) 0 0;
     }

@@ -211,7 +211,8 @@ impl UdvSteerMotor {
 
 /// `0x7A0` — status. `signals` is the raw 10-bit mask (b0 ASMS, b1 TS,
 /// b2 SDC_open, b3 EBS_act, b4 ABS_ok, b5 brakes, b6 mission_sel, b7 R2D,
-/// b8 standstill, b9 finished); `stub_mask` bits: b0 EBS, b1 DVPC.
+/// b8 standstill, b9 finished); `stub_mask` bits (firmware pit_diag.cpp
+/// `stub_mask()`): b0 EBS-init, b1 DVPC, b2 EBS-sensors, b3 SDC, b4 steering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UdvStatusFrame {
     pub as_state: UdvAsState,
