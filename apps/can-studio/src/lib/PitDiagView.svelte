@@ -403,6 +403,21 @@
         return UDV_MISSIONS[id] ?? `code ${id}`;
     }
 
+    // Bench-stub mask (0x7A0 byte5). Mirrors the uDV firmware
+    // pit_diag.cpp stub_mask(): b0 EBS-init, b1 DVPC, b2 EBS-sensors,
+    // b3 SDC, b4 steering. Any bit set = a stubbed (non-flight) image.
+    const UDV_STUBS = [
+        'EBS-init',
+        'DVPC',
+        'EBS-sensors',
+        'SDC',
+        'steering',
+    ];
+    function udvStubNames(mask: number): string {
+        const on = UDV_STUBS.filter((_, b) => bit(mask, b));
+        return on.length ? on.join(', ') : 'none';
+    }
+
     // Steering-calibration operator guidance, keyed on the 0x7A6 phase
     // byte (#439). Turns the blind Calibrate button into a self-guiding
     // step-by-step. Phases 4–8 are the automated homing/sweep.
@@ -2543,16 +2558,13 @@
                                         : `${udvStatus.missionId} · ${missionName(udvStatus.missionId)}`}
                                 </strong>
                             </span>
-                            <span class="stat">
+                            <span
+                                class="stat"
+                                class:bad={udvStatus.stubMask !== 0}
+                                title="Compiled-in bench stubs (0x7A0). Any set = a stubbed, non-flight image — revert to 0 before racing."
+                            >
                                 <span>stubs</span>
-                                <strong>
-                                    {bit(udvStatus.stubMask, 0) ? 'EBS ' : ''}{bit(
-                                        udvStatus.stubMask,
-                                        1,
-                                    )
-                                        ? 'DVPC'
-                                        : ''}{udvStatus.stubMask === 0 ? 'none' : ''}
-                                </strong>
+                                <strong>{udvStubNames(udvStatus.stubMask)}</strong>
                             </span>
                         </div>
                     {:else}
