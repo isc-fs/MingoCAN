@@ -15,8 +15,8 @@
       - NTC heatmap: 5 modules × 40 NTCs = 200 tiles, absolute °C
       - FSM extended status card (0x6C0): state badge, mode chip,
         cockpit input LEDs, PEC error count
-      - Poll-timing card (0x6C1): V-poll ms last + worst-case +
-        T-sweep failure mask
+      (Poll-timing 0x6C1 and cell-balancing 0x6C2/0x6C3 are decoded but
+       not surfaced — charger/bench-BMS concerns, off this app.)
 
     Safety net: the view counts every pit-diag frame received per
     1 Hz window and banners a warning if the count drifts from the
@@ -88,12 +88,6 @@
         faultDetail: number;
     }
 
-    interface PollSnapshot {
-        lastVPollMs: number;
-        worstVPollMs: number;
-        tSweepFailMask: number;
-    }
-
     interface CrashSnapshot {
         stackOverflowSeen: boolean;
         watermarkLowByte: number;
@@ -124,11 +118,8 @@
     let cellsMv = $state<(number | null)[]>(new Array(AMS_NUM_CELLS).fill(null));
     let ntcsC = $state<(number | null)[]>(new Array(AMS_NUM_NTCS).fill(null));
 
-    // Latest FSM + poll-timing snapshots. Each arrives once per
-    // scan; we just keep the most recent (no history yet — slice 3
-    // could add a trend line for the V-poll latency).
+    // Latest FSM snapshot. Arrives once per scan; we keep the most recent.
     let fsm = $state<FsmSnapshot | null>(null);
-    let poll = $state<PollSnapshot | null>(null);
 
     // Balance (0x6C2/0x6C3), per-IC PEC (0x6C7/0x6C8), and boot
     // diagnostics (0x6C4) are decoded on the wire but not surfaced on this
@@ -517,7 +508,6 @@
     // tabs behave the same when idle.
     const amsHasData = $derived(
         fsm !== null ||
-            poll !== null ||
             cellsMv.some((v) => v !== null) ||
             ntcsC.some((v) => v !== null),
     );
@@ -591,26 +581,6 @@
         return { min, max, count };
     });
 
-    // Number of T-sweep bits set in the poll-timing failure mask.
-    // Each set bit is one NTC channel that flagged a sweep failure
-    // on the most recent sweep — a quick at-a-glance count is more
-    // useful than the raw u32.
-    const tSweepFailBits = $derived(
-        poll === null ? 0 : popcount(poll.tSweepFailMask),
-    );
-
-    function popcount(n: number): number {
-        // u32 popcount via the standard SWAR trick. Number is f64
-        // in JS but the input fits 32 bits so we can use bitwise.
-        let x = n >>> 0;
-        let count = 0;
-        while (x !== 0) {
-            count += x & 1;
-            x >>>= 1;
-        }
-        return count;
-    }
-
     let unlistenFrame: UnlistenFn | null = null;
     let unlistenStatus: UnlistenFn | null = null;
 
@@ -663,7 +633,6 @@
         cellsMv = new Array(AMS_NUM_CELLS).fill(null);
         ntcsC = new Array(AMS_NUM_NTCS).fill(null);
         fsm = null;
-        poll = null;
         crash = null;
         fw = null;
         relays = null;
@@ -757,11 +726,9 @@
                 };
                 framesThisScan += 1;
             } else if (event.kind === 'pollTiming') {
-                poll = {
-                    lastVPollMs: event.lastVPollMs,
-                    worstVPollMs: event.worstVPollMs,
-                    tSweepFailMask: event.tSweepFailMask,
-                };
+                // Poll timing (0x6C1) isn't surfaced — V-poll latency is a
+                // charger/bench-BMS concern, off this app. Still count the
+                // frame so the scan-rate drift check stays calibrated.
                 framesThisScan += 1;
             } else if (
                 event.kind === 'perIcPec' ||
@@ -1047,16 +1014,6 @@
         if (state === 'run' || state === 'charge') return 'success';
         if (state === 'error' || state.startsWith('unknown')) return 'danger';
         return 'info';
-    }
-
-    // V-poll headroom — firmware budget is ~50 ms per the
-    // CAN_MAP.md poll-timing comment. Past 40 ms = warn, past 50 ms
-    // = bad.
-    function pollTone(ms: number | undefined): 'success' | 'warning' | 'danger' {
-        if (ms === undefined) return 'success';
-        if (ms > 50) return 'danger';
-        if (ms > 40) return 'warning';
-        return 'success';
     }
 
     // Firmware-ID header chip — "AMS v1.6.0 · a1b2c3d4 · node 0x02".
@@ -1557,104 +1514,57 @@
         </div>
     {/if}
 
-    <!-- FSM + poll-timing row (only renders once we've seen at
-         least one of each). -->
-    {#if fsm !== null || poll !== null}
-        <div class="diag-row">
-            {#if fsm !== null}
-                <section class="card diag-card">
-                    <div class="card-header">
-                        <h3>FSM extended status</h3>
-                        <span class="muted small mono">0x6C0</span>
-                    </div>
-                    <div class="diag-grid">
-                        <div class="diag-cell">
-                            <span class="diag-label">State</span>
-                            <span class="pill pill-{fsmStateTone(fsm.state)}">
-                                {fsm.state}
-                            </span>
-                        </div>
-                        <div class="diag-cell">
-                            <span class="diag-label">Mode</span>
-                            <span class="pill">{fsm.modeLocked}</span>
-                        </div>
-                        <div class="diag-cell">
-                            <span class="diag-label">TSMS</span>
-                            <span class="led" class:on={fsm.tsms}></span>
-                        </div>
-                        <div class="diag-cell">
-                            <span class="diag-label" title="Momentary button (AMS #316): live GPIO level, not latched. Reads 0 during Run/Charge once the button is released — that's normal, not a fault. Run/Charge are held by TSMS alone.">
-                                DASH_CHG
-                                <span class="hint-mark">ⓘ</span>
-                            </span>
-                            <span class="led" class:on={fsm.dashChg}></span>
-                        </div>
-                        <div class="diag-cell">
-                            <span class="diag-label">AMS_OK</span>
-                            <span class="led" class:on={fsm.amsOk}></span>
-                        </div>
-                        <div class="diag-cell">
-                            <span class="diag-label">PEC errors</span>
-                            <span class="diag-value mono">
-                                {fsm.pecErrorTotal}
-                            </span>
-                        </div>
-                    </div>
-                    {#if fsm.faultReason !== 'none'}
-                        <div class="fault-line">
-                            <span class="pill pill-danger">latched</span>
-                            <span class="fault-reason mono">{fsm.faultReason}</span>
-                            <span class="muted small">detail 0x{fsm.faultDetail
-                                    .toString(16)
-                                    .toUpperCase()
-                                    .padStart(2, '0')}</span>
-                        </div>
-                    {/if}
-                </section>
+    <!-- FSM extended status (0x6C0). -->
+    {#if fsm !== null}
+        <section class="card diag-card">
+            <div class="card-header">
+                <h3>FSM extended status</h3>
+                <span class="muted small mono">0x6C0</span>
+            </div>
+            <div class="diag-grid">
+                <div class="diag-cell">
+                    <span class="diag-label">State</span>
+                    <span class="pill pill-{fsmStateTone(fsm.state)}">
+                        {fsm.state}
+                    </span>
+                </div>
+                <div class="diag-cell">
+                    <span class="diag-label">Mode</span>
+                    <span class="pill">{fsm.modeLocked}</span>
+                </div>
+                <div class="diag-cell">
+                    <span class="diag-label">TSMS</span>
+                    <span class="led" class:on={fsm.tsms}></span>
+                </div>
+                <div class="diag-cell">
+                    <span class="diag-label" title="Momentary button (AMS #316): live GPIO level, not latched. Reads 0 during Run/Charge once the button is released — that's normal, not a fault. Run/Charge are held by TSMS alone.">
+                        DASH_CHG
+                        <span class="hint-mark">ⓘ</span>
+                    </span>
+                    <span class="led" class:on={fsm.dashChg}></span>
+                </div>
+                <div class="diag-cell">
+                    <span class="diag-label">AMS_OK</span>
+                    <span class="led" class:on={fsm.amsOk}></span>
+                </div>
+                <div class="diag-cell">
+                    <span class="diag-label">PEC errors</span>
+                    <span class="diag-value mono">
+                        {fsm.pecErrorTotal}
+                    </span>
+                </div>
+            </div>
+            {#if fsm.faultReason !== 'none'}
+                <div class="fault-line">
+                    <span class="pill pill-danger">latched</span>
+                    <span class="fault-reason mono">{fsm.faultReason}</span>
+                    <span class="muted small">detail 0x{fsm.faultDetail
+                            .toString(16)
+                            .toUpperCase()
+                            .padStart(2, '0')}</span>
+                </div>
             {/if}
-
-            {#if poll !== null}
-                <section class="card diag-card">
-                    <div class="card-header">
-                        <h3>Poll timing</h3>
-                        <span class="muted small mono">0x6C1</span>
-                    </div>
-                    <div class="diag-grid">
-                        <div class="diag-cell">
-                            <span class="diag-label">V-poll last</span>
-                            <span class="pill pill-{pollTone(poll.lastVPollMs)} mono">
-                                {poll.lastVPollMs} ms
-                            </span>
-                        </div>
-                        <div class="diag-cell">
-                            <span class="diag-label">V-poll worst</span>
-                            <span class="pill pill-{pollTone(poll.worstVPollMs)} mono">
-                                {poll.worstVPollMs} ms
-                            </span>
-                        </div>
-                        <div class="diag-cell wide">
-                            <span class="diag-label">T-sweep fail mask</span>
-                            <span class="diag-value mono">
-                                0x{poll.tSweepFailMask
-                                    .toString(16)
-                                    .toUpperCase()
-                                    .padStart(8, '0')}
-                                {#if tSweepFailBits > 0}
-                                    <span class="muted">
-                                        · {tSweepFailBits} channel{tSweepFailBits === 1 ? '' : 's'} flagged
-                                    </span>
-                                {/if}
-                            </span>
-                        </div>
-                    </div>
-                    <p class="muted small poll-hint">
-                        Budget &lt; 50 ms per scan. Worst-case &gt; 50 ms means
-                        the BMS slave bus is saturating; check ISO-SPI line
-                        integrity + sample-and-poll batching.
-                    </p>
-                </section>
-            {/if}
-        </div>
+        </section>
     {/if}
 
     <!-- HV relays + pack current (always-on telemetry, not gated by the
@@ -2648,21 +2558,7 @@
         color: var(--text);
     }
 
-    /* Diag row — FSM card + poll-timing card side by side; wraps
-       to stacked when the page narrows. */
-    .diag-row {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: var(--space-3);
-    }
-    @media (max-width: 900px) {
-        .diag-row {
-            grid-template-columns: 1fr;
-        }
-    }
-
-    /* Diag grid — labelled key/value cells laid out auto-fill. The
-       .wide modifier lets the T-sweep mask span both columns. */
+    /* Diag grid — labelled key/value cells laid out auto-fill. */
     .diag-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -2672,9 +2568,6 @@
         display: flex;
         flex-direction: column;
         gap: var(--space-1);
-    }
-    .diag-cell.wide {
-        grid-column: 1 / -1;
     }
     .diag-label {
         font-size: var(--text-xs);
@@ -2703,9 +2596,6 @@
         box-shadow: 0 0 6px rgba(74, 222, 128, 0.55);
     }
 
-    .poll-hint {
-        margin: var(--space-3) 0 0;
-    }
 
     /* Fault line — only rendered when the FSM latched ERROR. Sits
        below the diag grid inside the FSM card. */

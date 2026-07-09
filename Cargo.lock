@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "can-flasher"
-version = "2.7.6"
+version = "2.7.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "can-studio"
-version = "2.7.6"
+version = "2.7.7"
 dependencies = [
  "anyhow",
  "can-dbc",
