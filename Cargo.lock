@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "can-flasher"
-version = "2.7.0"
+version = "2.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "can-studio"
-version = "2.7.0"
+version = "2.7.1"
 dependencies = [
  "anyhow",
  "can-dbc",
@@ -5076,7 +5076,7 @@ dependencies = [
 
 [[package]]
 name = "tokio-macros"
-version = "2.7.0"
+version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
 dependencies = [
