@@ -959,6 +959,10 @@ fn print_udv_human(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
             s.motor_state,
             udv::steer_motor_state_name(s.motor_state),
         ),
+        F::CalibRelay(r) => println!(
+            "{prefix} crelay trig_rx={} relayed={} last_cmd=0x{:02X} armed={}",
+            r.trigger_rx_count, r.relay_count, r.last_cmd, r.armed as u8,
+        ),
     }
 }
 
@@ -1016,6 +1020,10 @@ fn print_udv_json(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
         F::Steer(s) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"udvSteer","lwsRawDdeg":{},"steerActualDdeg":{},"steerTargetDdeg":{},"lwsStatus":{},"motorState":{}}}"#,
             s.lws_raw_ddeg, s.steer_actual_ddeg, s.steer_target_ddeg, s.lws_status, s.motor_state,
+        ),
+        F::CalibRelay(r) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvCalibRelay","triggerRxCount":{},"relayCount":{},"lastCmd":{},"armed":{}}}"#,
+            r.trigger_rx_count, r.relay_count, r.last_cmd, r.armed,
         ),
     }
 }

@@ -314,6 +314,21 @@
         motorState: number;
         motorStateName: string;
     }
+    interface UdvCalibRelaySnapshot {
+        triggerRxCount: number;
+        relayCount: number;
+        lastCmd: number;
+        armed: boolean;
+    }
+    interface UdvCanHealthSnapshot {
+        flags: number;
+        lastErrorCode: number;
+        txErrCount: number;
+        rxErrCount: number;
+        resRxCount: number;
+        nmtCount: number;
+        ackError: boolean;
+    }
     let udvStatus = $state<UdvStatusSnapshot | null>(null);
     let udvRes = $state<UdvResSnapshot | null>(null);
     let udvPipe = $state<UdvPipeSnapshot | null>(null);
@@ -321,6 +336,8 @@
     let udvFw = $state<UdvFwSnapshot | null>(null);
     let udvCalib = $state<UdvCalibSnapshot | null>(null);
     let udvSteer = $state<UdvSteerSnapshot | null>(null);
+    let udvCalibRelay = $state<UdvCalibRelaySnapshot | null>(null);
+    let udvCanHealth = $state<UdvCanHealthSnapshot | null>(null);
     // Steering-calibration control state (#428). `confirming` shows the
     // "car elevated?" gate; `busy` disables the trigger between click + the
     // first status frame.
@@ -688,6 +705,8 @@
         udvFw = null;
         udvCalib = null;
         udvSteer = null;
+        udvCalibRelay = null;
+        udvCanHealth = null;
         calibConfirming = false;
         calibBusy = false;
         calibError = null;
@@ -981,8 +1000,26 @@
                     motorState: event.motorState,
                     motorStateName: event.motorStateName,
                 };
+            } else if (event.kind === 'udvCalibRelay') {
+                udvCalibRelay = {
+                    triggerRxCount: event.triggerRxCount,
+                    relayCount: event.relayCount,
+                    lastCmd: event.lastCmd,
+                    armed: event.armed,
+                };
+                // calib-relay is calibration-only — not a cyclic scan frame.
+            } else if (event.kind === 'udvCanHealth') {
+                udvCanHealth = {
+                    flags: event.flags,
+                    lastErrorCode: event.lastErrorCode,
+                    txErrCount: event.txErrCount,
+                    rxErrCount: event.rxErrCount,
+                    resRxCount: event.resRxCount,
+                    nmtCount: event.nmtCount,
+                    ackError: event.ackError,
+                };
+                framesThisScan += 1;
             }
-            // udvCanHealth (0x7A5) flows through but isn't surfaced yet.
             // Ack events come during arm/disarm; they're handled by
             // the status listener, not counted toward a scan window.
         });
@@ -2358,6 +2395,33 @@
                                 Waiting for the first calibration frames from the uDV…
                             </p>
                         {/if}
+
+                        <!-- Relay diagnostics (0x7A8, #457): confirms the
+                             0x7DF trigger reached the uDV and was relayed on
+                             to the steering — "is it even firing". -->
+                        {#if udvCalibRelay !== null}
+                            <div class="calib-relay">
+                                <span class="muted small">relay diag</span>
+                                <span class="stat">
+                                    <span>trigger rx</span>
+                                    <strong>{udvCalibRelay.triggerRxCount}</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>relayed</span>
+                                    <strong>{udvCalibRelay.relayCount}</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>last cmd</span>
+                                    <strong class="mono">
+                                        0x{udvCalibRelay.lastCmd
+                                            .toString(16)
+                                            .toUpperCase()
+                                            .padStart(2, '0')}
+                                    </strong>
+                                </span>
+                                <span class="flag" class:on={udvCalibRelay.armed}>armed</span>
+                            </div>
+                        {/if}
                     {/if}
                 </div>
 
@@ -2552,6 +2616,41 @@
                         </div>
                     {:else}
                         <p class="muted small">No health frame yet.</p>
+                    {/if}
+                </div>
+
+                <!-- FDCAN1 CAN-health (0x7A5, #457). LEC 3 = ACK (no other
+                     node ACKed) — expected on a lone bench uDV. -->
+                <div class="card">
+                    <h3 class="card-h">CAN health</h3>
+                    {#if udvCanHealth !== null}
+                        <div class="flags">
+                            <span class="flag" class:on={bit(udvCanHealth.flags, 0)}>Bus-off</span>
+                            <span class="flag" class:on={bit(udvCanHealth.flags, 1)}>
+                                Err-passive
+                            </span>
+                            <span class="flag" class:on={bit(udvCanHealth.flags, 2)}>Warning</span>
+                            <span class="flag" class:on={udvCanHealth.ackError}>ACK err</span>
+                        </div>
+                        <div class="reads">
+                            <span class="stat" title="Last error code — 3 = ACK (no other node), 0/7 = ok">
+                                <span>LEC</span><strong>{udvCanHealth.lastErrorCode}</strong>
+                            </span>
+                            <span class="stat" class:bad={udvCanHealth.txErrCount > 0}>
+                                <span>TEC</span><strong>{udvCanHealth.txErrCount}</strong>
+                            </span>
+                            <span class="stat" class:bad={udvCanHealth.rxErrCount > 0}>
+                                <span>REC</span><strong>{udvCanHealth.rxErrCount}</strong>
+                            </span>
+                            <span class="stat">
+                                <span>RES rx</span><strong>{udvCanHealth.resRxCount}</strong>
+                            </span>
+                            <span class="stat">
+                                <span>NMT tx</span><strong>{udvCanHealth.nmtCount}</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No CAN-health frame yet.</p>
                     {/if}
                 </div>
 {/snippet}
@@ -2961,6 +3060,15 @@
     }
     .calib-step.fail {
         color: var(--danger);
+    }
+    /* Relay-diag footer in the calib modal (0x7A8) — trigger/relay counters. */
+    .calib-relay {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-2) var(--space-3);
+        padding-top: var(--space-2);
+        border-top: 1px solid var(--border);
     }
     /* Live LWS wheel-angle readout (#439 / 0x7A7). */
     .lws {

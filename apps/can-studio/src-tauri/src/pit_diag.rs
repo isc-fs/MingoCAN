@@ -44,8 +44,8 @@ use can_flasher::pit_diag::ecu::{
     EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::udv::{
-    self, UdvCalibFrame, UdvCanHealthFrame, UdvFwInfoFrame, UdvHealthFrame, UdvPipeFrame,
-    UdvResFrame, UdvStatusFrame, UdvSteerFrame,
+    self, UdvCalibFrame, UdvCalibRelayFrame, UdvCanHealthFrame, UdvFwInfoFrame, UdvHealthFrame,
+    UdvPipeFrame, UdvResFrame, UdvStatusFrame, UdvSteerFrame,
 };
 use can_flasher::pit_diag::{
     build_arm_frame, decode_frame, AcuCurrentsFrame, AmsHealthFrame, BalanceMaskAFrame,
@@ -595,6 +595,14 @@ pub enum PitDiagEvent {
         motor_state: i8,
         motor_state_name: String,
     },
+    /// uDV `0x7A8` — calibration-relay diagnostics (#457): trigger-rx /
+    /// relay counts, last command byte, and the uDV's armed flag.
+    UdvCalibRelay {
+        trigger_rx_count: u16,
+        relay_count: u16,
+        last_cmd: u8,
+        armed: bool,
+    },
 }
 
 impl PitDiagEvent {
@@ -997,6 +1005,17 @@ impl PitDiagEvent {
                 lws_status,
                 motor_state,
                 motor_state_name: udv::steer_motor_state_name(motor_state).to_string(),
+            },
+            F::CalibRelay(UdvCalibRelayFrame {
+                trigger_rx_count,
+                relay_count,
+                last_cmd,
+                armed,
+            }) => Self::UdvCalibRelay {
+                trigger_rx_count,
+                relay_count,
+                last_cmd,
+                armed,
             },
         }
     }
