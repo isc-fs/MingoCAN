@@ -397,6 +397,16 @@ export type PitDiagEvent =
           lwsStatus: number;
           motorState: number;
           motorStateName: string;
+      }
+    | {
+          /** uDV 0x7A8 — calibration-relay diagnostics (#457): how many
+           *  0x7DF triggers the uDV received and how many it relayed to the
+           *  steering, plus the last command byte and armed flag. */
+          kind: 'udvCalibRelay';
+          triggerRxCount: number;
+          relayCount: number;
+          lastCmd: number;
+          armed: boolean;
       };
 
 /** The inverter-temperature value that means "sensor disconnected"

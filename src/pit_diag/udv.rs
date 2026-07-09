@@ -23,6 +23,8 @@
 //!     `0x7DF` trigger (tool → uDV) — see [`build_calib_trigger`].
 //!   - `0x7A7` steer: live LWS wheel angle + steer actual/target + motor
 //!     state (uDV #123, can-flasher #439) — feedback during calibration.
+//!   - `0x7A8` calib-relay: `0x7DF` trigger-rx + relay counts, last cmd,
+//!     armed flag (uDV #129, can-flasher #457) — "did the trigger fire".
 //!
 //! Bit masks (`signals`, `res_bits`, `setup_bits`, `task_mask`, …) are kept
 //! raw here; the consumer decodes individual bits for display, mirroring how
@@ -57,6 +59,11 @@ pub const UDV_CALIB_ID: u16 = 0x7A6;
 /// (all deci-degrees) + LWS status byte + motor state (uDV #123,
 /// can-flasher #439). ~10 Hz on FDCAN2; drives the calibration live readout.
 pub const UDV_STEER_ID: u16 = 0x7A7;
+/// `0x7A8` — calibration-relay diagnostics: how many `0x7DF` triggers the
+/// uDV received and how many calib commands it relayed on to the steering,
+/// plus the last command byte and the armed flag (#457). Confirms the
+/// trigger actually left the uDV — "is it even firing".
+pub const UDV_CALIB_RELAY_ID: u16 = 0x7A8;
 
 /// `0x7DF` — steering-calibration trigger (tool → uDV, #428). DLC 1;
 /// honoured only while pit-diag is armed. See [`build_calib_trigger`].
@@ -328,6 +335,21 @@ pub struct UdvSteerFrame {
     pub motor_state: i8,
 }
 
+/// `0x7A8` — calibration-relay diagnostics (#457). Counters saturate at
+/// `u16::MAX`; `armed` mirrors the pit-diag arm state the uDV enforces on
+/// the `0x7DF` trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdvCalibRelayFrame {
+    /// Count of `0x7DF` triggers the uDV has received.
+    pub trigger_rx_count: u16,
+    /// Count of calib commands the uDV relayed on to the steering (`0x30`).
+    pub relay_count: u16,
+    /// Last command byte seen (`0x01` start / `0x02` abort).
+    pub last_cmd: u8,
+    /// The uDV's pit-diag armed flag (it only honours triggers while armed).
+    pub armed: bool,
+}
+
 /// A decoded uDV pit-diag frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UdvPitDiagFrame {
@@ -347,6 +369,8 @@ pub enum UdvPitDiagFrame {
     Calib(UdvCalibFrame),
     /// `0x7A7` — live steering angle.
     Steer(UdvSteerFrame),
+    /// `0x7A8` — calibration-relay diagnostics.
+    CalibRelay(UdvCalibRelayFrame),
 }
 
 /// Name for a `0x7A6` calibration phase byte.
@@ -523,6 +547,17 @@ pub fn decode_frame(frame: &CanFrame) -> Option<UdvPitDiagFrame> {
                 motor_state: p[7] as i8,
             }))
         }
+        UDV_CALIB_RELAY_ID => {
+            if p.len() < 8 {
+                return None;
+            }
+            Some(UdvPitDiagFrame::CalibRelay(UdvCalibRelayFrame {
+                trigger_rx_count: u16::from_le_bytes([p[0], p[1]]),
+                relay_count: u16::from_le_bytes([p[2], p[3]]),
+                last_cmd: p[4],
+                armed: p[5] != 0,
+            }))
+        }
         _ => None,
     }
 }
@@ -661,6 +696,21 @@ mod tests {
                 assert_eq!(steer_motor_state_name(s.motor_state), "emergency");
             }
             other => panic!("expected Steer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn calib_relay_decodes() {
+        // trigger_rx=5, relay=3, last_cmd=0x01, armed=1.
+        let p = [5, 0, 3, 0, 0x01, 1, 0, 0];
+        match decode_frame(&CanFrame::new(UDV_CALIB_RELAY_ID, &p).unwrap()).unwrap() {
+            UdvPitDiagFrame::CalibRelay(r) => {
+                assert_eq!(r.trigger_rx_count, 5);
+                assert_eq!(r.relay_count, 3);
+                assert_eq!(r.last_cmd, 0x01);
+                assert!(r.armed);
+            }
+            other => panic!("expected CalibRelay, got {other:?}"),
         }
     }
 
