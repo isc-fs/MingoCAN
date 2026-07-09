@@ -418,10 +418,42 @@
     // end-stop must exceed 30°, and full lock is well under this, so
     // ±130° keeps the needle on-scale without clipping.
     const LWS_BAR_MAX_DEG = 130;
+    // A captured end-stop is only valid past this magnitude (firmware rule).
+    const LWS_STOP_MIN_DEG = 30;
     function lwsFill(deg: number): { left: number; width: number } {
         const clamped = Math.max(-LWS_BAR_MAX_DEG, Math.min(LWS_BAR_MAX_DEG, deg));
         const pos = (clamped / LWS_BAR_MAX_DEG) * 50; // −50…+50 around the 50% centre
         return pos >= 0 ? { left: 50, width: pos } : { left: 50 + pos, width: -pos };
+    }
+    // Percentage offset from the bar centre for a given angle (for the
+    // ±30° threshold markers). 0° → 0, ±LWS_BAR_MAX_DEG → ±50.
+    function lwsPct(deg: number): number {
+        return (deg / LWS_BAR_MAX_DEG) * 50;
+    }
+
+    // Calibration procedure as an ordered checklist — maps the raw 0x7A6
+    // phase to "which step are we on" so the operator can see the whole
+    // arc (capture both stops → recentre → auto-verify → save), not just a
+    // bare number (#439 follow-up).
+    const CALIB_STEPS = [
+        'End-stop 1',
+        'End-stop 2',
+        'Return centre',
+        'Verify sweep',
+        'Save',
+    ];
+    function calibStepIndex(phase: number): number {
+        if (phase === 1) return 0;
+        if (phase === 2) return 1;
+        if (phase === 3) return 2;
+        if (phase >= 4 && phase <= 8) return 3;
+        if (phase === 9) return 4;
+        return -1; // idle (0) or failed (10)
+    }
+    // True while the operator is actively turning to a stop (phases 1–2) —
+    // gates the "past 30°?" threshold cue on the live angle.
+    function calibCapturing(phase: number): boolean {
+        return phase === 1 || phase === 2;
     }
 
     // APPS plausibility: FSAE T11.8.9 trips at >10% disagreement
@@ -2167,11 +2199,33 @@
                             end-stop.
                         </p>
                         <p class="muted small">
-                            After you confirm, turn the wheel fully to each stop
-                            when prompted (hold ~2&nbsp;s, &gt; 30°), then return it
-                            near centre. Hands clear during the automatic sweep.
+                            This teaches the wheel its mechanical limits. You'll turn
+                            fully to each lock when prompted (hold ~2&nbsp;s, past 30°),
+                            then return near centre. From the two captured end-stops the
+                            firmware computes the <strong>centre</strong> (new 0°), the
+                            usable <strong>half-range</strong> each way, and the motor
+                            <strong>soft-limit</strong>, and saves them. Hands clear
+                            during the automatic verification sweep.
                         </p>
                     {:else}
+                        <!-- Procedure checklist (#439 follow-up): show the whole arc
+                             and where we are, so the live angle has visible purpose. -->
+                        {@const ph = udvCalib?.phase ?? 0}
+                        {@const si = calibStepIndex(ph)}
+                        <ol class="calib-steps">
+                            {#each CALIB_STEPS as label, i (label)}
+                                <li
+                                    class="calib-stepitem"
+                                    class:done={ph === 9 || (si >= 0 && i < si)}
+                                    class:active={ph !== 9 && ph !== 10 && i === si}
+                                >
+                                    <span class="step-dot">
+                                        {#if ph === 9 || (si >= 0 && i < si)}✓{:else}{i + 1}{/if}
+                                    </span>
+                                    <span class="step-label">{label}</span>
+                                </li>
+                            {/each}
+                        </ol>
                         <!-- Step-by-step operator guidance, keyed on the 0x7A6
                              phase — turns the blind trigger self-guiding. -->
                         {#if calibBusy}
@@ -2214,11 +2268,32 @@
                                 </div>
                                 <div class="lws-bar">
                                     <div class="lws-tick"></div>
+                                    <!-- ±30° end-stop threshold markers -->
+                                    <div
+                                        class="lws-thresh"
+                                        style="left: {50 - lwsPct(LWS_STOP_MIN_DEG)}%"
+                                    ></div>
+                                    <div
+                                        class="lws-thresh"
+                                        style="left: {50 + lwsPct(LWS_STOP_MIN_DEG)}%"
+                                    ></div>
                                     <div
                                         class="lws-fill"
                                         style="left: {f.left}%; width: {f.width}%"
                                     ></div>
                                 </div>
+                                {#if calibCapturing(ph)}
+                                    {@const mag = Math.abs(udvSteer.lwsRawDdeg / 10)}
+                                    <p class="lws-cue" class:ok={mag >= LWS_STOP_MIN_DEG}>
+                                        {#if mag >= LWS_STOP_MIN_DEG}
+                                            Past {LWS_STOP_MIN_DEG}° — hold steady ~2 s to
+                                            capture this end-stop.
+                                        {:else}
+                                            Keep turning — an end-stop must exceed
+                                            {LWS_STOP_MIN_DEG}° ({mag.toFixed(0)}° so far).
+                                        {/if}
+                                    </p>
+                                {/if}
                                 <div class="reads">
                                     <span class="stat">
                                         <span>actual</span>
@@ -2256,20 +2331,28 @@
                                     <span class="pill pill-danger">error: {udvCalib.errorName}</span>
                                 {/if}
                             </div>
-                            <div class="reads">
-                                <span class="stat">
-                                    <span>center</span>
-                                    <strong>{(udvCalib.centerDdeg / 10).toFixed(1)}°</strong>
-                                </span>
-                                <span class="stat">
-                                    <span>half-range</span>
-                                    <strong>{(udvCalib.halfRangeDdeg / 10).toFixed(1)}°</strong>
-                                </span>
-                                <span class="stat">
-                                    <span>limit</span>
-                                    <strong>{(udvCalib.limitDdeg / 10).toFixed(1)}°</strong>
-                                </span>
-                            </div>
+                            {#if udvCalib.phase === 9}
+                                <div class="reads">
+                                    <span class="stat">
+                                        <span>centre</span>
+                                        <strong>{(udvCalib.centerDdeg / 10).toFixed(1)}°</strong>
+                                    </span>
+                                    <span class="stat">
+                                        <span>half-range</span>
+                                        <strong>{(udvCalib.halfRangeDdeg / 10).toFixed(1)}°</strong>
+                                    </span>
+                                    <span class="stat">
+                                        <span>limit</span>
+                                        <strong>{(udvCalib.limitDdeg / 10).toFixed(1)}°</strong>
+                                    </span>
+                                </div>
+                                <p class="muted small">
+                                    <strong>Centre</strong> is the wheel's new 0°;
+                                    <strong>half-range</strong> is the usable travel each
+                                    way from centre; the motor won't drive past
+                                    <strong>±limit</strong>. Saved to the wheel.
+                                </p>
+                            {/if}
                         {:else if udvSteer === null}
                             <p class="muted small">
                                 Waiting for the first calibration frames from the uDV…
@@ -2927,6 +3010,69 @@
         transition:
             left 80ms linear,
             width 80ms linear;
+    }
+    /* ±30° end-stop threshold markers — the live angle must pass one of
+       these to register a valid stop. */
+    .lws-thresh {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        margin-left: -1px;
+        background: var(--warning);
+        opacity: 0.7;
+    }
+    /* Threshold cue text under the bar during capture (phases 1–2). */
+    .lws-cue {
+        margin: 0;
+        font-size: var(--text-sm);
+        color: var(--text-muted);
+    }
+    .lws-cue.ok {
+        color: var(--success);
+        font-weight: 600;
+    }
+    /* Procedure checklist — the whole calibration arc as ordered steps,
+       with the current one highlighted (#439 follow-up). */
+    .calib-steps {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2) var(--space-3);
+        margin: 0;
+        padding: 0;
+        list-style: none;
+    }
+    .calib-stepitem {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-1);
+        font-size: var(--text-sm);
+        color: var(--text-muted);
+    }
+    .calib-stepitem .step-dot {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.35em;
+        height: 1.35em;
+        border-radius: 50%;
+        border: 1px solid var(--border);
+        font-size: 0.8em;
+        font-weight: 600;
+    }
+    .calib-stepitem.active {
+        color: var(--text);
+        font-weight: 600;
+    }
+    .calib-stepitem.active .step-dot {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+    }
+    .calib-stepitem.done .step-dot {
+        border-color: var(--success);
+        background: var(--success);
+        color: var(--accent-contrast, #fff);
     }
     /* Calibration modal (#439 follow-up) — a focused pop-up so the live
        angle + guidance only appear once the operator opts in. */
