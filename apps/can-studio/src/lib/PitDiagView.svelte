@@ -2450,6 +2450,63 @@
 {/snippet}
 
 {#snippet udvCards()}
+                <!-- Live steering angle (0x7A7) — always-on card so the
+                     wheel angle is glanceable without opening the calib
+                     modal (which keeps the richer capture view). -->
+                <div class="card">
+                    <h3 class="card-h">Steering angle</h3>
+                    {#if udvSteer !== null}
+                        {@const f = lwsFill(udvSteer.lwsRawDdeg / 10)}
+                        <div class="lws">
+                            <div class="lws-head">
+                                <span class="lws-angle mono">
+                                    {(udvSteer.lwsRawDdeg / 10).toFixed(1)}°
+                                </span>
+                                <span class="lws-cap muted small">LWS wheel angle</span>
+                                <span
+                                    class="pill pill-{udvSteer.motorState === -1
+                                        ? 'danger'
+                                        : udvSteer.motorState === 2
+                                          ? 'warning'
+                                          : udvSteer.motorState === 1
+                                            ? 'success'
+                                            : 'info'}"
+                                >
+                                    motor: {udvSteer.motorStateName}
+                                </span>
+                            </div>
+                            <div class="lws-bar">
+                                <div class="lws-tick"></div>
+                                <div
+                                    class="lws-fill"
+                                    style="left: {f.left}%; width: {f.width}%"
+                                ></div>
+                            </div>
+                            <div class="reads">
+                                <span class="stat">
+                                    <span>actual</span>
+                                    <strong>{(udvSteer.steerActualDdeg / 10).toFixed(1)}°</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>target</span>
+                                    <strong>{(udvSteer.steerTargetDdeg / 10).toFixed(1)}°</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>LWS status</span>
+                                    <strong class="mono">
+                                        0x{udvSteer.lwsStatus
+                                            .toString(16)
+                                            .toUpperCase()
+                                            .padStart(2, '0')}
+                                    </strong>
+                                </span>
+                            </div>
+                        </div>
+                    {:else}
+                        <p class="muted small">No steering frame yet (0x7A7).</p>
+                    {/if}
+                </div>
+
                 <!-- AS status (0x7A0) -->
                 <div class="card">
                     <h3 class="card-h">Autonomous system</h3>
