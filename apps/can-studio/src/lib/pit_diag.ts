@@ -407,6 +407,19 @@ export type PitDiagEvent =
           relayCount: number;
           lastCmd: number;
           armed: boolean;
+      }
+    | {
+          /** uDV 0x7A9 — EBS air-tank pressures + init state (#475).
+           *  Pressures are deci-bar (÷10 = bar). `tank*Ok` are the
+           *  CheckPressure gate verdicts (tank > 1.0 bar). If stubMask bit 2
+           *  (EBS_SENSORS) is set the gate is faked but the value is real. */
+          kind: 'udvEbsPress';
+          tank1Dbar: number;
+          tank2Dbar: number;
+          ebsInit: string;
+          stubMask: number;
+          tank1Ok: boolean;
+          tank2Ok: boolean;
       };
 
 /** The inverter-temperature value that means "sensor disconnected"
