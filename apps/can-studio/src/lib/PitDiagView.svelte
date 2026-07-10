@@ -1199,7 +1199,7 @@
             <section class="cockpit-board">
                 <div class="board-title">ECU</div>
                 {#if ecuHasData}
-                    <div class="ecu-grid">{@render ecuCards()}</div>
+                    <div class="ecu-grid">{@render ecuCards(false)}</div>
                 {:else}
                     <div class="card placeholder-card">
                         <p class="muted small">No ECU frame yet.</p>
@@ -1352,7 +1352,7 @@
             </div>
         {:else}
             <div class="ecu-grid">
-                {@render ecuCards()}
+                {@render ecuCards(true)}
             </div>
         {/if}
     {:else}
@@ -1675,7 +1675,7 @@
     {/if}
 {/snippet}
 
-{#snippet ecuCards()}
+{#snippet ecuCards(showHealth: boolean)}
                 <!-- Vehicle FSM / status (0x700) -->
                 <div class="card">
                     <h3 class="card-h">Vehicle FSM</h3>
@@ -1848,48 +1848,51 @@
                     {/if}
                 </div>
 
-                <!-- Firmware health (0x704, 1 Hz) -->
-                <div class="card">
-                    <h3 class="card-h">Firmware health</h3>
-                    {#if ecuHealth !== null}
-                        <div class="flags">
-                            <span class="flag" class:on={ecuHealth.taskControl}>
-                                Control
-                            </span>
-                            <span class="flag" class:on={ecuHealth.taskCanRx}>CAN-RX</span>
-                            <span class="flag" class:on={ecuHealth.taskCanTx}>CAN-TX</span>
-                            <span class="flag" class:on={ecuHealth.taskDiag}>Diag</span>
-                        </div>
-                        <div class="reads">
-                            <span class="stat">
-                                <span>free heap</span>
-                                <strong class="mono">{ecuHealth.freeHeap} B</strong>
-                            </span>
-                            <span class="stat">
-                                <span>min heap</span>
-                                <strong class="mono">{ecuHealth.minFreeHeap} B</strong>
-                            </span>
-                            <span class="stat">
-                                <span>uptime</span><strong>{ecuHealth.uptimeS} s</strong>
-                            </span>
-                            <span class="stat">
-                                <span>reset</span>
-                                <strong
-                                    class:bad={ecuHealth.resetCause === 'iwdg' ||
-                                        ecuHealth.resetCause === 'wwdg'}
-                                >
-                                    {ecuHealth.resetCause}
-                                </strong>
-                            </span>
-                            <span class="stat" class:bad={ecuHealth.lastFault !== 0}>
-                                <span>last fault</span>
-                                <strong>{ecuHealth.lastFaultName}</strong>
-                            </span>
-                        </div>
-                    {:else}
-                        <p class="muted small">No health frame yet (arrives at 1 Hz).</p>
-                    {/if}
-                </div>
+                <!-- Firmware health (0x704, 1 Hz) — diagnostic; hidden in the
+                     aggregated cockpit, shown on the dedicated ECU tab. -->
+                {#if showHealth}
+                    <div class="card">
+                        <h3 class="card-h">Firmware health</h3>
+                        {#if ecuHealth !== null}
+                            <div class="flags">
+                                <span class="flag" class:on={ecuHealth.taskControl}>
+                                    Control
+                                </span>
+                                <span class="flag" class:on={ecuHealth.taskCanRx}>CAN-RX</span>
+                                <span class="flag" class:on={ecuHealth.taskCanTx}>CAN-TX</span>
+                                <span class="flag" class:on={ecuHealth.taskDiag}>Diag</span>
+                            </div>
+                            <div class="reads">
+                                <span class="stat">
+                                    <span>free heap</span>
+                                    <strong class="mono">{ecuHealth.freeHeap} B</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>min heap</span>
+                                    <strong class="mono">{ecuHealth.minFreeHeap} B</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>uptime</span><strong>{ecuHealth.uptimeS} s</strong>
+                                </span>
+                                <span class="stat">
+                                    <span>reset</span>
+                                    <strong
+                                        class:bad={ecuHealth.resetCause === 'iwdg' ||
+                                            ecuHealth.resetCause === 'wwdg'}
+                                    >
+                                        {ecuHealth.resetCause}
+                                    </strong>
+                                </span>
+                                <span class="stat" class:bad={ecuHealth.lastFault !== 0}>
+                                    <span>last fault</span>
+                                    <strong>{ecuHealth.lastFaultName}</strong>
+                                </span>
+                            </div>
+                        {:else}
+                            <p class="muted small">No health frame yet (arrives at 1 Hz).</p>
+                        {/if}
+                    </div>
+                {/if}
 
                 <!-- DV / autonomy (0x707) — the ECU's view of the uDV
                      handshake. `driverless` on the FSM card above means the
