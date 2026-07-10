@@ -44,8 +44,8 @@ use can_flasher::pit_diag::ecu::{
     EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::udv::{
-    self, UdvCalibFrame, UdvCalibRelayFrame, UdvCanHealthFrame, UdvFwInfoFrame, UdvHealthFrame,
-    UdvPipeFrame, UdvResFrame, UdvStatusFrame, UdvSteerFrame,
+    self, UdvCalibFrame, UdvCalibRelayFrame, UdvCanHealthFrame, UdvEbsPressFrame, UdvFwInfoFrame,
+    UdvHealthFrame, UdvPipeFrame, UdvResFrame, UdvStatusFrame, UdvSteerFrame,
 };
 use can_flasher::pit_diag::{
     build_arm_frame, decode_frame, AcuCurrentsFrame, AmsHealthFrame, BalanceMaskAFrame,
@@ -603,6 +603,17 @@ pub enum PitDiagEvent {
         last_cmd: u8,
         armed: bool,
     },
+    /// uDV `0x7A9` — EBS air-tank pressures + init state (#475). Pressures
+    /// are deci-bar (÷10 = bar); `ebs_init` is the debug name of the init
+    /// sub-state; `tank*_ok` are the CheckPressure gate verdicts.
+    UdvEbsPress {
+        tank1_dbar: i16,
+        tank2_dbar: i16,
+        ebs_init: String,
+        stub_mask: u8,
+        tank1_ok: bool,
+        tank2_ok: bool,
+    },
 }
 
 impl PitDiagEvent {
@@ -1016,6 +1027,21 @@ impl PitDiagEvent {
                 relay_count,
                 last_cmd,
                 armed,
+            },
+            F::EbsPress(UdvEbsPressFrame {
+                tank1_dbar,
+                tank2_dbar,
+                ebs_init,
+                stub_mask,
+                tank1_ok,
+                tank2_ok,
+            }) => Self::UdvEbsPress {
+                tank1_dbar,
+                tank2_dbar,
+                ebs_init: format!("{ebs_init:?}"),
+                stub_mask,
+                tank1_ok,
+                tank2_ok,
             },
         }
     }

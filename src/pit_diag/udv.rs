@@ -25,6 +25,9 @@
 //!     state (uDV #123, can-flasher #439) — feedback during calibration.
 //!   - `0x7A8` calib-relay: `0x7DF` trigger-rx + relay counts, last cmd,
 //!     armed flag (uDV #129, can-flasher #457) — "did the trigger fire".
+//!   - `0x7A9` ebs-press: EBS air-tank storage pressures (deci-bar) + init
+//!     state + stub mask + per-tank pressure-ok bits (can-flasher #475) —
+//!     for EBS bring-up and pressure-sensor calibration against a gauge.
 //!
 //! Bit masks (`signals`, `res_bits`, `setup_bits`, `task_mask`, …) are kept
 //! raw here; the consumer decodes individual bits for display, mirroring how
@@ -64,6 +67,10 @@ pub const UDV_STEER_ID: u16 = 0x7A7;
 /// plus the last command byte and the armed flag (#457). Confirms the
 /// trigger actually left the uDV — "is it even firing".
 pub const UDV_CALIB_RELAY_ID: u16 = 0x7A8;
+/// `0x7A9` — EBS air-tank storage pressures (deci-bar) + EBS init state +
+/// stub mask + per-tank pressure-ok bits (can-flasher #475). Drives the EBS
+/// bring-up panel and pressure-sensor calibration.
+pub const UDV_EBS_PRESS_ID: u16 = 0x7A9;
 
 /// `0x7DF` — steering-calibration trigger (tool → uDV, #428). DLC 1;
 /// honoured only while pit-diag is armed. See [`build_calib_trigger`].
@@ -351,6 +358,27 @@ pub struct UdvCalibRelayFrame {
     pub armed: bool,
 }
 
+/// `0x7A9` — EBS air-tank pressures + init state (#475). Pressures are
+/// deci-bar (×0.1 bar — divide by 10 for bar). `tank*_ok` are the firmware's
+/// `CheckPressure` gate verdicts (tank > 1.0 bar). If `stub_mask` bit 2
+/// (EBS_SENSORS) is set the pass/fail gate is faked, but the pressure VALUE
+/// is still the real sensor reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdvEbsPressFrame {
+    /// Tank 1 (actuator-1 storage, A5) pressure, deci-bar (signed).
+    pub tank1_dbar: i16,
+    /// Tank 2 (actuator-2 storage, A4) pressure, deci-bar (signed).
+    pub tank2_dbar: i16,
+    /// EBS init sub-state — same enum as `0x7A0` byte 4.
+    pub ebs_init: UdvEbsInit,
+    /// Bench-stub mask (same bits as `0x7A0`): b2 = EBS_SENSORS stubbed.
+    pub stub_mask: u8,
+    /// Tank 1 pressure-ok gate (byte6 b0): tank1 > 1.0 bar.
+    pub tank1_ok: bool,
+    /// Tank 2 pressure-ok gate (byte6 b1): tank2 > 1.0 bar.
+    pub tank2_ok: bool,
+}
+
 /// A decoded uDV pit-diag frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UdvPitDiagFrame {
@@ -372,6 +400,8 @@ pub enum UdvPitDiagFrame {
     Steer(UdvSteerFrame),
     /// `0x7A8` — calibration-relay diagnostics.
     CalibRelay(UdvCalibRelayFrame),
+    /// `0x7A9` — EBS air-tank pressures + init state.
+    EbsPress(UdvEbsPressFrame),
 }
 
 /// Name for a `0x7A6` calibration phase byte.
@@ -559,6 +589,19 @@ pub fn decode_frame(frame: &CanFrame) -> Option<UdvPitDiagFrame> {
                 armed: p[5] != 0,
             }))
         }
+        UDV_EBS_PRESS_ID => {
+            if p.len() < 8 {
+                return None;
+            }
+            Some(UdvPitDiagFrame::EbsPress(UdvEbsPressFrame {
+                tank1_dbar: i16::from_le_bytes([p[0], p[1]]),
+                tank2_dbar: i16::from_le_bytes([p[2], p[3]]),
+                ebs_init: UdvEbsInit::from_byte(p[4]),
+                stub_mask: p[5],
+                tank1_ok: p[6] & 0x01 != 0,
+                tank2_ok: p[6] & 0x02 != 0,
+            }))
+        }
         _ => None,
     }
 }
@@ -712,6 +755,24 @@ mod tests {
                 assert!(r.armed);
             }
             other => panic!("expected CalibRelay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ebs_press_decodes() {
+        // tank1=+85 (8.5 bar), tank2=+3 (0.3 bar), init=8 (Done),
+        // stub=0x04 (EBS_SENSORS), ok bits = tank1 ok only (0x01).
+        let p = [85, 0, 3, 0, 8, 0x04, 0x01, 0];
+        match decode_frame(&CanFrame::new(UDV_EBS_PRESS_ID, &p).unwrap()).unwrap() {
+            UdvPitDiagFrame::EbsPress(e) => {
+                assert_eq!(e.tank1_dbar, 85);
+                assert_eq!(e.tank2_dbar, 3);
+                assert_eq!(e.ebs_init, UdvEbsInit::Done);
+                assert_eq!(e.stub_mask, 0x04);
+                assert!(e.tank1_ok);
+                assert!(!e.tank2_ok);
+            }
+            other => panic!("expected EbsPress, got {other:?}"),
         }
     }
 

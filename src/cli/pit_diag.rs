@@ -963,6 +963,15 @@ fn print_udv_human(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
             "{prefix} crelay trig_rx={} relayed={} last_cmd=0x{:02X} armed={}",
             r.trigger_rx_count, r.relay_count, r.last_cmd, r.armed as u8,
         ),
+        F::EbsPress(e) => println!(
+            "{prefix} ebs    tank1={:.1}bar{} tank2={:.1}bar{} init={:?} stub=0x{:02X}",
+            f64::from(e.tank1_dbar) * 0.1,
+            if e.tank1_ok { " ok" } else { "" },
+            f64::from(e.tank2_dbar) * 0.1,
+            if e.tank2_ok { " ok" } else { "" },
+            e.ebs_init,
+            e.stub_mask,
+        ),
     }
 }
 
@@ -1024,6 +1033,10 @@ fn print_udv_json(ts_ms: u64, record: &udv::UdvPitDiagFrame) {
         F::CalibRelay(r) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"udvCalibRelay","triggerRxCount":{},"relayCount":{},"lastCmd":{},"armed":{}}}"#,
             r.trigger_rx_count, r.relay_count, r.last_cmd, r.armed,
+        ),
+        F::EbsPress(e) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"udvEbsPress","tank1Dbar":{},"tank2Dbar":{},"ebsInit":"{:?}","stubMask":{},"tank1Ok":{},"tank2Ok":{}}}"#,
+            e.tank1_dbar, e.tank2_dbar, e.ebs_init, e.stub_mask, e.tank1_ok, e.tank2_ok,
         ),
     }
 }

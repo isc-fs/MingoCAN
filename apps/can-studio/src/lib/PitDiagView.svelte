@@ -297,6 +297,14 @@
         nmtCount: number;
         ackError: boolean;
     }
+    interface UdvEbsPressSnapshot {
+        tank1Dbar: number;
+        tank2Dbar: number;
+        ebsInit: string;
+        stubMask: number;
+        tank1Ok: boolean;
+        tank2Ok: boolean;
+    }
     let udvStatus = $state<UdvStatusSnapshot | null>(null);
     let udvRes = $state<UdvResSnapshot | null>(null);
     let udvPipe = $state<UdvPipeSnapshot | null>(null);
@@ -306,6 +314,7 @@
     let udvSteer = $state<UdvSteerSnapshot | null>(null);
     let udvCalibRelay = $state<UdvCalibRelaySnapshot | null>(null);
     let udvCanHealth = $state<UdvCanHealthSnapshot | null>(null);
+    let udvEbsPress = $state<UdvEbsPressSnapshot | null>(null);
     // Steering-calibration control state (#428). `confirming` shows the
     // "car elevated?" gate; `busy` disables the trigger between click + the
     // first status frame.
@@ -518,7 +527,8 @@
             udvRes !== null ||
             udvPipe !== null ||
             udvHealth !== null ||
-            udvSteer !== null,
+            udvSteer !== null ||
+            udvEbsPress !== null,
     );
 
     // uDV firmware header chip — "uDV git 1a2b3c4d".
@@ -655,6 +665,7 @@
         udvSteer = null;
         udvCalibRelay = null;
         udvCanHealth = null;
+        udvEbsPress = null;
         calibConfirming = false;
         calibBusy = false;
         calibError = null;
@@ -941,6 +952,16 @@
                     resRxCount: event.resRxCount,
                     nmtCount: event.nmtCount,
                     ackError: event.ackError,
+                };
+                framesThisScan += 1;
+            } else if (event.kind === 'udvEbsPress') {
+                udvEbsPress = {
+                    tank1Dbar: event.tank1Dbar,
+                    tank2Dbar: event.tank2Dbar,
+                    ebsInit: event.ebsInit,
+                    stubMask: event.stubMask,
+                    tank1Ok: event.tank1Ok,
+                    tank2Ok: event.tank2Ok,
                 };
                 framesThisScan += 1;
             }
@@ -2251,6 +2272,64 @@
                         </div>
                     {:else}
                         <p class="muted small">No steering frame yet (0x7A7).</p>
+                    {/if}
+                </div>
+
+                <!-- EBS air-tank pressures (0x7A9, #475) — bring-up + sensor
+                     calibration: watch each tank charge/vent against a gauge. -->
+                <div class="card">
+                    <h3 class="card-h">EBS pressures</h3>
+                    {#if udvEbsPress !== null}
+                        {@const t1 = udvEbsPress.tank1Dbar / 10}
+                        {@const t2 = udvEbsPress.tank2Dbar / 10}
+                        <div class="badge-row">
+                            <span
+                                class="pill pill-{udvEbsPress.ebsInit === 'Done'
+                                    ? 'success'
+                                    : udvEbsPress.ebsInit === 'Failed'
+                                      ? 'danger'
+                                      : 'info'}"
+                            >
+                                init: {udvEbsPress.ebsInit}
+                            </span>
+                            {#if bit(udvEbsPress.stubMask, 2)}
+                                <span
+                                    class="pill pill-warning"
+                                    title="EBS_SENSORS stub: the pass/fail gate is faked, but the pressure value shown is the real sensor reading."
+                                >
+                                    sensors stubbed (gate faked, reading real)
+                                </span>
+                            {/if}
+                        </div>
+                        <div class="meter-row">
+                            <span class="meter-label">Tank 1 <span class="muted small">A5</span></span>
+                            <div class="meter">
+                                <div
+                                    class="meter-fill"
+                                    style="width: {Math.max(0, Math.min(100, t1 * 10))}%"
+                                ></div>
+                            </div>
+                            <span class="meter-val mono">{t1.toFixed(1)} bar</span>
+                            <span class="flag" class:on={udvEbsPress.tank1Ok}>&gt;1.0</span>
+                        </div>
+                        <div class="meter-row">
+                            <span class="meter-label">Tank 2 <span class="muted small">A4</span></span>
+                            <div class="meter">
+                                <div
+                                    class="meter-fill"
+                                    style="width: {Math.max(0, Math.min(100, t2 * 10))}%"
+                                ></div>
+                            </div>
+                            <span class="meter-val mono">{t2.toFixed(1)} bar</span>
+                            <span class="flag" class:on={udvEbsPress.tank2Ok}>&gt;1.0</span>
+                        </div>
+                        <p class="muted small">
+                            Festo SPAN 0–10 bar. The <code>&gt;1.0</code> flags are the
+                            firmware's CheckPressure gate. Charge to a known gauge
+                            pressure to validate the decoded bar (sensor calibration).
+                        </p>
+                    {:else}
+                        <p class="muted small">No EBS pressure frame yet (0x7A9).</p>
                     {/if}
                 </div>
 
