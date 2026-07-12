@@ -243,11 +243,16 @@ export type PitDiagEvent =
           brakePct: number;
       }
     | {
-          /** ECU 0x702 — inverter telemetry. `invRpm` is signed. */
+          /** ECU 0x702 — inverter telemetry. `invRpm` is signed.
+           *  `invError` is the DEM fault code, `invErrorName` its decoded
+           *  name (EPowerLabs W90 table), `demPresent` = active now vs
+           *  latched history (#484). */
           kind: 'ecuInverter';
           dcBusVoltage: number;
           invRpm: number;
           invError: number;
+          invErrorName: string;
+          demPresent: boolean;
       }
     | {
           /** ECU 0x706 — inverter temperatures, °C. `205` = sensor
