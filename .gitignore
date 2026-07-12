@@ -1,7 +1,13 @@
 # ---- Rust ----
 # Cargo build artefacts (single binary crate; no workspace yet).
 /target/
+# Cross-compile output dir (e.g. Raspberry Pi builds).
+/target-pi/
 **/*.rs.bk
+
+# Local brand-logo source dropped at repo root (the canonical app icon
+# is apps/can-studio/src-tauri/icons/icon.png).
+/logo.png
 
 # ---- IDE / editor ----
 .idea/
