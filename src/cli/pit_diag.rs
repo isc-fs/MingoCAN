@@ -786,8 +786,12 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             b.brake_pct,
         ),
         F::Inverter(i) => println!(
-            "{prefix} inv   vdc={}V rpm={} err=0x{:02X}",
-            i.dc_bus_voltage, i.inv_rpm, i.inv_error,
+            "{prefix} inv   vdc={}V rpm={} err={} ({}) {}",
+            i.dc_bus_voltage,
+            i.inv_rpm,
+            i.inv_error,
+            ecu::dem_fault_name(i.inv_error),
+            if i.dem_present { "active" } else { "latched" },
         ),
         F::InverterTemps(t) => println!(
             "{prefix} temps board={}°C pwrstg={}°C motor1={}°C motor2={}°C",
@@ -862,8 +866,12 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             b.brake_pressure_dbar, b.brake_pct,
         ),
         F::Inverter(i) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuInverter","dcBusVoltage":{},"invRpm":{},"invError":{}}}"#,
-            i.dc_bus_voltage, i.inv_rpm, i.inv_error,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuInverter","dcBusVoltage":{},"invRpm":{},"invError":{},"invErrorName":"{}","demPresent":{}}}"#,
+            i.dc_bus_voltage,
+            i.inv_rpm,
+            i.inv_error,
+            ecu::dem_fault_name(i.inv_error),
+            i.dem_present,
         ),
         F::InverterTemps(t) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"ecuInverterTemps","boardDegc":{},"pwrstgDegc":{},"motor1Degc":{},"motor2Degc":{}}}"#,

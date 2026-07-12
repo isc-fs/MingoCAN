@@ -184,6 +184,33 @@ impl EcuResetCause {
     }
 }
 
+/// Name for an inverter DEM fault code (`0x702` `inv_error`) — the EPowerLabs
+/// W90 (EMC150) fault table (User Manual §9.2.3, mirrors the `ecu.dbc`
+/// `VAL_` table, IFS08-CE-ECU #124). Codes outside `0..=15` return `"unknown"`;
+/// the caller shows the raw code for those.
+#[must_use]
+pub fn dem_fault_name(code: u8) -> &'static str {
+    match code {
+        0 => "NoFault",
+        1 => "LostMsg",
+        2 => "Undervoltage",
+        3 => "PwrStgOvertemp",
+        4 => "PwrStgTempDegradation",
+        5 => "EMCtrFault",
+        6 => "TaskOverrun",
+        7 => "CAN1_BusOff",
+        8 => "EmachineOvertemp",
+        9 => "PhaseCurrentSensorRange",
+        10 => "PwrStgTempSensorRange",
+        11 => "DCBusVoltageSensorRange",
+        12 => "DPBoardOvertemp",
+        13 => "DRVBoardOvertemp",
+        14 => "AuxSupplyRange",
+        15 => "EmachineOverspeed",
+        _ => "unknown",
+    }
+}
+
 // ---- Frame records -----------------------------------------------
 
 /// `0x700` — FSM / inverter state, cockpit control flags, torque, and
@@ -246,8 +273,13 @@ pub struct EcuInverterFrame {
     pub dc_bus_voltage: u16,
     /// Motor speed, RPM — **signed** (big-endian).
     pub inv_rpm: i32,
-    /// Inverter error / state code (DEM_Code).
+    /// Inverter DEM fault code (`DEM_Code` low byte) — name via
+    /// [`dem_fault_name`].
     pub inv_error: u8,
+    /// `dem_present` (byte 7 bit 0, #121): the fault is active **now** (`true`)
+    /// vs latched history (`false`). The NX boots latched — code set but this
+    /// bit clear. `false` on a short (DLC 7) frame from older firmware.
+    pub dem_present: bool,
 }
 
 /// `0x703` — firmware semantic version + git-hash prefix.
@@ -430,6 +462,9 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 dc_bus_voltage: u16::from_be_bytes([p[0], p[1]]),
                 inv_rpm: i32::from_be_bytes([p[2], p[3], p[4], p[5]]),
                 inv_error: p[6],
+                // dem_present rides byte 7 bit 0 (DLC 8); older DLC-7 frames
+                // carry no such byte — default to latched (false).
+                dem_present: p.get(7).is_some_and(|b| b & 0x01 != 0),
             }))
         }
         ECU_FWINFO_ID => {
@@ -581,7 +616,8 @@ mod tests {
 
     #[test]
     fn inverter_decodes_signed_rpm() {
-        // dc_bus=0x0258 (600V), rpm=-1000 (BE i32), err=0x07.
+        // dc_bus=0x0258 (600V), rpm=-1000 (BE i32), err=0x07. 7-byte frame:
+        // no dem_present byte -> latched (false).
         let rpm = (-1000i32).to_be_bytes();
         let p = [0x02, 0x58, rpm[0], rpm[1], rpm[2], rpm[3], 0x07];
         let frame = CanFrame::new(ECU_INVERTER_ID, &p).unwrap();
@@ -590,9 +626,27 @@ mod tests {
                 assert_eq!(inv.dc_bus_voltage, 600);
                 assert_eq!(inv.inv_rpm, -1000);
                 assert_eq!(inv.inv_error, 0x07);
+                assert_eq!(dem_fault_name(inv.inv_error), "CAN1_BusOff");
+                assert!(!inv.dem_present);
             }
             other => panic!("expected Inverter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn inverter_decodes_dem_present_and_names() {
+        // 8-byte frame: err=2 (Undervoltage), byte7 bit0 set -> active now.
+        let p = [0, 0, 0, 0, 0, 0, 2, 0x01];
+        match decode_frame(&CanFrame::new(ECU_INVERTER_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Inverter(inv) => {
+                assert_eq!(inv.inv_error, 2);
+                assert_eq!(dem_fault_name(inv.inv_error), "Undervoltage");
+                assert!(inv.dem_present);
+            }
+            other => panic!("expected Inverter, got {other:?}"),
+        }
+        assert_eq!(dem_fault_name(15), "EmachineOverspeed");
+        assert_eq!(dem_fault_name(200), "unknown");
     }
 
     #[test]

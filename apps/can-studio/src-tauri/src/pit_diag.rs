@@ -459,11 +459,14 @@ pub enum PitDiagEvent {
         brake_pressure_dbar: u16,
         brake_pct: u8,
     },
-    /// ECU `0x702` — inverter DC-bus voltage, RPM (signed), error code.
+    /// ECU `0x702` — inverter DC-bus voltage, RPM (signed), DEM fault code +
+    /// decoded name + active/latched bit (#484).
     EcuInverter {
         dc_bus_voltage: u16,
         inv_rpm: i32,
         inv_error: u8,
+        inv_error_name: String,
+        dem_present: bool,
     },
     /// ECU `0x706` — inverter temperatures (°C; 205 = sensor disconnected).
     EcuInverterTemps {
@@ -821,10 +824,13 @@ impl PitDiagEvent {
                 dc_bus_voltage,
                 inv_rpm,
                 inv_error,
+                dem_present,
             }) => Self::EcuInverter {
                 dc_bus_voltage,
                 inv_rpm,
                 inv_error,
+                inv_error_name: ecu::dem_fault_name(inv_error).to_string(),
+                dem_present,
             },
             EcuPitDiagFrame::InverterTemps(EcuInverterTempsFrame {
                 board_degc,

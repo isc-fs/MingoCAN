@@ -181,6 +181,8 @@
         dcBusVoltage: number;
         invRpm: number;
         invError: number;
+        invErrorName: string;
+        demPresent: boolean;
     }
     interface EcuFwSnapshot {
         versionMajor: number;
@@ -821,6 +823,8 @@
                     dcBusVoltage: event.dcBusVoltage,
                     invRpm: event.invRpm,
                     invError: event.invError,
+                    invErrorName: event.invErrorName,
+                    demPresent: event.demPresent,
                 };
                 framesThisScan += 1;
             } else if (event.kind === 'ecuInverterTemps') {
@@ -1792,23 +1796,40 @@
                 <div class="card">
                     <h3 class="card-h">Inverter</h3>
                     {#if ecuInverter !== null}
+                        {@const iv = ecuInverter}
+                        <!-- App_State + named DEM fault + active/latched (#484). -->
+                        <div class="badge-row">
+                            {#if ecuStatus !== null}
+                                <span class="pill pill-{ecuInvTone(ecuStatus.invState)}">
+                                    state: {ecuStatus.invState}
+                                </span>
+                            {/if}
+                            <span
+                                class="pill pill-{iv.invError === 0
+                                    ? 'success'
+                                    : iv.demPresent
+                                      ? 'danger'
+                                      : 'warning'}"
+                                title="Inverter DEM fault (0x702 inv_error) — EPowerLabs W90 code {iv.invError}"
+                            >
+                                {iv.invErrorName === 'unknown'
+                                    ? `code 0x${iv.invError.toString(16).toUpperCase().padStart(2, '0')}`
+                                    : iv.invErrorName}
+                            </span>
+                            {#if iv.invError !== 0}
+                                <span class="pill pill-{iv.demPresent ? 'danger' : 'info'}">
+                                    {iv.demPresent ? 'active' : 'latched'}
+                                </span>
+                            {/if}
+                        </div>
                         <div class="reads">
                             <span class="stat">
                                 <span>DC bus</span>
-                                <strong>{ecuInverter.dcBusVoltage} V</strong>
+                                <strong>{iv.dcBusVoltage} V</strong>
                             </span>
                             <span class="stat">
                                 <span>motor</span>
-                                <strong>{ecuInverter.invRpm} rpm</strong>
-                            </span>
-                            <span class="stat" class:bad={ecuInverter.invError !== 0}>
-                                <span>error</span>
-                                <strong class="mono">
-                                    0x{ecuInverter.invError
-                                        .toString(16)
-                                        .toUpperCase()
-                                        .padStart(2, '0')}
-                                </strong>
+                                <strong>{iv.invRpm} rpm</strong>
                             </span>
                         </div>
                     {:else}
