@@ -317,6 +317,13 @@
     let udvCalibRelay = $state<UdvCalibRelaySnapshot | null>(null);
     let udvCanHealth = $state<UdvCanHealthSnapshot | null>(null);
     let udvEbsPress = $state<UdvEbsPressSnapshot | null>(null);
+    // uDV safety-watchdog keep-alive freshness (#482). A 0x7A3 HEALTH frame
+    // arrives ~10 Hz; if none landed in the last 1 Hz scan window the monitor
+    // stopped kicking, so IWDG_ok must read false even if the last frame's bit
+    // was set. `seen` is set on each health frame; the scan tick rolls it into
+    // `stale` and clears it.
+    let udvHealthSeenThisScan = $state<boolean>(false);
+    let udvHealthStale = $state<boolean>(true);
     // Steering-calibration control state (#428). `confirming` shows the
     // "car elevated?" gate; `busy` disables the trigger between click + the
     // first status frame.
@@ -533,6 +540,14 @@
             udvEbsPress !== null,
     );
 
+    // uDV safety-watchdog keep-alive (#482, 0x7A3 flags bit 2). True ONLY
+    // when a FRESH health frame reports the monitor is kicking the IWDG —
+    // a stale/missing 0x7A3 (wedged node) reads false even if the last bit
+    // was set.
+    const udvIwdgOk = $derived(
+        udvHealth !== null && !udvHealthStale && bit(udvHealth.flags, 2),
+    );
+
     // uDV firmware header chip — "uDV git 1a2b3c4d".
     const udvFwLabel = $derived(
         udvFw === null
@@ -668,6 +683,8 @@
         udvCalibRelay = null;
         udvCanHealth = null;
         udvEbsPress = null;
+        udvHealthSeenThisScan = false;
+        udvHealthStale = true;
         calibConfirming = false;
         calibBusy = false;
         calibError = null;
@@ -911,6 +928,7 @@
                     stalledTask: event.stalledTask,
                     uptimeS: event.uptimeS,
                 };
+                udvHealthSeenThisScan = true;
                 framesThisScan += 1;
             } else if (event.kind === 'udvFwInfo') {
                 udvFw = {
@@ -975,6 +993,10 @@
         scanIntervalId = setInterval(() => {
             lastScanFrames = framesThisScan;
             framesThisScan = 0;
+            // No 0x7A3 in the last window → the safety monitor stopped
+            // emitting; treat the watchdog keep-alive as stale (#482).
+            udvHealthStale = !udvHealthSeenThisScan;
+            udvHealthSeenThisScan = false;
         }, 1000);
     });
 
@@ -2487,6 +2509,16 @@
                 <!-- Firmware health (0x7A3) -->
                 <div class="card">
                     <h3 class="card-h">Firmware health</h3>
+                    <!-- Safety-watchdog keep-alive (#482): green only on a
+                         FRESH 0x7A3 with bit2 set; stale/missing reads NOT ok. -->
+                    <div class="badge-row">
+                        <span
+                            class="pill pill-{udvIwdgOk ? 'success' : 'danger'}"
+                            title="Safety-monitor keep-alive (0x7A3 flags bit 2). Green only when a fresh HEALTH frame reports the monitor is refreshing the hardware IWDG; a stale or missing frame (wedged node) reads NOT ok."
+                        >
+                            IWDG keep-alive: {udvIwdgOk ? 'ok' : 'not ok'}
+                        </span>
+                    </div>
                     {#if udvHealth !== null}
                         <div class="flags">
                             <span class="flag" class:on={bit(udvHealth.taskMask, 0)}>IMU</span>
