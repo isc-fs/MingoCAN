@@ -317,6 +317,13 @@
     let udvCalibRelay = $state<UdvCalibRelaySnapshot | null>(null);
     let udvCanHealth = $state<UdvCanHealthSnapshot | null>(null);
     let udvEbsPress = $state<UdvEbsPressSnapshot | null>(null);
+    // uDV safety-watchdog keep-alive freshness (#482). A 0x7A3 HEALTH frame
+    // arrives ~10 Hz; if none landed in the last 1 Hz scan window the monitor
+    // stopped kicking, so IWDG_ok must read false even if the last frame's bit
+    // was set. `seen` is set on each health frame; the scan tick rolls it into
+    // `stale` and clears it.
+    let udvHealthSeenThisScan = $state<boolean>(false);
+    let udvHealthStale = $state<boolean>(true);
     // Steering-calibration control state (#428). `confirming` shows the
     // "car elevated?" gate; `busy` disables the trigger between click + the
     // first status frame.
@@ -385,16 +392,39 @@
     // Bench-stub mask (0x7A0 byte5). Mirrors the uDV firmware
     // pit_diag.cpp stub_mask(): b0 EBS-init, b1 DVPC, b2 EBS-sensors,
     // b3 SDC, b4 steering. Any bit set = a stubbed (non-flight) image.
+    // Bench-stub mask bits (0x7A0/0x7A4/0x7A9), mirroring firmware
+    // pit_diag.cpp stub_mask(): b0 EBS-init, b1 DVPC, b2 EBS-sensors,
+    // b3 SDC, b4 steering, b5 IMU-ROS, b6 TS, b7 DV-stopping (#490).
+    // Any bit set = a stubbed (non-flight) image.
     const UDV_STUBS = [
         'EBS-init',
         'DVPC',
         'EBS-sensors',
         'SDC',
         'steering',
+        'IMU-ROS',
+        'TS',
+        'DV-stopping',
     ];
     function udvStubNames(mask: number): string {
         const on = UDV_STUBS.filter((_, b) => bit(mask, b));
         return on.length ? on.join(', ') : 'none';
+    }
+
+    // /dv/status enum (0x7A2 byte 0), mirroring the pipeline's status
+    // codes (#490). 7 = STOPPING is the new end-of-mission brake-to-stop.
+    const UDV_DV_STATUS = [
+        'Idle',
+        'Preparing',
+        'Ready',
+        'Running',
+        'Finished',
+        'Emergency',
+        'Failed',
+        'Stopping',
+    ];
+    function dvStatusName(v: number): string {
+        return UDV_DV_STATUS[v] ?? `code ${v}`;
     }
 
     // Steering-calibration operator guidance, keyed on the 0x7A6 phase
@@ -533,6 +563,14 @@
             udvEbsPress !== null,
     );
 
+    // uDV safety-watchdog keep-alive (#482, 0x7A3 flags bit 2). True ONLY
+    // when a FRESH health frame reports the monitor is kicking the IWDG —
+    // a stale/missing 0x7A3 (wedged node) reads false even if the last bit
+    // was set.
+    const udvIwdgOk = $derived(
+        udvHealth !== null && !udvHealthStale && bit(udvHealth.flags, 2),
+    );
+
     // uDV firmware header chip — "uDV git 1a2b3c4d".
     const udvFwLabel = $derived(
         udvFw === null
@@ -668,6 +706,8 @@
         udvCalibRelay = null;
         udvCanHealth = null;
         udvEbsPress = null;
+        udvHealthSeenThisScan = false;
+        udvHealthStale = true;
         calibConfirming = false;
         calibBusy = false;
         calibError = null;
@@ -911,6 +951,7 @@
                     stalledTask: event.stalledTask,
                     uptimeS: event.uptimeS,
                 };
+                udvHealthSeenThisScan = true;
                 framesThisScan += 1;
             } else if (event.kind === 'udvFwInfo') {
                 udvFw = {
@@ -975,6 +1016,10 @@
         scanIntervalId = setInterval(() => {
             lastScanFrames = framesThisScan;
             framesThisScan = 0;
+            // No 0x7A3 in the last window → the safety monitor stopped
+            // emitting; treat the watchdog keep-alive as stale (#482).
+            udvHealthStale = !udvHealthSeenThisScan;
+            udvHealthSeenThisScan = false;
         }, 1000);
     });
 
@@ -2456,6 +2501,20 @@
                 <div class="card">
                     <h3 class="card-h">/dv pipe</h3>
                     {#if udvPipe !== null}
+                        <div class="badge-row">
+                            <span
+                                class="pill pill-{udvPipe.dvStatus === 5
+                                    ? 'danger'
+                                    : udvPipe.dvStatus === 6
+                                      ? 'danger'
+                                      : udvPipe.dvStatus === 3
+                                        ? 'success'
+                                        : 'info'}"
+                                title="/dv/status (0x7A2 byte 0)"
+                            >
+                                {dvStatusName(udvPipe.dvStatus)}
+                            </span>
+                        </div>
                         <div class="flags">
                             <span class="flag" class:on={bit(udvPipe.setupBits, 0)}>Setup</span>
                             <span class="flag" class:on={bit(udvPipe.setupBits, 1)}>Ready</span>
@@ -2487,6 +2546,16 @@
                 <!-- Firmware health (0x7A3) -->
                 <div class="card">
                     <h3 class="card-h">Firmware health</h3>
+                    <!-- Safety-watchdog keep-alive (#482): green only on a
+                         FRESH 0x7A3 with bit2 set; stale/missing reads NOT ok. -->
+                    <div class="badge-row">
+                        <span
+                            class="pill pill-{udvIwdgOk ? 'success' : 'danger'}"
+                            title="Safety-monitor keep-alive (0x7A3 flags bit 2). Green only when a fresh HEALTH frame reports the monitor is refreshing the hardware IWDG; a stale or missing frame (wedged node) reads NOT ok."
+                        >
+                            IWDG keep-alive: {udvIwdgOk ? 'ok' : 'not ok'}
+                        </span>
+                    </div>
                     {#if udvHealth !== null}
                         <div class="flags">
                             <span class="flag" class:on={bit(udvHealth.taskMask, 0)}>IMU</span>

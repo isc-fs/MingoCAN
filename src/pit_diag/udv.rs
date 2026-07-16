@@ -219,7 +219,8 @@ impl UdvSteerMotor {
 /// `0x7A0` — status. `signals` is the raw 10-bit mask (b0 ASMS, b1 TS,
 /// b2 SDC_open, b3 EBS_act, b4 ABS_ok, b5 brakes, b6 mission_sel, b7 R2D,
 /// b8 standstill, b9 finished); `stub_mask` bits (firmware pit_diag.cpp
-/// `stub_mask()`): b0 EBS-init, b1 DVPC, b2 EBS-sensors, b3 SDC, b4 steering.
+/// `stub_mask()`): b0 EBS-init, b1 DVPC, b2 EBS-sensors, b3 SDC, b4 steering,
+/// b5 IMU-ROS, b6 TS, b7 DV-stopping (#490).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UdvStatusFrame {
     pub as_state: UdvAsState,
@@ -251,6 +252,8 @@ pub struct UdvResFrame {
 /// b3 emergency, b4 finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UdvPipeFrame {
+    /// `/dv/status` (byte 0): 0 Idle · 1 Preparing · 2 Ready · 3 Running ·
+    /// 4 Finished · 5 Emergency · 6 Failed · 7 Stopping (#490).
     pub dv_status: u8,
     pub dv_age_ms: u16,
     /// Accel command, signed percent.
