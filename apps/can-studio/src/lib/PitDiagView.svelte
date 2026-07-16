@@ -392,16 +392,39 @@
     // Bench-stub mask (0x7A0 byte5). Mirrors the uDV firmware
     // pit_diag.cpp stub_mask(): b0 EBS-init, b1 DVPC, b2 EBS-sensors,
     // b3 SDC, b4 steering. Any bit set = a stubbed (non-flight) image.
+    // Bench-stub mask bits (0x7A0/0x7A4/0x7A9), mirroring firmware
+    // pit_diag.cpp stub_mask(): b0 EBS-init, b1 DVPC, b2 EBS-sensors,
+    // b3 SDC, b4 steering, b5 IMU-ROS, b6 TS, b7 DV-stopping (#490).
+    // Any bit set = a stubbed (non-flight) image.
     const UDV_STUBS = [
         'EBS-init',
         'DVPC',
         'EBS-sensors',
         'SDC',
         'steering',
+        'IMU-ROS',
+        'TS',
+        'DV-stopping',
     ];
     function udvStubNames(mask: number): string {
         const on = UDV_STUBS.filter((_, b) => bit(mask, b));
         return on.length ? on.join(', ') : 'none';
+    }
+
+    // /dv/status enum (0x7A2 byte 0), mirroring the pipeline's status
+    // codes (#490). 7 = STOPPING is the new end-of-mission brake-to-stop.
+    const UDV_DV_STATUS = [
+        'Idle',
+        'Preparing',
+        'Ready',
+        'Running',
+        'Finished',
+        'Emergency',
+        'Failed',
+        'Stopping',
+    ];
+    function dvStatusName(v: number): string {
+        return UDV_DV_STATUS[v] ?? `code ${v}`;
     }
 
     // Steering-calibration operator guidance, keyed on the 0x7A6 phase
@@ -2478,6 +2501,20 @@
                 <div class="card">
                     <h3 class="card-h">/dv pipe</h3>
                     {#if udvPipe !== null}
+                        <div class="badge-row">
+                            <span
+                                class="pill pill-{udvPipe.dvStatus === 5
+                                    ? 'danger'
+                                    : udvPipe.dvStatus === 6
+                                      ? 'danger'
+                                      : udvPipe.dvStatus === 3
+                                        ? 'success'
+                                        : 'info'}"
+                                title="/dv/status (0x7A2 byte 0)"
+                            >
+                                {dvStatusName(udvPipe.dvStatus)}
+                            </span>
+                        </div>
                         <div class="flags">
                             <span class="flag" class:on={bit(udvPipe.setupBits, 0)}>Setup</span>
                             <span class="flag" class:on={bit(udvPipe.setupBits, 1)}>Ready</span>
