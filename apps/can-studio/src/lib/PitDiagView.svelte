@@ -1065,13 +1065,21 @@
         return mixHex(CELL_GREEN_LOW, CELL_GREEN_HIGH, Math.max(0, Math.min(1, t)));
     }
 
+    // NTC temperature colour: a NON-LINEAR green→red ramp weighted toward
+    // the hot end (gamma > 1 concentrates the colour change near the limit,
+    // so hot cells are easy to spot); grey when a sensor isn't reporting.
+    // Cells over NTC_LIMIT_C blink bright red (the `.over` CSS class).
+    const NTC_COLD_C = 15; // at/below = full green
+    const NTC_LIMIT_C = 60; // over this = blinking red + hard limit
     function ntcColor(c: number | null): string {
-        if (c === null) return 'var(--bg)';
-        if (c < 0) return '#1976d2'; // sub-zero — alarming for Li-ion
-        if (c < 20) return '#0288d1'; // cool
-        if (c < 40) return '#388e3c'; // operating
-        if (c < 55) return '#f57c00'; // warm
-        return '#c2185b'; // hot — outside spec
+        if (c === null) return CELL_GREY; // not reporting
+        const t = Math.max(
+            0,
+            Math.min(1, (c - NTC_COLD_C) / (NTC_LIMIT_C - NTC_COLD_C)),
+        );
+        const u = Math.pow(t, 2.2); // bias resolution toward higher temps
+        const hue = 120 * (1 - u); // 120 green → 0 red, through yellow/orange
+        return `hsl(${hue}, 68%, 42%)`;
     }
 
     // 5×19 / 5×40 grid layouts — module is rows, slot is cols.
@@ -1530,10 +1538,11 @@
             <span class="muted small">
                 {#if ntcStats !== null}
                     range {ntcStats.min}…{ntcStats.max} °C ·
-                    {ntcStats.count}/{AMS_NUM_NTCS} reading
+                    {ntcStats.count}/{AMS_NUM_NTCS} reading ·
                 {:else}
-                    5 modules × 40 NTCs = 200.
+                    5 modules × 40 NTCs = 200 ·
                 {/if}
+                green→red (hot-weighted); &gt;{NTC_LIMIT_C} °C blinks; grey = no reading
             </span>
         </div>
         <div class="grid">
@@ -1544,9 +1553,12 @@
                         <div
                             class="tile ntc-tile"
                             class:empty={ntc.c === null}
+                            class:over={ntc.c !== null && ntc.c > NTC_LIMIT_C}
                             style:background={ntcColor(ntc.c)}
                             title="NTC {ntc.idx + 1} — {ntc.c ?? '—'} °C"
-                        ></div>
+                        >
+                            <span class="tile-value mono">{ntc.c ?? '—'}</span>
+                        </div>
                     {/each}
                 </div>
             {/each}
@@ -2896,9 +2908,28 @@
     .tile-value {
         font-family: var(--font-mono);
     }
+    /* Taller than before so the °C value is legible at 40 tiles/row. */
     .ntc-tile {
-        height: 18px;
+        height: 30px;
         font-size: 0.62rem;
+        overflow: hidden;
+    }
+    /* Over the 60 °C limit: blink bright red so it can't be missed. The
+       animation background overrides the inline ramp colour. */
+    .ntc-tile.over {
+        animation: ntc-over-blink 0.75s steps(1, end) infinite;
+        color: #fff;
+        font-weight: 600;
+    }
+    @keyframes ntc-over-blink {
+        0%,
+        49% {
+            background: #ff1f3d;
+        }
+        50%,
+        100% {
+            background: #7a0a18;
+        }
     }
 
     /* ---- ECU pit-diag panels ---- */
