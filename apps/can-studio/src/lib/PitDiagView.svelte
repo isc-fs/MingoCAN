@@ -1468,7 +1468,7 @@
                 <strong>{packStats?.count ?? 0}/{AMS_NUM_CELLS}</strong>
             </span>
             <span class="stat">
-                <span>NTCs</span>
+                <span>cell temps</span>
                 <strong>{ntcStats?.count ?? 0}/{AMS_NUM_NTCS}</strong>
             </span>
         {/if}
@@ -1534,7 +1534,7 @@
     <!-- NTC temp heatmap -->
     <section class="card">
         <div class="card-header">
-            <h3>NTC temperatures</h3>
+            <h3>Cell temperatures</h3>
             <span class="muted small">
                 {#if ntcStats !== null}
                     range {ntcStats.min}…{ntcStats.max} °C ·
@@ -1555,7 +1555,7 @@
                             class:empty={ntc.c === null}
                             class:over={ntc.c !== null && ntc.c > NTC_LIMIT_C}
                             style:background={ntcColor(ntc.c)}
-                            title="NTC {ntc.idx + 1} — {ntc.c ?? '—'} °C"
+                            title="Cell temp {ntc.idx + 1} — {ntc.c ?? '—'} °C"
                         >
                             <span class="tile-value mono">{ntc.c ?? '—'}</span>
                         </div>
