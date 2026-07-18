@@ -1038,16 +1038,31 @@
         }
     });
 
-    // Colour ramps — cells by deviation from pack mean, NTCs on an
-    // absolute °C scale. Tuned by eye against typical AMS readings;
-    // the operator gets a glanceable picture without having to read
-    // numbers off every tile.
+    // Cell-voltage colour scale (absolute, not deviation): grey when a cell
+    // isn't reporting, red when out of the safe window, and a
+    // yellowish-green → saturated-green ramp across the normal band (low →
+    // full). Thresholds are the Li-ion under/over limits — tune here if the
+    // pack chemistry changes. NTCs stay on the absolute °C scale below.
+    const CELL_MV_UNDER = 3000; // < this = undervoltage (red)
+    const CELL_MV_OVER = 4200; // > this = overvoltage (red)
+    const CELL_GREEN_LOW = '#a3c93a'; // yellowish-green — low-normal
+    const CELL_GREEN_HIGH = '#1f8f3a'; // saturated green — full
+    const CELL_GREY = '#6b6b6b'; // not detected
+    const CELL_RED = '#d64550'; // out of range
+
+    // Linear RGB blend of two #rrggbb colours (t 0..1).
+    function mixHex(a: string, b: string, t: number): string {
+        const ca = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
+        const cb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+        const c = ca.map((v, i) => Math.round(v + (cb[i] - v) * t));
+        return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+    }
+
     function cellColor(mv: number | null): string {
-        if (mv === null || packStats === null) return 'var(--bg)';
-        const dev = Math.abs(mv - packStats.mean);
-        if (dev > 50) return '#c2185b'; // red — outlier
-        if (dev > 20) return '#f57f17'; // amber — drift
-        return '#2e7d32'; // green — within band
+        if (mv === null) return CELL_GREY; // not detected
+        if (mv < CELL_MV_UNDER || mv > CELL_MV_OVER) return CELL_RED; // out of range
+        const t = (mv - CELL_MV_UNDER) / (CELL_MV_OVER - CELL_MV_UNDER);
+        return mixHex(CELL_GREEN_LOW, CELL_GREEN_HIGH, Math.max(0, Math.min(1, t)));
     }
 
     function ntcColor(c: number | null): string {
@@ -1482,7 +1497,9 @@
         <div class="card-header">
             <h3>Cell voltages</h3>
             <span class="muted small">
-                5 modules × 19 cells = 95. Colour = deviation from pack mean.
+                5 modules × 19 cells = 95. Green = normal (yellow-green low →
+                deep green full); red = out of range (&lt;3.0 / &gt;4.2 V);
+                grey = no reading.
             </span>
         </div>
         <div class="grid">
@@ -2873,7 +2890,6 @@
         cursor: help;
     }
     .tile.empty {
-        background: var(--bg);
         border: 1px dashed var(--border);
         color: var(--text-muted);
     }
