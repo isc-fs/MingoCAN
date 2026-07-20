@@ -10,6 +10,7 @@
 //! CAN speeds, a minutes-long transfer.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -21,13 +22,22 @@ use can_flasher::protocol::commands::{
 };
 use can_flasher::protocol::logfs::{self, MAX_READ_LEN};
 use can_flasher::protocol::Response;
-use can_flasher::session::{Session, SessionConfig};
+use can_flasher::session::{Session, SessionConfig, SessionError};
 use can_flasher::transport::open_backend;
 
 use crate::flash::parse_interface;
 
 /// Progress events for an in-flight `logs_pull`.
 pub const EVENT_NAME: &str = "logs://progress";
+
+/// Marker the frontend matches to render a cancel as a neutral outcome
+/// rather than a failure.
+pub const CANCELLED_MSG: &str = "cancelled by operator";
+
+/// Set by [`logs_cancel`], polled between reads by [`logs_pull`]. A pull
+/// can run 3-7 minutes at classic-CAN speeds, so aborting has to be
+/// possible without tearing down the app.
+static CANCEL_PULL: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,10 +101,20 @@ fn open_session(request: &LogsRequest) -> Result<Session, String> {
 /// Send one LOGFS command, unwrapping the ACK body (opcode already
 /// stripped by the response parser).
 async fn ack_body(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec<u8>, String> {
-    match session
-        .send_command(&payload)
-        .await
-        .map_err(|e| format!("send {what}: {e}"))?
+    // LOGFS rides APP_CTRL (0x06), not CMD (0x00) — see IFS08-CE-AMS#406.
+    // The bootloader silently drops APP_CTRL, so a timeout is ambiguous:
+    // probe with a command the BL answers to tell "in bootloader" apart
+    // from "dead node / wrong id".
+    let reply = match session.send_app_command(&payload).await {
+        Err(SessionError::CommandTimeout { .. }) if session.probe_bootloader().await => {
+            return Err(format!(
+                "no reply to {what}: the node is alive but running the bootloader, \
+                 where the log service isn't available — boot the application firmware"
+            ))
+        }
+        other => other.map_err(|e| format!("send {what}: {e}"))?,
+    };
+    match reply
     {
         Response::Ack { payload, .. } => Ok(payload),
         Response::Nack {
@@ -156,6 +176,7 @@ pub async fn logs_pull(
     index: u16,
     dest_dir: String,
 ) -> Result<PullResult, String> {
+    CANCEL_PULL.store(false, Ordering::Relaxed);
     let session = open_session(&request)?;
     session
         .connect()
@@ -213,6 +234,13 @@ async fn pull_inner(
         if out.data.is_empty() {
             return Err(format!("LOGFS_READ stalled at offset {offset} before EOF"));
         }
+        // Poll between reads — each is one bounded ISO-TP round trip, so
+        // a cancel lands within a few hundred ms. Close the handle so the
+        // node doesn't leak it.
+        if CANCEL_PULL.load(Ordering::Relaxed) {
+            let _ = ack_body(session, cmd_logfs_close(open.handle), "LOGFS_CLOSE").await;
+            return Err(CANCELLED_MSG.to_string());
+        }
     }
 
     if open.size > 0 && data.len() as u32 != open.size {
@@ -224,10 +252,15 @@ async fn pull_inner(
         ));
     }
 
-    // Verify against the node's CRC. crc32 == 0 at OPEN means the node
-    // deferred it, which is the agreed default — either way we ask.
-    let body = ack_body(session, cmd_logfs_crc(open.handle), "LOGFS_CRC").await?;
-    let want = logfs::parse_crc(&body).map_err(|e| format!("parse LOGFS_CRC: {e}"))?;
+    // The firmware keeps a running CRC while logging and seals it with
+    // the file, so OPEN carries a real crc32 — no extra round trip. Only
+    // fall back to LOGFS_CRC if the node declined to provide one.
+    let want = if open.crc_deferred() {
+        let body = ack_body(session, cmd_logfs_crc(open.handle), "LOGFS_CRC").await?;
+        logfs::parse_crc(&body).map_err(|e| format!("parse LOGFS_CRC: {e}"))?
+    } else {
+        open.crc32
+    };
     let got = crc32(&data);
     if want != got {
         let _ = ack_body(session, cmd_logfs_close(open.handle), "LOGFS_CLOSE").await;
@@ -264,4 +297,11 @@ fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
         }
     }
     base
+}
+
+/// Ask an in-flight [`logs_pull`] to stop. Cooperative: the transfer
+/// aborts at the next read boundary and the file is not written.
+#[tauri::command]
+pub fn logs_cancel() {
+    CANCEL_PULL.store(true, Ordering::Relaxed);
 }

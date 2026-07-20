@@ -38,6 +38,9 @@ export interface PullResult {
     crcVerified: boolean;
 }
 
+/** Backend marker for an operator-cancelled pull (not a failure). */
+export const CANCELLED_MSG = 'cancelled by operator';
+
 /** Progress event emitted during `logsPull`. */
 export const LOGS_PROGRESS_EVENT = 'logs://progress';
 
@@ -51,6 +54,11 @@ export function logsPull(
     destDir: string,
 ): Promise<PullResult> {
     return invoke<PullResult>('logs_pull', { request, index, destDir });
+}
+
+/** Ask an in-flight pull to stop; it aborts at the next read boundary. */
+export function logsCancel(): Promise<void> {
+    return invoke<void>('logs_cancel');
 }
 
 export function onPullProgress(

@@ -153,9 +153,16 @@ impl TryFrom<u8> for NotifyOpcode {
 /// doesn't crash the flasher — the host still gets a readable
 /// "NACK 0x?? (unknown)" line in its logs.
 ///
-/// Byte values match `bl_proto.h`. Codes `0x04` (signature invalid)
-/// and `0x05` (replay counter low) are allocated but unreachable on
-/// the current contract — they belong to the deferred Phase-5 surface.
+/// Byte values match `bl_proto.h`. `0x05` (replay counter low) is
+/// allocated but unreachable on the current contract — it belongs to the
+/// deferred Phase-5 surface.
+///
+/// **Namespace note:** `0x04` was also pencilled in for Phase-5
+/// (signature invalid), but IFS08-CE-AMS#406 has since assigned it to
+/// LOGFS `FILE_NOT_FOUND`. That is safe today because LOGFS rides
+/// `MessageType::AppCtrl` (`0x06`) rather than the bootloader's `Cmd`
+/// namespace — but if Phase-5 ever ships, `0x04` must be disambiguated
+/// by message type, not by value alone.
 ///
 /// [`Unknown`]: NackCode::Unknown
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,6 +186,14 @@ pub enum NackCode {
     /// option-byte equivalent) — guards a destructive operation
     /// from accidental dispatch.
     NvmWrongToken,
+    /// LOGFS group (#506, table finalised in IFS08-CE-AMS#406). Note
+    /// `BAD_HANDLE` is **0x11**, not `0x08` — `0x08` stays `Busy`, which
+    /// LOGFS reuses. `OUT_OF_BOUNDS` is likewise the existing `0x02`.
+    FileNotFound,
+    BadHandle,
+    NoSdCard,
+    FsError,
+    ReadError,
     Unsupported,
     Unknown(u8),
 }
@@ -201,6 +216,11 @@ impl NackCode {
             Self::NvmFull => 0x0E,
             Self::ObWrongToken => 0x0F,
             Self::NvmWrongToken => 0x10,
+            Self::FileNotFound => 0x04,
+            Self::BadHandle => 0x11,
+            Self::NoSdCard => 0x12,
+            Self::FsError => 0x13,
+            Self::ReadError => 0x14,
             Self::Unsupported => 0xFE,
             Self::Unknown(byte) => byte,
         }
@@ -224,6 +244,11 @@ impl NackCode {
             0x0E => Self::NvmFull,
             0x0F => Self::ObWrongToken,
             0x10 => Self::NvmWrongToken,
+            0x04 => Self::FileNotFound,
+            0x11 => Self::BadHandle,
+            0x12 => Self::NoSdCard,
+            0x13 => Self::FsError,
+            0x14 => Self::ReadError,
             0xFE => Self::Unsupported,
             other => Self::Unknown(other),
         }
@@ -247,6 +272,11 @@ impl NackCode {
             Self::NvmFull => "NVM_FULL",
             Self::ObWrongToken => "OB_WRONG_TOKEN",
             Self::NvmWrongToken => "NVM_WRONG_TOKEN",
+            Self::FileNotFound => "FILE_NOT_FOUND",
+            Self::BadHandle => "BAD_HANDLE",
+            Self::NoSdCard => "NO_SD_CARD",
+            Self::FsError => "FS_ERROR",
+            Self::ReadError => "READ_ERROR",
             Self::Unsupported => "UNSUPPORTED",
             Self::Unknown(_) => "UNKNOWN",
         }
@@ -366,11 +396,36 @@ mod tests {
 
     #[test]
     fn nack_code_unknown_falls_through() {
-        // 0x04 and 0x05 are reserved for Phase-5 scope, never emitted
-        // in v1.0.0 — treated as Unknown at parse time.
-        assert_eq!(NackCode::from_byte(0x04), NackCode::Unknown(0x04));
+        // 0x05 is still reserved for Phase-5 scope and never emitted, so
+        // it parses as Unknown. (0x04 used to sit here too, but
+        // IFS08-CE-AMS#406 assigned it to LOGFS FILE_NOT_FOUND — see the
+        // namespace note on NackCode.)
         assert_eq!(NackCode::from_byte(0x05), NackCode::Unknown(0x05));
+        assert_eq!(NackCode::from_byte(0x15), NackCode::Unknown(0x15));
         assert_eq!(NackCode::from_byte(0xA5), NackCode::Unknown(0xA5));
+    }
+
+    #[test]
+    fn logfs_nack_codes_match_the_final_firmware_table() {
+        // IFS08-CE-AMS#406. BAD_HANDLE is 0x11 — NOT 0x08, which stays
+        // Busy and is reused by LOGFS.
+        assert_eq!(NackCode::from_byte(0x04), NackCode::FileNotFound);
+        assert_eq!(NackCode::from_byte(0x11), NackCode::BadHandle);
+        assert_eq!(NackCode::from_byte(0x12), NackCode::NoSdCard);
+        assert_eq!(NackCode::from_byte(0x13), NackCode::FsError);
+        assert_eq!(NackCode::from_byte(0x14), NackCode::ReadError);
+        assert_eq!(NackCode::from_byte(0x08), NackCode::Busy);
+        assert_eq!(NackCode::from_byte(0x02), NackCode::OutOfBounds);
+        // round-trip
+        for c in [
+            NackCode::FileNotFound,
+            NackCode::BadHandle,
+            NackCode::NoSdCard,
+            NackCode::FsError,
+            NackCode::ReadError,
+        ] {
+            assert_eq!(NackCode::from_byte(c.as_byte()), c);
+        }
     }
 
     #[test]

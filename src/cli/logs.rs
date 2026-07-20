@@ -27,7 +27,7 @@ use crate::protocol::commands::{
 };
 use crate::protocol::logfs::{self, LogEntry, MAX_READ_LEN};
 use crate::protocol::responses::Response;
-use crate::session::{Session, SessionConfig};
+use crate::session::{Session, SessionConfig, SessionError};
 use crate::transport::open_backend;
 
 #[derive(Debug, Args)]
@@ -47,9 +47,15 @@ pub enum LogsCommand {
 
 #[derive(Debug, Args)]
 pub struct PullArgs {
-    /// Log index to pull (from `logs list`). Omit to pull every file.
+    /// Log index to pull (from `logs list`).
     #[arg(long)]
     pub index: Option<u16>,
+
+    /// Pull every file. Opt-in on purpose: at ~10-20 kB/s a 4 MiB log
+    /// takes 3.5-7 min, so a full card is a 20-35 minute transfer.
+    /// Targeted pulls are the intended workflow (pull the card for bulk).
+    #[arg(long, conflicts_with = "index")]
+    pub all: bool,
 
     /// Directory to write the downloaded log(s) into
     #[arg(short, long, default_value = ".")]
@@ -79,13 +85,34 @@ fn open_session(global: &GlobalFlags) -> Result<Session> {
     Ok(Session::attach(backend, config))
 }
 
+fn is_timeout(e: &SessionError) -> bool {
+    matches!(e, SessionError::CommandTimeout { .. })
+}
+
 /// Send one LOGFS command and unwrap the ACK body (opcode already
 /// stripped by the response parser).
 async fn ack_body(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec<u8>> {
-    match session
-        .send_command(&payload)
-        .await
-        .with_context(|| format!("sending {what}"))?
+    // LOGFS rides APP_CTRL (0x06), not CMD (0x00) — the AMS firmware
+    // serves it there so the app's opcode space can't collide with a
+    // future bootloader opcode (IFS08-CE-AMS#406).
+    let reply = session.send_app_command(&payload).await;
+    let reply = match reply {
+        Err(e) if is_timeout(&e) => {
+            // The BL silently drops APP_CTRL, so a timeout is ambiguous.
+            // Probe with a command the BL *does* answer to tell "node is
+            // in the bootloader" apart from "node is dead / wrong id".
+            if session.probe_bootloader().await {
+                bail!(
+                    "no reply to {what}: the node is alive but running the \
+                     bootloader, where the log service isn't available — \
+                     boot the application firmware and retry"
+                );
+            }
+            return Err(e).with_context(|| format!("sending {what}"));
+        }
+        other => other.with_context(|| format!("sending {what}"))?,
+    };
+    match reply
     {
         Response::Ack { payload, .. } => Ok(payload),
         Response::Nack {
@@ -214,8 +241,15 @@ async fn pull_one(session: &Session, entry: &LogEntry, verify: bool) -> Result<V
     }
 
     if verify {
-        let body = ack_body(session, cmd_logfs_crc(open.handle), "LOGFS_CRC").await?;
-        let want = logfs::parse_crc(&body).context("parsing LOGFS_CRC response")?;
+        // The firmware maintains a running CRC while logging and seals it
+        // with the file, so OPEN carries a real crc32 — no extra round
+        // trip needed. Only fall back to LOGFS_CRC if it declined.
+        let want = if open.crc_deferred() {
+            let body = ack_body(session, cmd_logfs_crc(open.handle), "LOGFS_CRC").await?;
+            logfs::parse_crc(&body).context("parsing LOGFS_CRC response")?
+        } else {
+            open.crc32
+        };
         let got = crc32(&data);
         if want != got {
             bail!(
@@ -237,14 +271,16 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
     let result = async {
         let entries = list_all(&session).await?;
         let selected: Vec<&LogEntry> = match args.index {
-            Some(i) => {
-                let found = entries.iter().find(|e| e.index == i);
-                match found {
-                    Some(e) => vec![e],
-                    None => bail!("no log with index {i} on the card (try `cf logs list`)"),
-                }
-            }
-            None => entries.iter().collect(),
+            Some(i) => match entries.iter().find(|e| e.index == i) {
+                Some(e) => vec![e],
+                None => bail!("no log with index {i} on the card (try `cf logs list`)"),
+            },
+            None if args.all => entries.iter().collect(),
+            None => bail!(
+                "pick a file with --index N (see `cf logs list`), or pass --all.\n\
+                 Transfers run at ~10-20 kB/s, so a full card can take 20-35 minutes — \
+                 targeted pulls are the intended workflow."
+            ),
         };
         if selected.is_empty() {
             println!("no log files on the card");

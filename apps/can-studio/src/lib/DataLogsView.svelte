@@ -18,6 +18,8 @@
     import {
         logsList,
         logsPull,
+        logsCancel,
+        CANCELLED_MSG,
         onPullProgress,
         formatBytes,
         type LogFile,
@@ -45,6 +47,7 @@
     let received = $state<number>(0);
     let total = $state<number>(0);
     let lastResult = $state<string | null>(null);
+    let cancelling = $state<boolean>(false);
 
     let unlisten: UnlistenFn | null = null;
     onPullProgress((p) => {
@@ -89,6 +92,15 @@
         if (typeof picked === 'string') destDir = picked;
     }
 
+    async function cancel(): Promise<void> {
+        cancelling = true;
+        try {
+            await logsCancel();
+        } catch {
+            /* the pull may have finished in the meantime — harmless */
+        }
+    }
+
     async function pull(file: LogFile): Promise<void> {
         const request = buildRequest();
         if (request === null || destDir === null) return;
@@ -97,15 +109,24 @@
         total = file.size;
         error = null;
         lastResult = null;
+        cancelling = false;
         try {
             const res = await logsPull(request, file.index, destDir);
             lastResult = `Saved ${res.path} (${formatBytes(res.bytes)})${
                 res.crcVerified ? ' — CRC verified' : ''
             }`;
         } catch (err) {
-            error = err instanceof Error ? err.message : String(err);
+            const msg = err instanceof Error ? err.message : String(err);
+            // A cancel is an operator choice, not a failure — say so plainly
+            // and don't paint the view red.
+            if (msg.includes(CANCELLED_MSG)) {
+                lastResult = `Cancelled — ${file.name} was not saved.`;
+            } else {
+                error = msg;
+            }
         } finally {
             pullingIndex = null;
+            cancelling = false;
         }
     }
 
@@ -170,6 +191,14 @@
             <section class="card">
                 <div class="card-header">
                     <h3>Downloading</h3>
+                    <button
+                        type="button"
+                        class="btn btn-danger"
+                        disabled={cancelling}
+                        onclick={cancel}
+                    >
+                        {cancelling ? 'Cancelling…' : 'Cancel'}
+                    </button>
                     <span class="muted small mono">
                         {formatBytes(received)}{total > 0
                             ? ` / ${formatBytes(total)}`

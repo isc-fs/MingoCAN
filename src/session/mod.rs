@@ -90,7 +90,8 @@ use tracing::{debug, trace, warn};
 
 use crate::app_control::{reboot_to_bl_payload, BootloaderEntry, REBOOT_TO_BL_ID};
 use crate::protocol::commands::{
-    cmd_connect, cmd_disconnect, cmd_get_health, PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR,
+    cmd_connect, cmd_disconnect, cmd_get_fw_info, cmd_get_health, PROTOCOL_VERSION_MAJOR,
+    PROTOCOL_VERSION_MINOR,
 };
 use crate::protocol::ids::{FrameId, MessageType};
 use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
@@ -511,6 +512,39 @@ impl Session {
     pub async fn send_command(&self, payload: &[u8]) -> Result<Response, SessionError> {
         let _guard = self.inner.command_lock.lock().await;
         self.send_raw(payload, MessageType::Cmd).await
+    }
+
+    /// Send an **application-level** command under [`MessageType::AppCtrl`]
+    /// (`0x06`) and wait for its ACK / NACK. ISO-TP framed exactly like
+    /// [`Session::send_command`]; only the outbound type byte differs.
+    ///
+    /// Used by the LOGFS group (#506): the AMS firmware deliberately serves
+    /// those opcodes under `APP_CTRL` so the app's opcode space can never
+    /// collide with a future bootloader opcode (the `0x2x` range is
+    /// BL-adjacent — `0x20` is reserved for `CMD_MEM_READ`).
+    ///
+    /// **Caveat:** the bootloader *silently drops* `APP_CTRL`, so a node
+    /// sitting in the BL produces a timeout rather than a NACK. Callers
+    /// should distinguish that with [`Session::probe_bootloader`] instead
+    /// of reporting a bare timeout.
+    pub async fn send_app_command(&self, payload: &[u8]) -> Result<Response, SessionError> {
+        let _guard = self.inner.command_lock.lock().await;
+        self.send_raw(payload, MessageType::AppCtrl).await
+    }
+
+    /// Probe whether the node is alive **in the bootloader**, using a
+    /// command the BL answers (`GET_FW_INFO` under `MessageType::Cmd`).
+    ///
+    /// Exists to disambiguate an `APP_CTRL` timeout: the BL drops those
+    /// silently, so "no reply" looks identical to a dead node, an unplugged
+    /// cable, or a wrong node-id. If this returns `Ok(true)` the node is up
+    /// but running the bootloader, and the app-level service is unavailable.
+    pub async fn probe_bootloader(&self) -> bool {
+        let _guard = self.inner.command_lock.lock().await;
+        matches!(
+            self.send_raw(&cmd_get_fw_info(), MessageType::Cmd).await,
+            Ok(Response::Ack { .. })
+        )
     }
 
     /// Like [`Session::send_command`] but sends to `dst` instead of

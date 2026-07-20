@@ -82,6 +82,7 @@ pub fn run() {
             pit_diag::pit_diag_udv_calibrate,
             logs::logs_list,
             logs::logs_pull,
+            logs::logs_cancel,
             dbc::dbc_load,
             dbc::dbc_unload,
             dbc::dbc_status,
