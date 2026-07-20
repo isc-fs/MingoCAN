@@ -37,6 +37,7 @@
 pub mod commands;
 pub mod ids;
 pub mod isotp;
+pub mod logfs;
 pub mod opcodes;
 pub mod records;
 pub mod responses;
