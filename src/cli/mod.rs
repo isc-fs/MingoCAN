@@ -16,6 +16,7 @@ pub mod config;
 pub mod diagnose;
 pub mod discover;
 pub mod flash;
+pub mod logs;
 pub mod pit_diag;
 pub mod provision;
 pub mod replay;
@@ -146,6 +147,9 @@ pub enum Command {
     /// Sugar over `config nvm write node-id` + reset — operator
     /// types the role, the host fills in the number.
     Provision(provision::ProvisionArgs),
+
+    /// List / pull the microSD data logs off a node over CAN
+    Logs(logs::LogsArgs),
 
     /// AMS pit-diag observer — arm / disarm the diagnostic stream,
     /// or stream + decode it to stdout.
