@@ -28,6 +28,7 @@
     import DiagnosticsView from './lib/DiagnosticsView.svelte';
     import BusMonitorView from './lib/BusMonitorView.svelte';
     import PitDiagView from './lib/PitDiagView.svelte';
+    import DataLogsView from './lib/DataLogsView.svelte';
     import SettingsView from './lib/SettingsView.svelte';
 
     let activeView = $state<ViewId>(defaultAppState().activeView);
@@ -97,6 +98,8 @@
             <BusMonitorView navigateTo={selectView} />
         {:else if activeView === 'pitDiag'}
             <PitDiagView navigateTo={selectView} />
+        {:else if activeView === 'dataLogs'}
+            <DataLogsView navigateTo={selectView} />
         {:else if activeView === 'settings'}
             <SettingsView navigateTo={selectView} />
         {/if}

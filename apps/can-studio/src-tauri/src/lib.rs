@@ -13,6 +13,7 @@ mod bus_monitor;
 mod dbc;
 mod diagnose;
 mod flash;
+mod logs;
 mod pit_diag;
 mod provision;
 mod swd;
@@ -79,6 +80,8 @@ pub fn run() {
             pit_diag::pit_diag_enable,
             pit_diag::pit_diag_disable,
             pit_diag::pit_diag_udv_calibrate,
+            logs::logs_list,
+            logs::logs_pull,
             dbc::dbc_load,
             dbc::dbc_unload,
             dbc::dbc_status,
