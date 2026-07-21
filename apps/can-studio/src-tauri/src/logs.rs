@@ -39,6 +39,70 @@ pub const CANCELLED_MSG: &str = "cancelled by operator";
 /// possible without tearing down the app.
 static CANCEL_PULL: AtomicBool = AtomicBool::new(false);
 
+/// Held for the duration of any LOGFS operation. There is one CAN
+/// adapter, and a pull holds it for minutes — so a second command
+/// (another pull, or a List click on a stale window) must be told no
+/// rather than race for the device and fail with an opaque
+/// adapter-in-use error from the driver.
+static LOGS_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Floor for the LOGFS command timeout, regardless of the operator's
+/// adapter setting. The app default is sized for bootloader commands that
+/// answer out of RAM; a LOGFS round trip additionally waits on a FatFs
+/// read from a microSD card behind a shared lock, so it can legitimately
+/// take over a second — and a spurious timeout mid-pull throws away
+/// minutes of transfer. A higher setting is still honoured.
+const LOGFS_TIMEOUT_FLOOR_MS: u32 = 2_000;
+
+/// How many times to re-send an idempotent LOGFS command before failing.
+const LOGFS_RETRY_ATTEMPTS: u32 = 3;
+
+/// Linear backoff base — attempt N waits `N * this`.
+const LOGFS_RETRY_BACKOFF_MS: u64 = 60;
+
+/// RAII holder for [`LOGS_BUSY`], so the flag clears on every exit path
+/// including the `?` ones.
+struct BusyGuard;
+
+impl BusyGuard {
+    fn acquire() -> Result<Self, String> {
+        if LOGS_BUSY.swap(true, Ordering::SeqCst) {
+            return Err("another log transfer is already running on this \
+                        adapter — wait for it to finish or cancel it"
+                .to_string());
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        LOGS_BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A failed round trip, plus whether re-sending it could plausibly help.
+struct AckError {
+    message: String,
+    retryable: bool,
+}
+
+impl AckError {
+    fn fatal(message: String) -> Self {
+        Self {
+            message,
+            retryable: false,
+        }
+    }
+}
+
+// Lets every existing `?` in a `Result<_, String>` function keep working.
+impl From<AckError> for String {
+    fn from(e: AckError) -> Self {
+        e.message
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogsRequest {
@@ -101,7 +165,9 @@ fn open_session(request: &LogsRequest) -> Result<Session, String> {
             // pending 0x01 -> 0x02 move (IFS08-CE-AMS#403) is a settings change.
             target_node,
             keepalive_interval: Duration::from_millis(5_000),
-            command_timeout: Duration::from_millis(u64::from(request.timeout_ms)),
+            command_timeout: Duration::from_millis(u64::from(
+                request.timeout_ms.max(LOGFS_TIMEOUT_FLOOR_MS),
+            )),
             ..SessionConfig::default()
         },
     ))
@@ -109,30 +175,87 @@ fn open_session(request: &LogsRequest) -> Result<Session, String> {
 
 /// Send one LOGFS command, unwrapping the ACK body (opcode already
 /// stripped by the response parser).
-async fn ack_body(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec<u8>, String> {
+async fn ack_body(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec<u8>, AckError> {
+    // Remember what we asked for: the ACK echoes the opcode back, and
+    // checking the echo catches a reply belonging to a *different*
+    // command (a stale one that landed late, or a dispatcher that ran the
+    // wrong handler). Unchecked, those bytes get parsed as this command's
+    // body and turn into silent nonsense.
+    let expected_opcode = payload.first().copied();
+
     // LOGFS rides APP_CTRL (0x06), not CMD (0x00) — see IFS08-CE-AMS#406.
     // The bootloader silently drops APP_CTRL, so a timeout is ambiguous:
     // probe with a command the BL answers to tell "in bootloader" apart
     // from "dead node / wrong id".
     let reply = match session.send_app_command(&payload).await {
         Err(SessionError::CommandTimeout { .. }) if session.probe_bootloader().await => {
-            return Err(format!(
+            return Err(AckError::fatal(format!(
                 "no reply to {what}: the node is alive but running the bootloader, \
                  where the log service isn't available — boot the application firmware"
-            ))
+            )))
         }
-        other => other.map_err(|e| format!("send {what}: {e}"))?,
+        // Only transport-level failures are worth another go. A NACK is a
+        // considered answer and a bootloader diagnosis is a persistent
+        // state; re-sending either hides the real message.
+        Err(e) => {
+            let retryable = matches!(
+                e,
+                SessionError::CommandTimeout { .. } | SessionError::Transport(_)
+            );
+            return Err(AckError {
+                message: format!("send {what}: {e}"),
+                retryable,
+            });
+        }
+        Ok(reply) => reply,
     };
-    match reply
-    {
-        Response::Ack { payload, .. } => Ok(payload),
+    match reply {
+        Response::Ack { opcode, payload } => match expected_opcode {
+            Some(want) if opcode != want => Err(AckError::fatal(format!(
+                "reply to {what} echoes opcode 0x{opcode:02X}, expected 0x{want:02X} \
+                 — replies are out of step with requests"
+            ))),
+            _ => Ok(payload),
+        },
         Response::Nack {
             rejected_opcode,
             code,
-        } => Err(format!(
+        } => Err(AckError::fatal(format!(
             "device NACK'd {what} (opcode 0x{rejected_opcode:02X}): {code}"
-        )),
-        other => Err(format!("unexpected reply to {what}: {}", other.kind_str())),
+        ))),
+        other => Err(AckError::fatal(format!(
+            "unexpected reply to {what}: {}",
+            other.kind_str()
+        ))),
+    }
+}
+
+/// [`ack_body`] with retries, for **idempotent** opcodes only.
+///
+/// LOGFS reads are ranged and stateless firmware-side, so re-requesting
+/// the same window is safe; LIST is a pure read of a cursor page. A
+/// multi-MB pull is thousands of round trips over several minutes, and
+/// without this one blip on a shared bus discards the whole transfer.
+/// Deliberately *not* used for OPEN (allocates a handle) or CLOSE (frees
+/// one).
+async fn ack_body_retrying(
+    session: &Session,
+    payload: Vec<u8>,
+    what: &str,
+) -> Result<Vec<u8>, AckError> {
+    let mut attempt = 1u32;
+    loop {
+        match ack_body(session, payload.clone(), what).await {
+            Ok(body) => return Ok(body),
+            Err(e) if attempt < LOGFS_RETRY_ATTEMPTS && e.retryable => {
+                tokio::time::sleep(Duration::from_millis(
+                    LOGFS_RETRY_BACKOFF_MS * u64::from(attempt),
+                ))
+                .await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -141,7 +264,7 @@ async fn list_all(session: &Session) -> Result<Vec<logfs::LogEntry>, String> {
     let mut all = Vec::new();
     let mut cursor = 0u16;
     loop {
-        let body = ack_body(session, cmd_logfs_list(cursor), "LOGFS_LIST").await?;
+        let body = ack_body_retrying(session, cmd_logfs_list(cursor), "LOGFS_LIST").await?;
         let page = logfs::parse_list(&body).map_err(|e| format!("parse LOGFS_LIST: {e}"))?;
         let is_last = page.is_last();
         let next = page.next_cursor;
@@ -159,6 +282,7 @@ async fn list_all(session: &Session) -> Result<Vec<logfs::LogEntry>, String> {
 
 #[tauri::command]
 pub async fn logs_list(request: LogsRequest) -> Result<Vec<LogFileSnapshot>, String> {
+    let _busy = BusyGuard::acquire()?;
     let session = open_session(&request)?;
     session
         .connect()
@@ -185,6 +309,7 @@ pub async fn logs_pull(
     index: u16,
     dest_dir: String,
 ) -> Result<PullResult, String> {
+    let _busy = BusyGuard::acquire()?;
     CANCEL_PULL.store(false, Ordering::Relaxed);
     let session = open_session(&request)?;
     session
@@ -217,7 +342,7 @@ async fn pull_inner(
     let mut data: Vec<u8> = Vec::with_capacity(open.size as usize);
     let mut offset = 0u32;
     loop {
-        let body = ack_body(
+        let body = ack_body_retrying(
             session,
             cmd_logfs_read(open.handle, offset, MAX_READ_LEN),
             "LOGFS_READ",

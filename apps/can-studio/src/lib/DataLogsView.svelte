@@ -68,7 +68,15 @@
         received = p.received;
         total = p.total;
     }).then((fn) => (unlisten = fn));
-    onDestroy(() => unlisten?.());
+    // Leaving the view does NOT stop the transfer — the pull runs in the
+    // backend and holds the one CAN adapter for minutes, so navigating
+    // away would orphan it: every other view stays locked out and the
+    // next pull is refused until it finishes on its own. Ask it to stop
+    // on the way out.
+    onDestroy(() => {
+        unlisten?.();
+        if (pullingIndex !== null) void logsCancel();
+    });
 
     function buildRequest(): LogsRequest | null {
         if (!adapterReady || settings.adapter.interface === null) return null;

@@ -275,7 +275,10 @@ mod tests {
 
     #[test]
     fn crc_parses_le() {
-        assert_eq!(parse_crc(&0x1234_5678u32.to_le_bytes()).unwrap(), 0x1234_5678);
+        assert_eq!(
+            parse_crc(&0x1234_5678u32.to_le_bytes()).unwrap(),
+            0x1234_5678
+        );
         assert!(matches!(
             parse_crc(&[1, 2, 3]),
             Err(ParseError::RecordTooShort { .. })
@@ -288,7 +291,7 @@ mod tests {
         assert!(!full.eof);
         assert_eq!(full.data.len(), 512);
 
-        let short = parse_read(512, &vec![0xAA; 100]);
+        let short = parse_read(512, &[0xAA; 100]);
         assert!(short.eof);
         assert_eq!(short.data.len(), 100);
 

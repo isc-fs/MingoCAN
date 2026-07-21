@@ -776,10 +776,19 @@ impl Session {
         message_type: MessageType,
         reply_timeout: Duration,
     ) -> Result<Response, SessionError> {
+        // Take the reply channel BEFORE transmitting and discard anything
+        // stale in it. A previous command that timed out can still land its
+        // reply afterwards; without this drain the next command pairs with
+        // that late reply and every subsequent request is answered one
+        // behind — which reads as bizarre, intermittent misbehaviour rather
+        // than a timeout. (Concretely: it makes `probe_bootloader` match a
+        // leftover ACK and report "node is in the bootloader" when it isn't.)
+        let mut rx = self.inner.reply_rx.lock().await;
+        while rx.try_recv().is_ok() {}
+
         let errors_before = self.inner.backend.adapter_error_count();
         self.send_frames(payload, message_type, self.inner.target_node)
             .await?;
-        let mut rx = self.inner.reply_rx.lock().await;
         match timeout(reply_timeout, rx.recv()).await {
             Ok(Some(response)) => Ok(response),
             Ok(None) => Err(SessionError::RxClosed),

@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
-use tracing::debug;
+use tokio::time::sleep;
+use tracing::{debug, warn};
 
 use super::GlobalFlags;
 use crate::firmware::crc32;
@@ -93,11 +94,30 @@ fn open_session(global: &GlobalFlags) -> Result<Session> {
     let config = SessionConfig {
         target_node,
         keepalive_interval: Duration::from_millis(5_000),
-        command_timeout: Duration::from_millis(u64::from(global.timeout_ms)),
+        command_timeout: Duration::from_millis(u64::from(
+            global.timeout_ms.max(LOGFS_TIMEOUT_FLOOR_MS),
+        )),
         ..SessionConfig::default()
     };
     Ok(Session::attach(backend, config))
 }
+
+/// Floor for the LOGFS command timeout, regardless of `--timeout`.
+///
+/// The default 500 ms is sized for bootloader commands that answer out of
+/// RAM. A LOGFS round trip additionally waits on a FatFs read from a
+/// microSD card behind a shared `_FS_LOCK`, so it can legitimately take
+/// well over a second while the logger task holds the mount — and a
+/// spurious timeout mid-pull throws away minutes of transfer. Operators
+/// who raise `--timeout` still get their value; this only lifts the
+/// bottom.
+const LOGFS_TIMEOUT_FLOOR_MS: u32 = 2_000;
+
+/// How many times to re-send an idempotent LOGFS command before failing.
+const LOGFS_RETRY_ATTEMPTS: u32 = 3;
+
+/// Linear backoff base — attempt N waits `N * this`.
+const LOGFS_RETRY_BACKOFF_MS: u64 = 60;
 
 fn is_timeout(e: &SessionError) -> bool {
     matches!(e, SessionError::CommandTimeout { .. })
@@ -109,6 +129,13 @@ async fn ack_body(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec
     // LOGFS rides APP_CTRL (0x06), not CMD (0x00) — the AMS firmware
     // serves it there so the app's opcode space can't collide with a
     // future bootloader opcode (IFS08-CE-AMS#406).
+    // Remember what we asked for: the ACK echoes the opcode back, and
+    // checking the echo catches a reply that belongs to a *different*
+    // command (a stale one that landed late, or a dispatcher that ran the
+    // wrong handler). Without the check those bytes get parsed as this
+    // command's body and turn into silent nonsense — a LIST page read as
+    // an OPEN reply, say.
+    let expected_opcode = payload.first().copied();
     let reply = session.send_app_command(&payload).await;
     let reply = match reply {
         Err(e) if is_timeout(&e) => {
@@ -126,9 +153,14 @@ async fn ack_body(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec
         }
         other => other.with_context(|| format!("sending {what}"))?,
     };
-    match reply
-    {
-        Response::Ack { payload, .. } => Ok(payload),
+    match reply {
+        Response::Ack { opcode, payload } => match expected_opcode {
+            Some(want) if opcode != want => bail!(
+                "reply to {what} echoes opcode 0x{opcode:02X}, expected \
+                     0x{want:02X} — replies are out of step with requests"
+            ),
+            _ => Ok(payload),
+        },
         Response::Nack {
             rejected_opcode,
             code,
@@ -137,12 +169,56 @@ async fn ack_body(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec
     }
 }
 
+/// Is this failure worth another go?
+///
+/// Only transport-level ones. A NACK is a considered answer from the node
+/// and a bootloader diagnosis is a persistent state — re-sending either
+/// just burns the operator's time and hides the real message.
+fn is_retryable(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<SessionError>(),
+        Some(SessionError::CommandTimeout { .. } | SessionError::Transport(_))
+    )
+}
+
+/// [`ack_body`] with retries, for **idempotent** opcodes only.
+///
+/// LOGFS reads are ranged and stateless firmware-side, so re-requesting
+/// the same window is safe; LIST is a pure read of a cursor page. A
+/// multi-MB pull is thousands of round trips over several minutes, and
+/// without this a single blip on a shared bus discards the whole transfer
+/// and the operator starts from zero. Deliberately *not* used for OPEN
+/// (allocates a handle) or CLOSE (frees one).
+async fn ack_body_retrying(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec<u8>> {
+    let mut attempt = 1u32;
+    loop {
+        match ack_body(session, payload.clone(), what).await {
+            Ok(body) => return Ok(body),
+            Err(e) if attempt < LOGFS_RETRY_ATTEMPTS && is_retryable(&e) => {
+                warn!(
+                    what,
+                    attempt,
+                    error = %e,
+                    "LOGFS round trip failed, re-sending"
+                );
+                // bounded: fixed sleep, no channel or lock involved
+                sleep(Duration::from_millis(
+                    LOGFS_RETRY_BACKOFF_MS * u64::from(attempt),
+                ))
+                .await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Walk `LOGFS_LIST` to completion, following the cursor.
 async fn list_all(session: &Session) -> Result<Vec<LogEntry>> {
     let mut all = Vec::new();
     let mut cursor = 0u16;
     loop {
-        let body = ack_body(session, cmd_logfs_list(cursor), "LOGFS_LIST").await?;
+        let body = ack_body_retrying(session, cmd_logfs_list(cursor), "LOGFS_LIST").await?;
         let page = logfs::parse_list(&body).context("parsing LOGFS_LIST response")?;
         debug!(
             cursor,
@@ -166,7 +242,10 @@ async fn list_all(session: &Session) -> Result<Vec<LogEntry>> {
 
 async fn run_list(global: &GlobalFlags) -> Result<()> {
     let session = open_session(global)?;
-    session.connect().await.context("CONNECT before LOGFS_LIST")?;
+    session
+        .connect()
+        .await
+        .context("CONNECT before LOGFS_LIST")?;
     let entries = list_all(&session).await;
     let _ = session.disconnect().await;
     let entries = entries?;
@@ -191,7 +270,10 @@ async fn run_list(global: &GlobalFlags) -> Result<()> {
         println!("no log files on the card");
         return Ok(());
     }
-    println!("{:>5}  {:<12} {:>10}  {:>12}", "INDEX", "NAME", "SIZE", "MTIME(mono)");
+    println!(
+        "{:>5}  {:<12} {:>10}  {:>12}",
+        "INDEX", "NAME", "SIZE", "MTIME(mono)"
+    );
     for e in &entries {
         println!(
             "{:>5}  {:<12} {:>10}  {:>12}",
@@ -219,7 +301,7 @@ async fn pull_one(session: &Session, entry: &LogEntry, verify: bool) -> Result<V
     let mut data: Vec<u8> = Vec::with_capacity(open.size as usize);
     let mut offset = 0u32;
     loop {
-        let body = ack_body(
+        let body = ack_body_retrying(
             session,
             cmd_logfs_read(open.handle, offset, MAX_READ_LEN),
             "LOGFS_READ",
@@ -280,7 +362,10 @@ async fn pull_one(session: &Session, entry: &LogEntry, verify: bool) -> Result<V
 
 async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
     let session = open_session(global)?;
-    session.connect().await.context("CONNECT before LOGFS pull")?;
+    session
+        .connect()
+        .await
+        .context("CONNECT before LOGFS pull")?;
 
     let result = async {
         let entries = list_all(&session).await?;
@@ -307,8 +392,7 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
         for e in selected {
             let data = pull_one(&session, e, !args.no_verify).await?;
             let path = unique_path(&args.out, &e.name);
-            std::fs::write(&path, &data)
-                .with_context(|| format!("writing {}", path.display()))?;
+            std::fs::write(&path, &data).with_context(|| format!("writing {}", path.display()))?;
             println!("  saved {} ({} B)", path.display(), data.len());
         }
         Ok(())
@@ -337,6 +421,54 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::transport::{CanBackend, LogfsWire, StubDevice, StubLogFile, VirtualBus};
+
+    /// A dropped LOGFS_READ must cost one re-send, not the whole file.
+    ///
+    /// The stub swallows the first two reads with no reply at all — what
+    /// a lost frame looks like from the host — so this only passes if
+    /// `ack_body_retrying` actually re-sends the same ranged window and
+    /// the bytes come back intact.
+    #[tokio::test]
+    async fn dropped_read_is_retried_and_the_pull_still_completes() {
+        let bus = VirtualBus::new();
+        let host = bus.host_backend();
+        let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+        drop(bus);
+
+        let payload: Vec<u8> = (0..900u32).map(|i| i as u8).collect();
+        let wire = LogfsWire {
+            drop_first_reads: 2,
+            ..LogfsWire::HOST
+        };
+        let stub = StubDevice::new(device, 0x2).with_logfs(
+            vec![StubLogFile::new("LOG0001.CSV", payload.clone(), 1)],
+            wire,
+        );
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _ = stub.run(cancel_rx).await;
+        });
+
+        let session = Session::attach(
+            Box::new(host),
+            SessionConfig {
+                target_node: 0x2,
+                keepalive_interval: Duration::from_millis(5_000),
+                // Short, so two dropped reads don't make the test slow.
+                command_timeout: Duration::from_millis(150),
+                ..SessionConfig::default()
+            },
+        );
+
+        let entries = list_all(&session).await.expect("list");
+        let got = pull_one(&session, &entries[0], true).await.expect("pull");
+        assert_eq!(got, payload, "retried reads reassemble the exact file");
+
+        let _ = cancel_tx.send(());
+        let _ = handle.await;
+    }
 
     #[test]
     fn unique_path_avoids_clobbering() {
@@ -377,7 +509,13 @@ mod node_id_tests {
             Err(e) => e,
         };
         let msg = err.to_string();
-        assert!(msg.contains("--node-id"), "should name the flag, got: {msg}");
-        assert!(!msg.contains("0x3 = uDV\","), "should not imply uDV is the default");
+        assert!(
+            msg.contains("--node-id"),
+            "should name the flag, got: {msg}"
+        );
+        assert!(
+            !msg.contains("0x3 = uDV\","),
+            "should not imply uDV is the default"
+        );
     }
 }

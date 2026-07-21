@@ -87,10 +87,6 @@ const STUB_OB_USER_CONFIG: u32 = 0x00FF_FAAD; // arbitrary realistic-looking val
 /// loop is quiet while idle.
 const READ_SLICE: Duration = Duration::from_millis(50);
 
-/// Minimal stub bootloader. Spin it up in a tokio task; it runs
-/// until either the cancel handle fires or the underlying backend
-/// disconnects.
-
 // ---- LOGFS app-mode server (#506) -------------------------------
 //
 // The stub models the *bootloader*, which silently drops APP_CTRL. The
@@ -114,7 +110,11 @@ pub struct StubLogFile {
 
 impl StubLogFile {
     pub fn new(name: &str, data: Vec<u8>, mtime: u32) -> Self {
-        Self { name: name.to_string(), data, mtime }
+        Self {
+            name: name.to_string(),
+            data,
+            mtime,
+        }
     }
 }
 
@@ -133,6 +133,11 @@ pub struct LogfsWire {
     /// Model PR #440's dispatcher, which drops every non-APP_CTRL frame
     /// — including the CONNECT the host currently sends as `Cmd`.
     pub app_ctrl_only: bool,
+    /// Silently swallow this many `LOGFS_READ` requests before answering
+    /// any, to model a lossy bus. Exercises the host's read retry: a
+    /// multi-MB pull is thousands of round trips, and one dropped frame
+    /// used to discard the whole transfer.
+    pub drop_first_reads: u8,
 }
 
 impl LogfsWire {
@@ -143,6 +148,7 @@ impl LogfsWire {
         open_has_crc: true,
         entries_per_page: 2,
         app_ctrl_only: false,
+        drop_first_reads: 0,
     };
     /// What AMS PR #440 currently implements.
     pub const FIRMWARE_PR440: Self = Self {
@@ -151,9 +157,13 @@ impl LogfsWire {
         open_has_crc: false,
         entries_per_page: 2,
         app_ctrl_only: true,
+        drop_first_reads: 0,
     };
 }
 
+/// Minimal stub bootloader. Spin it up in a tokio task; it runs
+/// until either the cancel handle fires or the underlying backend
+/// disconnects.
 pub struct StubDevice {
     backend: Box<dyn CanBackend>,
     node_id: u8,
@@ -217,6 +227,7 @@ struct LogfsState {
     files: Vec<StubLogFile>,
     open: Option<(u16, usize)>,
     next_handle: u16,
+    reads_dropped: u8,
 }
 
 impl StubDevice {
@@ -249,7 +260,13 @@ impl StubDevice {
     /// Turn on the LOGFS application service with a synthetic card.
     /// Without this the stub stays a pure bootloader and drops APP_CTRL.
     pub fn with_logfs(mut self, files: Vec<StubLogFile>, wire: LogfsWire) -> Self {
-        self.logfs = Some(LogfsState { wire, files, open: None, next_handle: 1 });
+        self.logfs = Some(LogfsState {
+            wire,
+            files,
+            open: None,
+            next_handle: 1,
+            reads_dropped: 0,
+        });
         self
     }
 
@@ -428,11 +445,7 @@ impl StubDevice {
                 // Model PR #440's dispatcher: the application answers only
                 // APP_CTRL and stays silent on everything else. Used to
                 // reproduce the CONNECT-transport mismatch (#506).
-                if self
-                    .logfs
-                    .as_ref()
-                    .is_some_and(|l| l.wire.app_ctrl_only)
-                {
+                if self.logfs.as_ref().is_some_and(|l| l.wire.app_ctrl_only) {
                     return Ok(());
                 }
             }
@@ -1178,7 +1191,6 @@ impl StubDevice {
         self.send_message(peer, MessageType::Ack, &resp).await
     }
 
-
     // ---- LOGFS application service (#506) ------------------------
 
     /// Dispatch an APP_CTRL request. Mirrors the AMS application: the
@@ -1207,9 +1219,7 @@ impl StubDevice {
             Ok(CommandOpcode::LogfsRead) => self.logfs_read(peer, args).await,
             Ok(CommandOpcode::LogfsCrc) => self.logfs_crc(peer, args).await,
             Ok(CommandOpcode::LogfsClose) => self.logfs_close(peer, args).await,
-            _ => {
-                self.send_nack(peer, opcode, NackCode::Unsupported).await
-            }
+            _ => self.send_nack(peer, opcode, NackCode::Unsupported).await,
         }
     }
 
@@ -1319,6 +1329,15 @@ impl StubDevice {
 
     async fn logfs_read(&mut self, peer: u8, args: &[u8]) -> Result<()> {
         let op = CommandOpcode::LogfsRead.as_byte();
+        {
+            // Lossy-bus injection: drop the request on the floor with no
+            // reply at all, exactly as a lost frame looks to the host.
+            let l = self.logfs.as_mut().expect("logfs enabled");
+            if l.reads_dropped < l.wire.drop_first_reads {
+                l.reads_dropped += 1;
+                return Ok(());
+            }
+        }
         let hlen = self.logfs_handle_len();
         if args.len() < hlen + 6 {
             return self.send_nack(peer, op, NackCode::OutOfBounds).await;
@@ -1326,9 +1345,8 @@ impl StubDevice {
         let Some(handle) = self.read_handle(args) else {
             return self.send_nack(peer, op, NackCode::OutOfBounds).await;
         };
-        let off = u32::from_le_bytes([
-            args[hlen], args[hlen + 1], args[hlen + 2], args[hlen + 3],
-        ]) as usize;
+        let off = u32::from_le_bytes([args[hlen], args[hlen + 1], args[hlen + 2], args[hlen + 3]])
+            as usize;
         let len = u16::from_le_bytes([args[hlen + 4], args[hlen + 5]]).min(512) as usize;
 
         let slice = {
@@ -1362,9 +1380,7 @@ impl StubDevice {
         let crc = {
             let l = self.logfs.as_ref().expect("logfs enabled");
             match l.open {
-                Some((h, idx)) if h == handle => {
-                    Some(crate::firmware::crc32(&l.files[idx].data))
-                }
+                Some((h, idx)) if h == handle => Some(crate::firmware::crc32(&l.files[idx].data)),
                 _ => None,
             }
         };

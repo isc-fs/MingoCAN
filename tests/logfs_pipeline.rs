@@ -69,7 +69,11 @@ async fn spawn(wire: LogfsWire) -> (Session, oneshot::Sender<()>, tokio::task::J
 }
 
 async fn ack(session: &Session, payload: Vec<u8>) -> Vec<u8> {
-    match session.send_app_command(&payload).await.expect("app command") {
+    match session
+        .send_app_command(&payload)
+        .await
+        .expect("app command")
+    {
         Response::Ack { payload, .. } => payload,
         other => panic!("expected ACK, got {other:?}"),
     }
@@ -129,11 +133,7 @@ async fn pulls_a_multi_read_file_and_crc_matches() {
     let mut offset = 0u32;
     let mut round_trips = 0;
     loop {
-        let body = ack(
-            &session,
-            cmd_logfs_read(open.handle, offset, MAX_READ_LEN),
-        )
-        .await;
+        let body = ack(&session, cmd_logfs_read(open.handle, offset, MAX_READ_LEN)).await;
         let out = logfs::parse_read(MAX_READ_LEN, &body);
         data.extend_from_slice(&out.data);
         offset += out.data.len() as u32;

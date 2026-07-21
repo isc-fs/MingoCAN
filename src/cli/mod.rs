@@ -192,7 +192,8 @@ pub struct GlobalFlags {
     #[arg(long = "node-id", global = true, value_parser = parse_node_id)]
     pub node_id: Option<u8>,
 
-    /// Per-frame timeout in milliseconds
+    /// Reply timeout in milliseconds — applies per command, covering the
+    /// whole reassembled ISO-TP message (not per CAN frame)
     #[arg(long = "timeout", default_value_t = 500, global = true)]
     pub timeout_ms: u32,
 
