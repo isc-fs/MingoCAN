@@ -48,6 +48,9 @@ pub enum CommandOpcode {
     LogfsRead = 0x23,
     LogfsCrc = 0x24,
     LogfsClose = 0x25,
+    /// Seal the ACTIVE log and return its index, so the run that just
+    /// finished is immediately listable (IFS08-CE-AMS#454).
+    LogfsFinalize = 0x27,
     LogStreamStart = 0x30,
     LogStreamStop = 0x31,
     LiveDataStart = 0x32,
@@ -94,6 +97,7 @@ impl TryFrom<u8> for CommandOpcode {
             0x23 => Self::LogfsRead,
             0x24 => Self::LogfsCrc,
             0x25 => Self::LogfsClose,
+            0x27 => Self::LogfsFinalize,
             0x30 => Self::LogStreamStart,
             0x31 => Self::LogStreamStop,
             0x32 => Self::LiveDataStart,

@@ -24,7 +24,8 @@ use tracing::{debug, warn};
 use super::GlobalFlags;
 use crate::firmware::crc32;
 use crate::protocol::commands::{
-    cmd_logfs_close, cmd_logfs_crc, cmd_logfs_list, cmd_logfs_open, cmd_logfs_read,
+    cmd_logfs_close, cmd_logfs_crc, cmd_logfs_finalize, cmd_logfs_list, cmd_logfs_open,
+    cmd_logfs_read,
 };
 use crate::protocol::logfs::{self, LogEntry, MAX_READ_LEN};
 use crate::protocol::responses::Response;
@@ -44,6 +45,10 @@ pub enum LogsCommand {
 
     /// Download log file(s) to a local directory
     Pull(PullArgs),
+
+    /// Seal the log currently being written so it can be listed and
+    /// pulled without power-cycling the car
+    Finalize,
 }
 
 #[derive(Debug, Args)]
@@ -71,6 +76,7 @@ pub async fn run(global: &GlobalFlags, args: &LogsArgs) -> Result<()> {
     match &args.command {
         LogsCommand::List => run_list(global).await,
         LogsCommand::Pull(p) => run_pull(global, p).await,
+        LogsCommand::Finalize => run_finalize(global).await,
     }
 }
 
@@ -121,6 +127,36 @@ const LOGFS_RETRY_BACKOFF_MS: u64 = 60;
 
 fn is_timeout(e: &SessionError) -> bool {
     matches!(e, SessionError::CommandTimeout { .. })
+}
+
+/// Open the application diag session, explaining the ambiguous silence.
+///
+/// The AMS application dispatcher answers `APP_CTRL` only; the bootloader
+/// answers `Cmd` only and drops `APP_CTRL` without a word. So "no reply"
+/// means either "wrong firmware running" or "nothing there at all", and
+/// only a probe can tell them apart.
+async fn open_app_session(session: &Session, what: &str) -> Result<()> {
+    match session.app_connect().await {
+        Ok(version) => {
+            debug!(
+                major = version.major,
+                minor = version.minor,
+                "app diag session open"
+            );
+            Ok(())
+        }
+        Err(e) if is_timeout(&e) => {
+            if session.probe_bootloader().await {
+                bail!(
+                    "no reply to app CONNECT: the node is alive but running \
+                     the bootloader, where the log service isn't available — \
+                     boot the application firmware and retry"
+                );
+            }
+            Err(e).with_context(|| format!("app CONNECT before {what}"))
+        }
+        Err(e) => Err(e).with_context(|| format!("app CONNECT before {what}")),
+    }
 }
 
 /// Send one LOGFS command and unwrap the ACK body (opcode already
@@ -242,12 +278,9 @@ async fn list_all(session: &Session) -> Result<Vec<LogEntry>> {
 
 async fn run_list(global: &GlobalFlags) -> Result<()> {
     let session = open_session(global)?;
-    session
-        .connect()
-        .await
-        .context("CONNECT before LOGFS_LIST")?;
+    open_app_session(&session, "LOGFS_LIST").await?;
     let entries = list_all(&session).await;
-    let _ = session.disconnect().await;
+    let _ = session.app_disconnect().await;
     let entries = entries?;
 
     if global.json {
@@ -362,10 +395,7 @@ async fn pull_one(session: &Session, entry: &LogEntry, verify: bool) -> Result<V
 
 async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
     let session = open_session(global)?;
-    session
-        .connect()
-        .await
-        .context("CONNECT before LOGFS pull")?;
+    open_app_session(&session, "LOGFS pull").await?;
 
     let result = async {
         let entries = list_all(&session).await?;
@@ -399,8 +429,29 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
     }
     .await;
 
-    let _ = session.disconnect().await;
+    let _ = session.app_disconnect().await;
     result
+}
+
+/// Seal the log that is currently being written.
+///
+/// Without this, the run you just did isn't listable — the logger only
+/// closes a file on shutdown, so the data from the session you care about
+/// most is the one file you can't pull. NACKs `FILE_NOT_FOUND` when
+/// there's nothing to seal (no active file, or no rows in it yet).
+async fn run_finalize(global: &GlobalFlags) -> Result<()> {
+    let session = open_session(global)?;
+    open_app_session(&session, "LOGFS_FINALIZE").await?;
+    let body = ack_body(&session, cmd_logfs_finalize(), "LOGFS_FINALIZE").await;
+    let _ = session.app_disconnect().await;
+
+    let index = logfs::parse_finalize(&body?).context("parsing LOGFS_FINALIZE")?;
+    if global.json {
+        println!("{}", serde_json::json!({ "status": "ok", "index": index }));
+    } else {
+        println!("Sealed the active log — it is now index {index}, ready to pull.");
+    }
+    Ok(())
 }
 
 /// Don't clobber an existing download — `LOG0001.CSV` → `LOG0001.CSV.1`.
@@ -440,7 +491,7 @@ mod tests {
         let payload: Vec<u8> = (0..900u32).map(|i| i as u8).collect();
         let wire = LogfsWire {
             drop_first_reads: 2,
-            ..LogfsWire::HOST
+            ..LogfsWire::SETTLED
         };
         let stub = StubDevice::new(device, 0x2).with_logfs(
             vec![StubLogFile::new("LOG0001.CSV", payload.clone(), 1)],
@@ -462,6 +513,10 @@ mod tests {
             },
         );
 
+        // LOGFS is session-gated now, exactly as the firmware gates it.
+        open_app_session(&session, "test")
+            .await
+            .expect("app connect");
         let entries = list_all(&session).await.expect("list");
         let got = pull_one(&session, &entries[0], true).await.expect("pull");
         assert_eq!(got, payload, "retried reads reassemble the exact file");

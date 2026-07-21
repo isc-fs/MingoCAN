@@ -18,7 +18,8 @@ use tauri::{AppHandle, Emitter};
 
 use can_flasher::firmware::crc32;
 use can_flasher::protocol::commands::{
-    cmd_logfs_close, cmd_logfs_crc, cmd_logfs_list, cmd_logfs_open, cmd_logfs_read,
+    cmd_logfs_close, cmd_logfs_crc, cmd_logfs_finalize, cmd_logfs_list, cmd_logfs_open,
+    cmd_logfs_read,
 };
 use can_flasher::protocol::logfs::{self, MAX_READ_LEN};
 use can_flasher::protocol::Response;
@@ -285,11 +286,11 @@ pub async fn logs_list(request: LogsRequest) -> Result<Vec<LogFileSnapshot>, Str
     let _busy = BusyGuard::acquire()?;
     let session = open_session(&request)?;
     session
-        .connect()
+        .app_connect()
         .await
-        .map_err(|e| format!("CONNECT before LOGFS_LIST: {e}"))?;
+        .map_err(|e| format!("app CONNECT before LOGFS_LIST: {e}"))?;
     let entries = list_all(&session).await;
-    let _ = session.disconnect().await;
+    let _ = session.app_disconnect().await;
 
     Ok(entries?
         .into_iter()
@@ -313,12 +314,12 @@ pub async fn logs_pull(
     CANCEL_PULL.store(false, Ordering::Relaxed);
     let session = open_session(&request)?;
     session
-        .connect()
+        .app_connect()
         .await
-        .map_err(|e| format!("CONNECT before LOGFS pull: {e}"))?;
+        .map_err(|e| format!("app CONNECT before LOGFS pull: {e}"))?;
 
     let result = pull_inner(&app, &session, index, &dest_dir).await;
-    let _ = session.disconnect().await;
+    let _ = session.app_disconnect().await;
     result
 }
 
@@ -431,6 +432,27 @@ fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
         }
     }
     base
+}
+
+/// Seal the log currently being written so the run that just happened can
+/// be pulled without power-cycling the car.
+///
+/// Returns the index the sealed log now occupies. The node NACKs
+/// `FILE_NOT_FOUND` when there is nothing to seal — no active file, or no
+/// rows written to it yet.
+#[tauri::command]
+pub async fn logs_finalize(request: LogsRequest) -> Result<u16, String> {
+    let _busy = BusyGuard::acquire()?;
+    let session = open_session(&request)?;
+    session
+        .app_connect()
+        .await
+        .map_err(|e| format!("app CONNECT before LOGFS_FINALIZE: {e}"))?;
+    let body = ack_body(&session, cmd_logfs_finalize(), "LOGFS_FINALIZE").await;
+    let _ = session.app_disconnect().await;
+
+    let index = logfs::parse_finalize(&body?).map_err(|e| format!("parse LOGFS_FINALIZE: {e}"))?;
+    Ok(index)
 }
 
 /// Ask an in-flight [`logs_pull`] to stop. Cooperative: the transfer

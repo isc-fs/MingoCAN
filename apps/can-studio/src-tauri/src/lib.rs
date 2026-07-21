@@ -83,6 +83,7 @@ pub fn run() {
             logs::logs_list,
             logs::logs_pull,
             logs::logs_cancel,
+            logs::logs_finalize,
             dbc::dbc_load,
             dbc::dbc_unload,
             dbc::dbc_status,

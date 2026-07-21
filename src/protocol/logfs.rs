@@ -33,6 +33,14 @@ use super::ParseError;
 /// less is fine and returns exactly that; asking for more is clamped.
 pub const MAX_READ_LEN: u16 = 512;
 
+/// `next_cursor` value meaning "the listing is complete".
+///
+/// Not `0`: `0` is the *first* cursor, so a firmware that answered a
+/// one-page listing with `next_cursor = 0` would be indistinguishable
+/// from "start over" (IFS08-CE-AMS `logfs_server.hpp`, `CursorEnd`).
+/// Sending `0xFFFF` *as* a cursor is rejected with `OUT_OF_BOUNDS`.
+pub const CURSOR_END: u16 = 0xFFFF;
+
 /// On-wire size of one LIST entry: `index:u16 + size:u32 + mtime:u32 +
 /// name[12]`.
 pub const ENTRY_LEN: usize = 22;
@@ -91,7 +99,7 @@ impl ListPage {
     /// True when this was the last page.
     #[must_use]
     pub fn is_last(&self) -> bool {
-        self.next_cursor == 0
+        self.next_cursor == CURSOR_END
     }
 }
 
@@ -129,8 +137,10 @@ pub fn parse_list(bytes: &[u8]) -> Result<ListPage, ParseError> {
 /// A file opened by `LOGFS_OPEN`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenedFile {
-    /// Handle for the subsequent READ/CRC/CLOSE calls.
-    pub handle: u8,
+    /// Handle for the subsequent READ/CRC/CLOSE calls. Never `0` — the
+    /// firmware reserves that as its "nothing open" marker, so a zeroed
+    /// handle comes back as `BAD_HANDLE` rather than reading file 0.
+    pub handle: u16,
     pub size: u32,
     /// Whole-file CRC32, or `0` when the firmware declined to compute it
     /// up front (the agreed default — verify with `LOGFS_CRC` at EOF
@@ -147,19 +157,34 @@ impl OpenedFile {
     }
 }
 
-/// Parse a `LOGFS_OPEN` response body: `handle:u8, size:u32, crc32:u32`.
+/// Length of a `LOGFS_OPEN` reply body: `handle:u16, size:u32, crc32:u32`.
+pub const OPEN_REPLY_LEN: usize = 10;
+
+/// Parse a `LOGFS_OPEN` response body: `handle:u16, size:u32, crc32:u32`.
 pub fn parse_open(bytes: &[u8]) -> Result<OpenedFile, ParseError> {
-    if bytes.len() < 9 {
+    if bytes.len() < OPEN_REPLY_LEN {
         return Err(ParseError::RecordTooShort {
             got: bytes.len(),
-            need: 9,
+            need: OPEN_REPLY_LEN,
         });
     }
     Ok(OpenedFile {
-        handle: bytes[0],
-        size: u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
-        crc32: u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
+        handle: u16::from_le_bytes([bytes[0], bytes[1]]),
+        size: u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
+        crc32: u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]),
     })
+}
+
+/// Parse a `LOGFS_FINALIZE` response body: `index:u16` — the index the
+/// just-sealed log now occupies, ready to LIST or OPEN.
+pub fn parse_finalize(bytes: &[u8]) -> Result<u16, ParseError> {
+    if bytes.len() < 2 {
+        return Err(ParseError::RecordTooShort {
+            got: bytes.len(),
+            need: 2,
+        });
+    }
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 /// Parse a `LOGFS_CRC` response body: `crc32:u32`.
@@ -238,11 +263,22 @@ mod tests {
     }
 
     #[test]
-    fn list_page_zero_cursor_is_last() {
-        let body = [0u8, 0, 0]; // next_cursor 0, count 0
+    fn list_page_sentinel_cursor_is_last() {
+        let mut body = CURSOR_END.to_le_bytes().to_vec();
+        body.push(0); // count
         let page = parse_list(&body).unwrap();
         assert!(page.is_last());
         assert!(page.entries.is_empty());
+    }
+
+    #[test]
+    fn list_page_zero_cursor_is_not_last() {
+        // 0 is the FIRST cursor, not a terminator. Treating it as the end
+        // would silently truncate a listing to one page; treating the end
+        // as a cursor would loop forever. Both were real bugs on #506.
+        let body = [0u8, 0, 0];
+        let page = parse_list(&body).unwrap();
+        assert!(!page.is_last());
     }
 
     #[test]
@@ -257,20 +293,39 @@ mod tests {
 
     #[test]
     fn open_parses_and_flags_deferred_crc() {
-        let mut body = vec![0x03];
+        let mut body = 0x0103u16.to_le_bytes().to_vec();
         body.extend_from_slice(&4096u32.to_le_bytes());
         body.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(body.len(), OPEN_REPLY_LEN);
         let f = parse_open(&body).unwrap();
-        assert_eq!(f.handle, 0x03);
+        assert_eq!(f.handle, 0x0103, "handle is u16 — a u8 read truncates it");
         assert_eq!(f.size, 4096);
         assert!(f.crc_deferred());
 
-        let mut body = vec![0x03];
+        let mut body = 0x0103u16.to_le_bytes().to_vec();
         body.extend_from_slice(&4096u32.to_le_bytes());
         body.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
         let f = parse_open(&body).unwrap();
         assert_eq!(f.crc32, 0xDEAD_BEEF);
         assert!(!f.crc_deferred());
+    }
+
+    #[test]
+    fn open_rejects_the_pre_452_nine_byte_reply() {
+        // The old u8-handle shape is 9 B. It must be refused outright: it
+        // is long enough that a lenient parser would happily read a
+        // handle, a size and a CRC that are all off by one byte.
+        let body = vec![0u8; 9];
+        assert!(matches!(
+            parse_open(&body),
+            Err(ParseError::RecordTooShort { need: 10, .. })
+        ));
+    }
+
+    #[test]
+    fn finalize_parses_the_sealed_index() {
+        assert_eq!(parse_finalize(&7u16.to_le_bytes()).unwrap(), 7);
+        assert!(parse_finalize(&[1]).is_err());
     }
 
     #[test]

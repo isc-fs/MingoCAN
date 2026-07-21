@@ -90,8 +90,8 @@ use tracing::{debug, trace, warn};
 
 use crate::app_control::{reboot_to_bl_payload, BootloaderEntry, REBOOT_TO_BL_ID};
 use crate::protocol::commands::{
-    cmd_connect, cmd_disconnect, cmd_get_fw_info, cmd_get_health, PROTOCOL_VERSION_MAJOR,
-    PROTOCOL_VERSION_MINOR,
+    cmd_app_connect, cmd_app_disconnect, cmd_connect, cmd_disconnect, cmd_get_fw_info,
+    cmd_get_health, PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR,
 };
 use crate::protocol::ids::{FrameId, MessageType};
 use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
@@ -104,6 +104,19 @@ use crate::transport::{CanBackend, TransportError};
 /// short enough not to stall a healthy flash, long enough to ride out
 /// a transient adapter TX-buffer hiccup.
 const COMMAND_RETRY_BACKOFF_MS: u64 = 50;
+
+/// Application diag protocol version this host speaks (IFS08-CE-AMS#452).
+/// Deliberately separate from `PROTOCOL_VERSION_*`, which describes the
+/// bootloader contract — the two version independently.
+pub const APP_DIAG_VERSION_MAJOR: u8 = 1;
+pub const APP_DIAG_VERSION_MINOR: u8 = 0;
+
+/// Version of the application diag contract a node reports at CONNECT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppDiagVersion {
+    pub major: u8,
+    pub minor: u8,
+}
 
 /// Everything this layer can fail with. Wraps the lower-level
 /// `TransportError` / `ParseError` variants and adds session-specific
@@ -165,6 +178,12 @@ pub enum SessionError {
     /// Shouldn't reach this path; RX / keepalive task panicked.
     #[error("session task panic: {0}")]
     TaskPanic(String),
+
+    /// The application diag layer (`APP_CTRL`) answered in a shape the
+    /// host can't use. Separate from [`SessionError::Protocol`], which
+    /// covers the bootloader/framing layer below it.
+    #[error("app diag protocol error: {0}")]
+    AppProtocol(String),
 
     /// Received a `CMD` frame at the host, a duplicate FF mid-
     /// reassembly, or anything else the protocol layer classifies as
@@ -530,6 +549,86 @@ impl Session {
     pub async fn send_app_command(&self, payload: &[u8]) -> Result<Response, SessionError> {
         let _guard = self.inner.command_lock.lock().await;
         self.send_raw(payload, MessageType::AppCtrl).await
+    }
+
+    /// Open the **application** diag session (`APP_CTRL` CONNECT).
+    ///
+    /// Not the same thing as [`Session::connect`], which negotiates the
+    /// *bootloader* protocol over `Cmd`. The AMS application dispatcher
+    /// answers `APP_CTRL` only and drops everything else in silence
+    /// (`diag_dispatch.hpp`: `if (!req.is_app_ctrl()) return 0;`), so a
+    /// bootloader-style CONNECT never gets a reply — it doesn't fail
+    /// loudly, it just times out. Every LOGFS opcode is refused with
+    /// `BAD_SESSION` until this succeeds.
+    ///
+    /// Returns the application diag protocol version the node reports.
+    pub async fn app_connect(&self) -> Result<AppDiagVersion, SessionError> {
+        let reply = self.send_app_command(&cmd_app_connect()).await?;
+        let payload = match reply {
+            Response::Ack { payload, .. } => payload,
+            Response::Nack {
+                rejected_opcode,
+                code,
+            } => {
+                return Err(SessionError::Nack {
+                    rejected_opcode,
+                    code,
+                })
+            }
+            other => {
+                return Err(SessionError::AppProtocol(format!(
+                    "unexpected reply to app CONNECT: {}",
+                    other.kind_str()
+                )))
+            }
+        };
+        if payload.len() < 2 {
+            return Err(SessionError::AppProtocol(format!(
+                "app CONNECT ACK carried {} byte(s), expected [major, minor]",
+                payload.len()
+            )));
+        }
+        let version = AppDiagVersion {
+            major: payload[0],
+            minor: payload[1],
+        };
+        // Major is the compatibility axis: the firmware bumps it on any
+        // incompatible wire change and minor only on backward-compatible
+        // additions. Refusing a mismatch here turns "the pull produced
+        // garbage" into one clear sentence at the point of contact.
+        if version.major != APP_DIAG_VERSION_MAJOR {
+            return Err(SessionError::ProtocolVersionMismatch {
+                host_major: APP_DIAG_VERSION_MAJOR,
+                host_minor: APP_DIAG_VERSION_MINOR,
+                device_major: version.major,
+                device_minor: version.minor,
+            });
+        }
+        debug!(
+            major = version.major,
+            minor = version.minor,
+            "app diag session open"
+        );
+        Ok(version)
+    }
+
+    /// Close the application diag session, releasing any file handle it
+    /// still owns on the node.
+    pub async fn app_disconnect(&self) -> Result<(), SessionError> {
+        match self.send_app_command(&cmd_app_disconnect()).await? {
+            Response::Ack { .. } => Ok(()),
+            Response::Nack {
+                rejected_opcode,
+                code,
+            } => Err(SessionError::Nack {
+                rejected_opcode,
+                code,
+            }),
+            other => Err(SessionError::AppProtocol(format!(
+                "unexpected reply to app DISCONNECT: {}",
+                other.kind_str()
+            ))),
+        }
     }
 
     /// Probe whether the node is alive **in the bootloader**, using a

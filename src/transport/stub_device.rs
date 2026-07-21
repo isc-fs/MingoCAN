@@ -39,6 +39,7 @@ use crate::protocol::isotp::{IsoTpSegmenter, ReassembleOutcome, Reassembler};
 use crate::protocol::opcodes::{CommandOpcode, NackCode};
 use crate::protocol::records::{NVM_FORMAT_TOKEN, OB_APPLY_TOKEN};
 use crate::protocol::CanFrame;
+use crate::session::{APP_DIAG_VERSION_MAJOR, APP_DIAG_VERSION_MINOR};
 
 use super::{CanBackend, Result, TransportError};
 
@@ -118,7 +119,13 @@ impl StubLogFile {
     }
 }
 
-/// The contested bits of the LOGFS wire format (can-flasher#506).
+/// Knobs for the LOGFS wire format.
+///
+/// These were the *contested* bits of can-flasher#506. The contract is
+/// now settled (IFS08-CE-AMS `logfs_server.hpp` on `dev`), so
+/// [`LogfsWire::SETTLED`] is the real shape and the knobs remain only so
+/// a test can prove the host rejects a wrong-shaped node rather than
+/// mis-parsing it.
 #[derive(Clone, Copy, Debug)]
 pub struct LogfsWire {
     /// `next_cursor` value on the final LIST page.
@@ -141,19 +148,26 @@ pub struct LogfsWire {
 }
 
 impl LogfsWire {
-    /// What the merged host currently speaks (spec #406 + #506 replies).
-    pub const HOST: Self = Self {
-        cursor_end: 0,
-        handle_u16: false,
-        open_has_crc: true,
-        entries_per_page: 2,
-        app_ctrl_only: false,
-        drop_first_reads: 0,
-    };
-    /// What AMS PR #440 currently implements.
-    pub const FIRMWARE_PR440: Self = Self {
+    /// The settled contract, as AMS `dev` implements it: `0xFFFF` end
+    /// sentinel, `u16` handles, 10-byte OPEN carrying `crc32`, and an
+    /// APP_CTRL-only dispatcher that answers CONNECT with `[major,
+    /// minor]`.
+    pub const SETTLED: Self = Self {
         cursor_end: 0xFFFF,
         handle_u16: true,
+        open_has_crc: true,
+        // Real firmware fits 46; tests use 2 to force pagination.
+        entries_per_page: 2,
+        app_ctrl_only: true,
+        drop_first_reads: 0,
+    };
+
+    /// The pre-#452 shape, kept so one test can prove the host *rejects*
+    /// a node still speaking it instead of silently mis-parsing a 6-byte
+    /// OPEN as a 10-byte one.
+    pub const LEGACY_PRE_452: Self = Self {
+        cursor_end: 0,
+        handle_u16: false,
         open_has_crc: false,
         entries_per_page: 2,
         app_ctrl_only: true,
@@ -228,6 +242,10 @@ struct LogfsState {
     open: Option<(u16, usize)>,
     next_handle: u16,
     reads_dropped: u8,
+    /// The log still being written. FINALIZE seals it into `files`;
+    /// until then it is not listable, which is the whole reason the
+    /// opcode exists.
+    active: Option<StubLogFile>,
 }
 
 impl StubDevice {
@@ -266,6 +284,7 @@ impl StubDevice {
             open: None,
             next_handle: 1,
             reads_dropped: 0,
+            active: None,
         });
         self
     }
@@ -1195,6 +1214,16 @@ impl StubDevice {
 
     /// Dispatch an APP_CTRL request. Mirrors the AMS application: the
     /// session opcodes plus the `0x21`..=`0x25` LOGFS group.
+    /// Give the stub a log that is still being written, so `FINALIZE`
+    /// has something to seal.
+    #[must_use]
+    pub fn with_active_log(mut self, file: StubLogFile) -> Self {
+        if let Some(l) = self.logfs.as_mut() {
+            l.active = Some(file);
+        }
+        self
+    }
+
     async fn handle_app_ctrl(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
         let Some(&opcode) = payload.first() else {
             return Ok(());
@@ -1203,9 +1232,17 @@ impl StubDevice {
         match CommandOpcode::try_from(opcode) {
             Ok(CommandOpcode::Connect) => {
                 self.session_active = true;
-                // Empty ACK body — PR #440's shape. The host currently
-                // wants [major, minor]; that divergence is #506 item 2.
-                self.send_message(peer, MessageType::Ack, &[opcode]).await
+                if let Some(l) = self.logfs.as_mut() {
+                    l.open = None;
+                }
+                // [major, minor] of the APPLICATION diag contract — not
+                // the bootloader's version (IFS08-CE-AMS#452).
+                self.send_message(
+                    peer,
+                    MessageType::Ack,
+                    &[opcode, APP_DIAG_VERSION_MAJOR, APP_DIAG_VERSION_MINOR],
+                )
+                .await
             }
             Ok(CommandOpcode::Disconnect) => {
                 self.session_active = false;
@@ -1214,11 +1251,18 @@ impl StubDevice {
                 }
                 self.send_message(peer, MessageType::Ack, &[opcode]).await
             }
+            // Everything past CONNECT/DISCONNECT is session-gated: a
+            // stray or replayed frame must not be able to stream the card
+            // to whoever else is on the bus.
+            Ok(_) if !self.session_active => {
+                self.send_nack(peer, opcode, NackCode::BadSession).await
+            }
             Ok(CommandOpcode::LogfsList) => self.logfs_list(peer, args).await,
             Ok(CommandOpcode::LogfsOpen) => self.logfs_open(peer, args).await,
             Ok(CommandOpcode::LogfsRead) => self.logfs_read(peer, args).await,
             Ok(CommandOpcode::LogfsCrc) => self.logfs_crc(peer, args).await,
             Ok(CommandOpcode::LogfsClose) => self.logfs_close(peer, args).await,
+            Ok(CommandOpcode::LogfsFinalize) => self.logfs_finalize(peer).await,
             _ => self.send_nack(peer, opcode, NackCode::Unsupported).await,
         }
     }
@@ -1391,6 +1435,30 @@ impl StubDevice {
                 self.send_message(peer, MessageType::Ack, &body).await
             }
             None => self.send_nack(peer, op, NackCode::BadHandle).await,
+        }
+    }
+
+    /// `FINALIZE` — seal the active log and report the index it now
+    /// occupies. Drops any open handle first: it points into the file set
+    /// that is about to change.
+    async fn logfs_finalize(&mut self, peer: u8) -> Result<()> {
+        let op = CommandOpcode::LogfsFinalize.as_byte();
+        let sealed = {
+            let l = self.logfs.as_mut().expect("logfs enabled");
+            l.open = None;
+            l.active.take().map(|f| {
+                l.files.push(f);
+                (l.files.len() - 1) as u16
+            })
+        };
+        match sealed {
+            Some(index) => {
+                let mut body = vec![op];
+                body.extend_from_slice(&index.to_le_bytes());
+                self.send_message(peer, MessageType::Ack, &body).await
+            }
+            // Nothing to seal — no active file, or no rows in it yet.
+            None => self.send_nack(peer, op, NackCode::FileNotFound).await,
         }
     }
 

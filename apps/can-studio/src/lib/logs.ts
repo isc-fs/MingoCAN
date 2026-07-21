@@ -56,6 +56,16 @@ export function logsPull(
     return invoke<PullResult>('logs_pull', { request, index, destDir });
 }
 
+/**
+ * Seal the log currently being written and return its new index.
+ *
+ * The logger only closes a file on shutdown, so without this the run you
+ * just did is the one file that can't be pulled.
+ */
+export function logsFinalize(request: LogsRequest): Promise<number> {
+    return invoke<number>('logs_finalize', { request });
+}
+
 /** Ask an in-flight pull to stop; it aborts at the next read boundary. */
 export function logsCancel(): Promise<void> {
     return invoke<void>('logs_cancel');
