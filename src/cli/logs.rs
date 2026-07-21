@@ -1,0 +1,576 @@
+//! `cf logs` — list and pull the microSD data logs off a node over CAN.
+//!
+//! Implements the host side of the LOGFS service (IFS08-CE-AMS#406 /
+//! #506) on top of the existing CONNECT session + ISO-TP transport.
+//! Read-only: there is deliberately no `delete` subcommand in v1.
+//!
+//! Flow mirrors the spec's recommended sequence:
+//! `CONNECT → LIST (paginate) → per file: OPEN → READ… → CRC → CLOSE →
+//! DISCONNECT`. Reads are ranged and stateless per request, so a dropped
+//! transfer just re-requests that range.
+//!
+//! Note the node id comes from `--node-id`; nothing here hardcodes the
+//! AMS address, so the pending `0x01 → 0x02` move is a flag change.
+
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use clap::{Args, Subcommand};
+use tokio::time::sleep;
+use tracing::{debug, warn};
+
+use super::GlobalFlags;
+use crate::firmware::crc32;
+use crate::protocol::commands::{
+    cmd_logfs_close, cmd_logfs_crc, cmd_logfs_finalize, cmd_logfs_list, cmd_logfs_open,
+    cmd_logfs_read,
+};
+use crate::protocol::logfs::{self, LogEntry, MAX_READ_LEN};
+use crate::protocol::responses::Response;
+use crate::session::{Session, SessionConfig, SessionError};
+use crate::transport::open_backend;
+
+#[derive(Debug, Args)]
+pub struct LogsArgs {
+    #[command(subcommand)]
+    pub command: LogsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LogsCommand {
+    /// List the log files on the node's microSD card
+    List,
+
+    /// Download log file(s) to a local directory
+    Pull(PullArgs),
+
+    /// Seal the log currently being written so it can be listed and
+    /// pulled without power-cycling the car
+    Finalize,
+}
+
+#[derive(Debug, Args)]
+pub struct PullArgs {
+    /// Log index to pull (from `logs list`).
+    #[arg(long)]
+    pub index: Option<u16>,
+
+    /// Pull every file. Opt-in on purpose: at ~10-20 kB/s a 4 MiB log
+    /// takes 3.5-7 min, so a full card is a 20-35 minute transfer.
+    /// Targeted pulls are the intended workflow (pull the card for bulk).
+    #[arg(long, conflicts_with = "index")]
+    pub all: bool,
+
+    /// Directory to write the downloaded log(s) into
+    #[arg(short, long, default_value = ".")]
+    pub out: PathBuf,
+
+    /// Skip the LOGFS_CRC verification step (not recommended)
+    #[arg(long)]
+    pub no_verify: bool,
+}
+
+pub async fn run(global: &GlobalFlags, args: &LogsArgs) -> Result<()> {
+    match &args.command {
+        LogsCommand::List => run_list(global).await,
+        LogsCommand::Pull(p) => run_pull(global, p).await,
+        LogsCommand::Finalize => run_finalize(global).await,
+    }
+}
+
+fn open_session(global: &GlobalFlags) -> Result<Session> {
+    // Same guard as `flash` (FMEA #271 G2): never guess which board to
+    // talk to on a shared bus. The old `unwrap_or(0x3)` resolved to uDV
+    // — a real board that is NOT the log source — and because the
+    // bootloader-probe fallback would get an answer from it, the operator
+    // was told "node is in the bootloader" and sent to reflash the wrong
+    // ECU. Validated before the adapter opens so the error is
+    // hardware-independent.
+    let target_node = global.node_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "logs requires an explicit --node-id (which board to read): \
+             0x1 = ECU, 0x2 = AMS, 0x3 = uDV. The microSD log service is \
+             AMS-only today. Refusing to guess a target on a shared bus."
+        )
+    })?;
+    let backend = open_backend(global.interface, global.channel.as_deref(), global.bitrate)
+        .context("opening CAN backend for logs")?;
+    let config = SessionConfig {
+        target_node,
+        keepalive_interval: Duration::from_millis(5_000),
+        command_timeout: Duration::from_millis(u64::from(
+            global.timeout_ms.max(LOGFS_TIMEOUT_FLOOR_MS),
+        )),
+        ..SessionConfig::default()
+    };
+    Ok(Session::attach(backend, config))
+}
+
+/// Floor for the LOGFS command timeout, regardless of `--timeout`.
+///
+/// The default 500 ms is sized for bootloader commands that answer out of
+/// RAM. A LOGFS round trip additionally waits on a FatFs read from a
+/// microSD card behind a shared `_FS_LOCK`, so it can legitimately take
+/// well over a second while the logger task holds the mount — and a
+/// spurious timeout mid-pull throws away minutes of transfer. Operators
+/// who raise `--timeout` still get their value; this only lifts the
+/// bottom.
+const LOGFS_TIMEOUT_FLOOR_MS: u32 = 2_000;
+
+/// How many times to re-send an idempotent LOGFS command before failing.
+const LOGFS_RETRY_ATTEMPTS: u32 = 3;
+
+/// Linear backoff base — attempt N waits `N * this`.
+const LOGFS_RETRY_BACKOFF_MS: u64 = 60;
+
+fn is_timeout(e: &SessionError) -> bool {
+    matches!(e, SessionError::CommandTimeout { .. })
+}
+
+/// Open the application diag session, explaining the ambiguous silence.
+///
+/// The AMS application dispatcher answers `APP_CTRL` only; the bootloader
+/// answers `Cmd` only and drops `APP_CTRL` without a word. So "no reply"
+/// means either "wrong firmware running" or "nothing there at all", and
+/// only a probe can tell them apart.
+async fn open_app_session(session: &Session, what: &str) -> Result<()> {
+    match session.app_connect().await {
+        Ok(version) => {
+            debug!(
+                major = version.major,
+                minor = version.minor,
+                "app diag session open"
+            );
+            Ok(())
+        }
+        Err(e) if is_timeout(&e) => {
+            if session.probe_bootloader().await {
+                bail!(
+                    "no reply to app CONNECT: the node is alive but running \
+                     the bootloader, where the log service isn't available — \
+                     boot the application firmware and retry"
+                );
+            }
+            Err(e).with_context(|| format!("app CONNECT before {what}"))
+        }
+        Err(e) => Err(e).with_context(|| format!("app CONNECT before {what}")),
+    }
+}
+
+/// Send one LOGFS command and unwrap the ACK body (opcode already
+/// stripped by the response parser).
+async fn ack_body(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec<u8>> {
+    // LOGFS rides APP_CTRL (0x06), not CMD (0x00) — the AMS firmware
+    // serves it there so the app's opcode space can't collide with a
+    // future bootloader opcode (IFS08-CE-AMS#406).
+    // Remember what we asked for: the ACK echoes the opcode back, and
+    // checking the echo catches a reply that belongs to a *different*
+    // command (a stale one that landed late, or a dispatcher that ran the
+    // wrong handler). Without the check those bytes get parsed as this
+    // command's body and turn into silent nonsense — a LIST page read as
+    // an OPEN reply, say.
+    let expected_opcode = payload.first().copied();
+    let reply = session.send_app_command(&payload).await;
+    let reply = match reply {
+        Err(e) if is_timeout(&e) => {
+            // The BL silently drops APP_CTRL, so a timeout is ambiguous.
+            // Probe with a command the BL *does* answer to tell "node is
+            // in the bootloader" apart from "node is dead / wrong id".
+            if session.probe_bootloader().await {
+                bail!(
+                    "no reply to {what}: the node is alive but running the \
+                     bootloader, where the log service isn't available — \
+                     boot the application firmware and retry"
+                );
+            }
+            return Err(e).with_context(|| format!("sending {what}"));
+        }
+        other => other.with_context(|| format!("sending {what}"))?,
+    };
+    match reply {
+        Response::Ack { opcode, payload } => match expected_opcode {
+            Some(want) if opcode != want => bail!(
+                "reply to {what} echoes opcode 0x{opcode:02X}, expected \
+                     0x{want:02X} — replies are out of step with requests"
+            ),
+            _ => Ok(payload),
+        },
+        Response::Nack {
+            rejected_opcode,
+            code,
+        } => bail!("device NACK'd {what} (opcode 0x{rejected_opcode:02X}): {code}"),
+        other => bail!("unexpected reply to {what}: {}", other.kind_str()),
+    }
+}
+
+/// Is this failure worth another go?
+///
+/// Only transport-level ones. A NACK is a considered answer from the node
+/// and a bootloader diagnosis is a persistent state — re-sending either
+/// just burns the operator's time and hides the real message.
+fn is_retryable(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<SessionError>(),
+        Some(SessionError::CommandTimeout { .. } | SessionError::Transport(_))
+    )
+}
+
+/// [`ack_body`] with retries, for **idempotent** opcodes only.
+///
+/// LOGFS reads are ranged and stateless firmware-side, so re-requesting
+/// the same window is safe; LIST is a pure read of a cursor page. A
+/// multi-MB pull is thousands of round trips over several minutes, and
+/// without this a single blip on a shared bus discards the whole transfer
+/// and the operator starts from zero. Deliberately *not* used for OPEN
+/// (allocates a handle) or CLOSE (frees one).
+async fn ack_body_retrying(session: &Session, payload: Vec<u8>, what: &str) -> Result<Vec<u8>> {
+    let mut attempt = 1u32;
+    loop {
+        match ack_body(session, payload.clone(), what).await {
+            Ok(body) => return Ok(body),
+            Err(e) if attempt < LOGFS_RETRY_ATTEMPTS && is_retryable(&e) => {
+                warn!(
+                    what,
+                    attempt,
+                    error = %e,
+                    "LOGFS round trip failed, re-sending"
+                );
+                // bounded: fixed sleep, no channel or lock involved
+                sleep(Duration::from_millis(
+                    LOGFS_RETRY_BACKOFF_MS * u64::from(attempt),
+                ))
+                .await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Walk `LOGFS_LIST` to completion, following the cursor.
+async fn list_all(session: &Session) -> Result<Vec<LogEntry>> {
+    let mut all = Vec::new();
+    let mut cursor = 0u16;
+    loop {
+        let body = ack_body_retrying(session, cmd_logfs_list(cursor), "LOGFS_LIST").await?;
+        let page = logfs::parse_list(&body).context("parsing LOGFS_LIST response")?;
+        debug!(
+            cursor,
+            next = page.next_cursor,
+            entries = page.entries.len(),
+            "logfs list page"
+        );
+        let is_last = page.is_last();
+        let next = page.next_cursor;
+        all.extend(page.entries);
+        if is_last {
+            break;
+        }
+        if next == cursor {
+            bail!("LOGFS_LIST cursor did not advance (stuck at {cursor}) — aborting");
+        }
+        cursor = next;
+    }
+    Ok(all)
+}
+
+async fn run_list(global: &GlobalFlags) -> Result<()> {
+    let session = open_session(global)?;
+    open_app_session(&session, "LOGFS_LIST").await?;
+    let entries = list_all(&session).await;
+    let _ = session.app_disconnect().await;
+    let entries = entries?;
+
+    if global.json {
+        // `mtime` is monotonic/boot-relative, so it is emitted raw — it
+        // is NOT a unix timestamp and must not be formatted as a date.
+        let items: Vec<String> = entries
+            .iter()
+            .map(|e| {
+                format!(
+                    r#"{{"index":{},"name":"{}","size":{},"mtimeMonotonic":{}}}"#,
+                    e.index, e.name, e.size, e.mtime
+                )
+            })
+            .collect();
+        println!("[{}]", items.join(","));
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!("no log files on the card");
+        return Ok(());
+    }
+    println!(
+        "{:>5}  {:<12} {:>10}  {:>12}",
+        "INDEX", "NAME", "SIZE", "MTIME(mono)"
+    );
+    for e in &entries {
+        println!(
+            "{:>5}  {:<12} {:>10}  {:>12}",
+            e.index, e.name, e.size, e.mtime
+        );
+    }
+    println!(
+        "\n{} file(s). mtime is boot-relative (no RTC) — ordering only, not a date.",
+        entries.len()
+    );
+    Ok(())
+}
+
+/// Pull one file: OPEN → READ until EOF → CRC → CLOSE. Returns the bytes.
+async fn pull_one(session: &Session, entry: &LogEntry, verify: bool) -> Result<Vec<u8>> {
+    let body = ack_body(session, cmd_logfs_open(entry.index), "LOGFS_OPEN").await?;
+    let open = logfs::parse_open(&body).context("parsing LOGFS_OPEN response")?;
+    debug!(
+        handle = open.handle,
+        size = open.size,
+        crc_deferred = open.crc_deferred(),
+        "opened log"
+    );
+
+    let mut data: Vec<u8> = Vec::with_capacity(open.size as usize);
+    let mut offset = 0u32;
+    loop {
+        let body = ack_body_retrying(
+            session,
+            cmd_logfs_read(open.handle, offset, MAX_READ_LEN),
+            "LOGFS_READ",
+        )
+        .await?;
+        let out = logfs::parse_read(MAX_READ_LEN, &body);
+        data.extend_from_slice(&out.data);
+        offset = offset.saturating_add(out.data.len() as u32);
+
+        // Progress on one rewritten line; size may be 0 if unknown.
+        if open.size > 0 {
+            let pct = (u64::from(offset) * 100 / u64::from(open.size)).min(100);
+            print!("\r  {} … {pct:>3}% ({offset}/{} B)", entry.name, open.size);
+            let _ = std::io::stdout().flush();
+        }
+
+        if out.eof {
+            break;
+        }
+        if out.data.is_empty() {
+            bail!("LOGFS_READ returned no data before EOF at offset {offset}");
+        }
+    }
+    println!();
+
+    if open.size > 0 && data.len() as u32 != open.size {
+        bail!(
+            "size mismatch for {}: OPEN said {} B, transfer produced {} B",
+            entry.name,
+            open.size,
+            data.len()
+        );
+    }
+
+    if verify {
+        // The firmware maintains a running CRC while logging and seals it
+        // with the file, so OPEN carries a real crc32 — no extra round
+        // trip needed. Only fall back to LOGFS_CRC if it declined.
+        let want = if open.crc_deferred() {
+            let body = ack_body(session, cmd_logfs_crc(open.handle), "LOGFS_CRC").await?;
+            logfs::parse_crc(&body).context("parsing LOGFS_CRC response")?
+        } else {
+            open.crc32
+        };
+        let got = crc32(&data);
+        if want != got {
+            bail!(
+                "CRC mismatch for {}: node says 0x{want:08X}, received bytes are 0x{got:08X}",
+                entry.name
+            );
+        }
+        debug!(crc = format!("0x{want:08X}"), "crc verified");
+    }
+
+    let _ = ack_body(session, cmd_logfs_close(open.handle), "LOGFS_CLOSE").await?;
+    Ok(data)
+}
+
+async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
+    let session = open_session(global)?;
+    open_app_session(&session, "LOGFS pull").await?;
+
+    let result = async {
+        let entries = list_all(&session).await?;
+        let selected: Vec<&LogEntry> = match args.index {
+            Some(i) => match entries.iter().find(|e| e.index == i) {
+                Some(e) => vec![e],
+                None => bail!("no log with index {i} on the card (try `cf logs list`)"),
+            },
+            None if args.all => entries.iter().collect(),
+            None => bail!(
+                "pick a file with --index N (see `cf logs list`), or pass --all.\n\
+                 Transfers run at ~10-20 kB/s, so a full card can take 20-35 minutes — \
+                 targeted pulls are the intended workflow."
+            ),
+        };
+        if selected.is_empty() {
+            println!("no log files on the card");
+            return Ok(());
+        }
+
+        std::fs::create_dir_all(&args.out)
+            .with_context(|| format!("creating output dir {}", args.out.display()))?;
+
+        for e in selected {
+            let data = pull_one(&session, e, !args.no_verify).await?;
+            let path = unique_path(&args.out, &e.name);
+            std::fs::write(&path, &data).with_context(|| format!("writing {}", path.display()))?;
+            println!("  saved {} ({} B)", path.display(), data.len());
+        }
+        Ok(())
+    }
+    .await;
+
+    let _ = session.app_disconnect().await;
+    result
+}
+
+/// Seal the log that is currently being written.
+///
+/// Without this, the run you just did isn't listable — the logger only
+/// closes a file on shutdown, so the data from the session you care about
+/// most is the one file you can't pull. NACKs `FILE_NOT_FOUND` when
+/// there's nothing to seal (no active file, or no rows in it yet).
+async fn run_finalize(global: &GlobalFlags) -> Result<()> {
+    let session = open_session(global)?;
+    open_app_session(&session, "LOGFS_FINALIZE").await?;
+    let body = ack_body(&session, cmd_logfs_finalize(), "LOGFS_FINALIZE").await;
+    let _ = session.app_disconnect().await;
+
+    let index = logfs::parse_finalize(&body?).context("parsing LOGFS_FINALIZE")?;
+    if global.json {
+        println!("{}", serde_json::json!({ "status": "ok", "index": index }));
+    } else {
+        println!("Sealed the active log — it is now index {index}, ready to pull.");
+    }
+    Ok(())
+}
+
+/// Don't clobber an existing download — `LOG0001.CSV` → `LOG0001.CSV.1`.
+fn unique_path(dir: &Path, name: &str) -> PathBuf {
+    let base = dir.join(name);
+    if !base.exists() {
+        return base;
+    }
+    for n in 1..1000 {
+        let candidate = dir.join(format!("{name}.{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::transport::{CanBackend, LogfsWire, StubDevice, StubLogFile, VirtualBus};
+
+    /// A dropped LOGFS_READ must cost one re-send, not the whole file.
+    ///
+    /// The stub swallows the first two reads with no reply at all — what
+    /// a lost frame looks like from the host — so this only passes if
+    /// `ack_body_retrying` actually re-sends the same ranged window and
+    /// the bytes come back intact.
+    #[tokio::test]
+    async fn dropped_read_is_retried_and_the_pull_still_completes() {
+        let bus = VirtualBus::new();
+        let host = bus.host_backend();
+        let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+        drop(bus);
+
+        let payload: Vec<u8> = (0..900u32).map(|i| i as u8).collect();
+        let wire = LogfsWire {
+            drop_first_reads: 2,
+            ..LogfsWire::SETTLED
+        };
+        let stub = StubDevice::new(device, 0x2).with_logfs(
+            vec![StubLogFile::new("LOG0001.CSV", payload.clone(), 1)],
+            wire,
+        );
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _ = stub.run(cancel_rx).await;
+        });
+
+        let session = Session::attach(
+            Box::new(host),
+            SessionConfig {
+                target_node: 0x2,
+                keepalive_interval: Duration::from_millis(5_000),
+                // Short, so two dropped reads don't make the test slow.
+                command_timeout: Duration::from_millis(150),
+                ..SessionConfig::default()
+            },
+        );
+
+        // LOGFS is session-gated now, exactly as the firmware gates it.
+        open_app_session(&session, "test")
+            .await
+            .expect("app connect");
+        let entries = list_all(&session).await.expect("list");
+        let got = pull_one(&session, &entries[0], true).await.expect("pull");
+        assert_eq!(got, payload, "retried reads reassemble the exact file");
+
+        let _ = cancel_tx.send(());
+        let _ = handle.await;
+    }
+
+    #[test]
+    fn unique_path_avoids_clobbering() {
+        let dir = std::env::temp_dir().join(format!("cf-logs-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = unique_path(&dir, "LOG0001.CSV");
+        assert!(first.ends_with("LOG0001.CSV"));
+        std::fs::write(&first, b"x").unwrap();
+        let second = unique_path(&dir, "LOG0001.CSV");
+        assert!(second.ends_with("LOG0001.CSV.1"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod node_id_tests {
+    use super::*;
+
+    // FMEA #271 G2, mirroring `flash_requires_explicit_node_id`: `logs`
+    // must refuse to run without an explicit --node-id rather than
+    // silently targeting 0x3 (uDV, which is not even the log source).
+    // Hardware-independent — runs before the adapter opens.
+    #[test]
+    fn logs_requires_explicit_node_id() {
+        let global = GlobalFlags {
+            interface: crate::cli::InterfaceType::Virtual,
+            channel: None,
+            bitrate: 500_000,
+            node_id: None,
+            timeout_ms: 500,
+            json: false,
+            log_path: None,
+            verbose: false,
+            operator: None,
+        };
+        let err = match open_session(&global) {
+            Ok(_) => panic!("missing --node-id must error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--node-id"),
+            "should name the flag, got: {msg}"
+        );
+        assert!(
+            !msg.contains("0x3 = uDV\","),
+            "should not imply uDV is the default"
+        );
+    }
+}

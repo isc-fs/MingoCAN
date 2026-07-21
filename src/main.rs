@@ -87,6 +87,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::SendRaw(args) => cli::send_raw::run(args, &cli.global).await,
         Command::Provision(args) => cli::provision::run(args, &cli.global).await,
         Command::PitDiag(args) => cli::pit_diag::run(args, &cli.global).await,
+        Command::Logs(args) => cli::logs::run(&cli.global, &args).await,
         Command::Adapters => cli::adapters::run(&cli.global).await,
         #[cfg(feature = "swd")]
         Command::SwdFlash(args) => cli::swd_flash::run(args, &cli.global).await,

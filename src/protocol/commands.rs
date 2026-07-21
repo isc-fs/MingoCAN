@@ -200,6 +200,67 @@ pub fn cmd_nvm_format() -> Vec<u8> {
     v
 }
 
+// ---- LOGFS: microSD log extraction (0x2x storage group, #506) ----
+// Read-only in v1 — no `LOGFS_DELETE` builder on purpose.
+
+/// `CMD_LOGFS_LIST [cursor_le16]`. Start at `0`; paginate with the
+/// `next_cursor` from each [`logfs::ListPage`](super::logfs::ListPage).
+pub fn cmd_logfs_list(cursor: u16) -> Vec<u8> {
+    payload_with_opcode(CommandOpcode::LogfsList, &cursor.to_le_bytes())
+}
+
+/// `CMD_LOGFS_OPEN [index_le16]`.
+pub fn cmd_logfs_open(index: u16) -> Vec<u8> {
+    payload_with_opcode(CommandOpcode::LogfsOpen, &index.to_le_bytes())
+}
+
+/// `CMD_LOGFS_READ [handle, offset_le32, length_le16]`.
+///
+/// `length` is clamped to [`logfs::MAX_READ_LEN`](super::logfs::MAX_READ_LEN)
+/// — the firmware clamps too, and a response shorter than the request is
+/// the EOF signal.
+pub fn cmd_logfs_read(handle: u16, offset: u32, length: u16) -> Vec<u8> {
+    let mut args = [0u8; 8];
+    args[0..2].copy_from_slice(&handle.to_le_bytes());
+    args[2..6].copy_from_slice(&offset.to_le_bytes());
+    args[6..8].copy_from_slice(&length.min(super::logfs::MAX_READ_LEN).to_le_bytes());
+    payload_with_opcode(CommandOpcode::LogfsRead, &args)
+}
+
+/// `CMD_LOGFS_CRC [handle]` — whole-file CRC32.
+pub fn cmd_logfs_crc(handle: u16) -> Vec<u8> {
+    payload_with_opcode(CommandOpcode::LogfsCrc, &handle.to_le_bytes())
+}
+
+/// `CMD_LOGFS_CLOSE [handle]`.
+pub fn cmd_logfs_close(handle: u16) -> Vec<u8> {
+    payload_with_opcode(CommandOpcode::LogfsClose, &handle.to_le_bytes())
+}
+
+/// `CMD_LOGFS_FINALIZE []` — seal the log currently being written and
+/// return its index, so the run that just happened can be pulled without
+/// power-cycling the car.
+pub fn cmd_logfs_finalize() -> Vec<u8> {
+    payload_with_opcode(CommandOpcode::LogfsFinalize, &[])
+}
+
+/// `CMD_CONNECT []`, **app-scoped**.
+///
+/// Distinct from [`cmd_connect`]: the bootloader's CONNECT negotiates the
+/// *bootloader* protocol version and rides `Cmd`, while this one opens the
+/// application's diag session over `APP_CTRL` and is answered with the
+/// application's `[major, minor]`. Two separate contracts that happen to
+/// share an opcode byte.
+pub fn cmd_app_connect() -> Vec<u8> {
+    payload_with_opcode(CommandOpcode::Connect, &[])
+}
+
+/// `CMD_DISCONNECT []`, app-scoped — drops the session and any handle it
+/// still owns.
+pub fn cmd_app_disconnect() -> Vec<u8> {
+    payload_with_opcode(CommandOpcode::Disconnect, &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

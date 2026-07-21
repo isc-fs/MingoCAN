@@ -20,6 +20,7 @@ export type ViewId =
     | 'diagnostics'
     | 'busMonitor'
     | 'pitDiag'
+    | 'dataLogs'
     | 'settings';
 
 /** Sidebar grouping. Views with no section are pinned — Adapters at the
@@ -78,6 +79,13 @@ export const VIEWS: ViewMeta[] = [
         status: 'live',
         section: 'observe',
         description: 'Live AMS / ECU / uDV telemetry',
+    },
+    {
+        id: 'dataLogs',
+        label: 'Data logs',
+        status: 'live',
+        section: 'observe',
+        description: 'Pull microSD car-data logs over CAN',
     },
     {
         id: 'settings',

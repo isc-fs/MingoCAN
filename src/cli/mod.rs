@@ -16,6 +16,7 @@ pub mod config;
 pub mod diagnose;
 pub mod discover;
 pub mod flash;
+pub mod logs;
 pub mod pit_diag;
 pub mod provision;
 pub mod replay;
@@ -147,6 +148,9 @@ pub enum Command {
     /// types the role, the host fills in the number.
     Provision(provision::ProvisionArgs),
 
+    /// List / pull the microSD data logs off a node over CAN
+    Logs(logs::LogsArgs),
+
     /// AMS pit-diag observer — arm / disarm the diagnostic stream,
     /// or stream + decode it to stdout.
     PitDiag(pit_diag::PitDiagArgs),
@@ -188,7 +192,8 @@ pub struct GlobalFlags {
     #[arg(long = "node-id", global = true, value_parser = parse_node_id)]
     pub node_id: Option<u8>,
 
-    /// Per-frame timeout in milliseconds
+    /// Reply timeout in milliseconds — applies per command, covering the
+    /// whole reassembled ISO-TP message (not per CAN frame)
     #[arg(long = "timeout", default_value_t = 500, global = true)]
     pub timeout_ms: u32,
 
