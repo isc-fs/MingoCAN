@@ -74,10 +74,24 @@ pub async fn run(global: &GlobalFlags, args: &LogsArgs) -> Result<()> {
 }
 
 fn open_session(global: &GlobalFlags) -> Result<Session> {
+    // Same guard as `flash` (FMEA #271 G2): never guess which board to
+    // talk to on a shared bus. The old `unwrap_or(0x3)` resolved to uDV
+    // — a real board that is NOT the log source — and because the
+    // bootloader-probe fallback would get an answer from it, the operator
+    // was told "node is in the bootloader" and sent to reflash the wrong
+    // ECU. Validated before the adapter opens so the error is
+    // hardware-independent.
+    let target_node = global.node_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "logs requires an explicit --node-id (which board to read): \
+             0x1 = ECU, 0x2 = AMS, 0x3 = uDV. The microSD log service is \
+             AMS-only today. Refusing to guess a target on a shared bus."
+        )
+    })?;
     let backend = open_backend(global.interface, global.channel.as_deref(), global.bitrate)
         .context("opening CAN backend for logs")?;
     let config = SessionConfig {
-        target_node: global.node_id.unwrap_or(0x3),
+        target_node,
         keepalive_interval: Duration::from_millis(5_000),
         command_timeout: Duration::from_millis(u64::from(global.timeout_ms)),
         ..SessionConfig::default()
@@ -334,5 +348,36 @@ mod tests {
         let second = unique_path(&dir, "LOG0001.CSV");
         assert!(second.ends_with("LOG0001.CSV.1"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod node_id_tests {
+    use super::*;
+
+    // FMEA #271 G2, mirroring `flash_requires_explicit_node_id`: `logs`
+    // must refuse to run without an explicit --node-id rather than
+    // silently targeting 0x3 (uDV, which is not even the log source).
+    // Hardware-independent — runs before the adapter opens.
+    #[test]
+    fn logs_requires_explicit_node_id() {
+        let global = GlobalFlags {
+            interface: crate::cli::InterfaceType::Virtual,
+            channel: None,
+            bitrate: 500_000,
+            node_id: None,
+            timeout_ms: 500,
+            json: false,
+            log_path: None,
+            verbose: false,
+            operator: None,
+        };
+        let err = match open_session(&global) {
+            Ok(_) => panic!("missing --node-id must error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("--node-id"), "should name the flag, got: {msg}");
+        assert!(!msg.contains("0x3 = uDV\","), "should not imply uDV is the default");
     }
 }

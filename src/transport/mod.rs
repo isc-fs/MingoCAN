@@ -46,7 +46,7 @@ pub use pcan::{PcanAdapterInfo, PcanBackend};
 pub use slcan::{SlcanAdapterInfo, SlcanBackend};
 #[cfg(target_os = "linux")]
 pub use socketcan::{SocketCanAdapterInfo, SocketCanBackend};
-pub use stub_device::StubDevice;
+pub use stub_device::{LogfsWire, StubDevice, StubLogFile};
 #[cfg(target_os = "windows")]
 pub use vector::{VectorAdapterInfo, VectorBackend};
 pub use virtual_bus::{StubLoopback, VirtualBackend, VirtualBus};

@@ -90,9 +90,76 @@ const READ_SLICE: Duration = Duration::from_millis(50);
 /// Minimal stub bootloader. Spin it up in a tokio task; it runs
 /// until either the cancel handle fires or the underlying backend
 /// disconnects.
+
+// ---- LOGFS app-mode server (#506) -------------------------------
+//
+// The stub models the *bootloader*, which silently drops APP_CTRL. The
+// LOGFS service lives in the *application*, so tests need a mode where
+// APP_CTRL is answered. This is the only way to exercise the full
+// LIST -> OPEN -> READ -> CRC -> CLOSE pipeline without firmware.
+//
+// The byte-level shape is still being settled on can-flasher#506 — the
+// merged host and AMS PR #440 disagree in three places. Rather than bake
+// one in, the wire shape is a knob, so a test can pin either side and
+// the divergence is expressed as executable fact.
+
+/// One synthetic log file on the stub's in-memory card.
+#[derive(Clone, Debug)]
+pub struct StubLogFile {
+    pub name: String,
+    pub data: Vec<u8>,
+    /// Monotonic/boot-relative on real hardware; opaque here.
+    pub mtime: u32,
+}
+
+impl StubLogFile {
+    pub fn new(name: &str, data: Vec<u8>, mtime: u32) -> Self {
+        Self { name: name.to_string(), data, mtime }
+    }
+}
+
+/// The contested bits of the LOGFS wire format (can-flasher#506).
+#[derive(Clone, Copy, Debug)]
+pub struct LogfsWire {
+    /// `next_cursor` value on the final LIST page.
+    pub cursor_end: u16,
+    /// Handle width on the wire: `true` = u16, `false` = u8.
+    pub handle_u16: bool,
+    /// Whether the OPEN reply carries the sealed `crc32`.
+    pub open_has_crc: bool,
+    /// Entries per LIST page (real firmware fits 46; tests use a small
+    /// value to force pagination).
+    pub entries_per_page: usize,
+    /// Model PR #440's dispatcher, which drops every non-APP_CTRL frame
+    /// — including the CONNECT the host currently sends as `Cmd`.
+    pub app_ctrl_only: bool,
+}
+
+impl LogfsWire {
+    /// What the merged host currently speaks (spec #406 + #506 replies).
+    pub const HOST: Self = Self {
+        cursor_end: 0,
+        handle_u16: false,
+        open_has_crc: true,
+        entries_per_page: 2,
+        app_ctrl_only: false,
+    };
+    /// What AMS PR #440 currently implements.
+    pub const FIRMWARE_PR440: Self = Self {
+        cursor_end: 0xFFFF,
+        handle_u16: true,
+        open_has_crc: false,
+        entries_per_page: 2,
+        app_ctrl_only: true,
+    };
+}
+
 pub struct StubDevice {
     backend: Box<dyn CanBackend>,
     node_id: u8,
+    /// LOGFS app-mode state — `None` means "pure bootloader", which is
+    /// the historical behaviour (APP_CTRL dropped).
+    logfs: Option<LogfsState>,
     reasm: Reassembler,
     session_active: bool,
     /// In-memory NVM store. Real bootloader persists to sector 7;
@@ -144,6 +211,14 @@ pub struct StubDevice {
     reboots_seen: u32,
 }
 
+#[derive(Debug)]
+struct LogfsState {
+    wire: LogfsWire,
+    files: Vec<StubLogFile>,
+    open: Option<(u16, usize)>,
+    next_handle: u16,
+}
+
 impl StubDevice {
     /// Wrap a `CanBackend` as a stub device answering from `node_id`
     /// (4-bit, 1..=14 — `0x0` is reserved for the host, `0xF` for
@@ -153,6 +228,7 @@ impl StubDevice {
         Self {
             backend,
             node_id,
+            logfs: None,
             reasm: Reassembler::new(),
             session_active: false,
             nvm: HashMap::new(),
@@ -170,6 +246,13 @@ impl StubDevice {
     /// stub answers `CMD_CONNECT`. Simulates a running application (`1`)
     /// or a board that drops the first trigger (`2`), exercising the
     /// host's reboot-and-connect poll loop.
+    /// Turn on the LOGFS application service with a synthetic card.
+    /// Without this the stub stays a pure bootloader and drops APP_CTRL.
+    pub fn with_logfs(mut self, files: Vec<StubLogFile>, wire: LogfsWire) -> Self {
+        self.logfs = Some(LogfsState { wire, files, open: None, next_handle: 1 });
+        self
+    }
+
     pub fn set_reboots_needed(&mut self, n: u32) {
         self.reboots_needed = n;
     }
@@ -341,11 +424,25 @@ impl StubDevice {
         payload: &[u8],
     ) -> Result<()> {
         match message_type {
-            MessageType::Cmd | MessageType::DiscoverRequest => {}
+            MessageType::Cmd | MessageType::DiscoverRequest => {
+                // Model PR #440's dispatcher: the application answers only
+                // APP_CTRL and stays silent on everything else. Used to
+                // reproduce the CONNECT-transport mismatch (#506).
+                if self
+                    .logfs
+                    .as_ref()
+                    .is_some_and(|l| l.wire.app_ctrl_only)
+                {
+                    return Ok(());
+                }
+            }
             MessageType::AppCtrl => {
-                // BL silently drops app-ctrl traffic — the application
-                // firmware handles it after BL-jump. See docs in
-                // protocol/ids.rs and cli/send_raw.rs.
+                // A pure bootloader silently drops app-ctrl traffic. With
+                // the LOGFS service enabled we answer it, which is what
+                // the real application firmware does.
+                if self.logfs.is_some() {
+                    return self.handle_app_ctrl(peer, payload).await;
+                }
                 return Ok(());
             }
             _ => {
@@ -1079,6 +1176,228 @@ impl StubDevice {
 
         let resp = [CommandOpcode::FlashVerify.as_byte()];
         self.send_message(peer, MessageType::Ack, &resp).await
+    }
+
+
+    // ---- LOGFS application service (#506) ------------------------
+
+    /// Dispatch an APP_CTRL request. Mirrors the AMS application: the
+    /// session opcodes plus the `0x21`..=`0x25` LOGFS group.
+    async fn handle_app_ctrl(&mut self, peer: u8, payload: &[u8]) -> Result<()> {
+        let Some(&opcode) = payload.first() else {
+            return Ok(());
+        };
+        let args = &payload[1..];
+        match CommandOpcode::try_from(opcode) {
+            Ok(CommandOpcode::Connect) => {
+                self.session_active = true;
+                // Empty ACK body — PR #440's shape. The host currently
+                // wants [major, minor]; that divergence is #506 item 2.
+                self.send_message(peer, MessageType::Ack, &[opcode]).await
+            }
+            Ok(CommandOpcode::Disconnect) => {
+                self.session_active = false;
+                if let Some(l) = self.logfs.as_mut() {
+                    l.open = None;
+                }
+                self.send_message(peer, MessageType::Ack, &[opcode]).await
+            }
+            Ok(CommandOpcode::LogfsList) => self.logfs_list(peer, args).await,
+            Ok(CommandOpcode::LogfsOpen) => self.logfs_open(peer, args).await,
+            Ok(CommandOpcode::LogfsRead) => self.logfs_read(peer, args).await,
+            Ok(CommandOpcode::LogfsCrc) => self.logfs_crc(peer, args).await,
+            Ok(CommandOpcode::LogfsClose) => self.logfs_close(peer, args).await,
+            _ => {
+                self.send_nack(peer, opcode, NackCode::Unsupported).await
+            }
+        }
+    }
+
+    fn logfs_handle_len(&self) -> usize {
+        if self.logfs.as_ref().is_some_and(|l| l.wire.handle_u16) {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Read a handle in whichever width the configured wire uses.
+    fn read_handle(&self, args: &[u8]) -> Option<u16> {
+        match self.logfs_handle_len() {
+            2 => (args.len() >= 2).then(|| u16::from_le_bytes([args[0], args[1]])),
+            _ => args.first().map(|&b| u16::from(b)),
+        }
+    }
+
+    async fn logfs_list(&mut self, peer: u8, args: &[u8]) -> Result<()> {
+        let op = CommandOpcode::LogfsList.as_byte();
+        if args.len() < 2 {
+            return self.send_nack(peer, op, NackCode::OutOfBounds).await;
+        }
+        let cursor = u16::from_le_bytes([args[0], args[1]]);
+        let (wire, files_len) = {
+            let l = self.logfs.as_ref().expect("logfs enabled");
+            (l.wire, l.files.len())
+        };
+        // The firmware NACKs a LIST that carries the end sentinel back.
+        if wire.cursor_end != 0 && cursor == wire.cursor_end {
+            return self.send_nack(peer, op, NackCode::OutOfBounds).await;
+        }
+        let start = usize::from(cursor);
+        if start > files_len {
+            return self.send_nack(peer, op, NackCode::OutOfBounds).await;
+        }
+        let end = (start + wire.entries_per_page).min(files_len);
+        let count = end - start;
+        let next = if end >= files_len {
+            wire.cursor_end
+        } else {
+            end as u16
+        };
+
+        let mut body = Vec::with_capacity(3 + count * 22);
+        body.push(op);
+        body.extend_from_slice(&next.to_le_bytes());
+        body.push(count as u8);
+        {
+            let l = self.logfs.as_ref().expect("logfs enabled");
+            for (i, f) in l.files[start..end].iter().enumerate() {
+                let mut e = [0u8; 22];
+                e[0..2].copy_from_slice(&((start + i) as u16).to_le_bytes());
+                e[2..6].copy_from_slice(&(f.data.len() as u32).to_le_bytes());
+                e[6..10].copy_from_slice(&f.mtime.to_le_bytes());
+                let n = f.name.as_bytes();
+                let take = n.len().min(12);
+                e[10..10 + take].copy_from_slice(&n[..take]);
+                body.extend_from_slice(&e);
+            }
+        }
+        self.send_message(peer, MessageType::Ack, &body).await
+    }
+
+    async fn logfs_open(&mut self, peer: u8, args: &[u8]) -> Result<()> {
+        let op = CommandOpcode::LogfsOpen.as_byte();
+        if args.len() < 2 {
+            return self.send_nack(peer, op, NackCode::OutOfBounds).await;
+        }
+        let index = usize::from(u16::from_le_bytes([args[0], args[1]]));
+        let (wire, exists, size, crc) = {
+            let l = self.logfs.as_ref().expect("logfs enabled");
+            match l.files.get(index) {
+                Some(f) => (
+                    l.wire,
+                    true,
+                    f.data.len() as u32,
+                    crate::firmware::crc32(&f.data),
+                ),
+                None => (l.wire, false, 0, 0),
+            }
+        };
+        if !exists {
+            return self.send_nack(peer, op, NackCode::FileNotFound).await;
+        }
+        let handle = {
+            let l = self.logfs.as_mut().expect("logfs enabled");
+            let h = l.next_handle;
+            l.next_handle = l.next_handle.wrapping_add(1).max(1);
+            l.open = Some((h, index));
+            h
+        };
+
+        let mut body = vec![op];
+        if wire.handle_u16 {
+            body.extend_from_slice(&handle.to_le_bytes());
+        } else {
+            body.push(handle as u8);
+        }
+        body.extend_from_slice(&size.to_le_bytes());
+        if wire.open_has_crc {
+            body.extend_from_slice(&crc.to_le_bytes());
+        }
+        self.send_message(peer, MessageType::Ack, &body).await
+    }
+
+    async fn logfs_read(&mut self, peer: u8, args: &[u8]) -> Result<()> {
+        let op = CommandOpcode::LogfsRead.as_byte();
+        let hlen = self.logfs_handle_len();
+        if args.len() < hlen + 6 {
+            return self.send_nack(peer, op, NackCode::OutOfBounds).await;
+        }
+        let Some(handle) = self.read_handle(args) else {
+            return self.send_nack(peer, op, NackCode::OutOfBounds).await;
+        };
+        let off = u32::from_le_bytes([
+            args[hlen], args[hlen + 1], args[hlen + 2], args[hlen + 3],
+        ]) as usize;
+        let len = u16::from_le_bytes([args[hlen + 4], args[hlen + 5]]).min(512) as usize;
+
+        let slice = {
+            let l = self.logfs.as_ref().expect("logfs enabled");
+            match l.open {
+                Some((h, idx)) if h == handle => {
+                    let data = &l.files[idx].data;
+                    let start = off.min(data.len());
+                    let end = (start + len).min(data.len());
+                    Some(data[start..end].to_vec())
+                }
+                _ => None,
+            }
+        };
+        match slice {
+            // Short read (including empty) is the EOF signal.
+            Some(bytes) => {
+                let mut body = vec![op];
+                body.extend_from_slice(&bytes);
+                self.send_message(peer, MessageType::Ack, &body).await
+            }
+            None => self.send_nack(peer, op, NackCode::BadHandle).await,
+        }
+    }
+
+    async fn logfs_crc(&mut self, peer: u8, args: &[u8]) -> Result<()> {
+        let op = CommandOpcode::LogfsCrc.as_byte();
+        let Some(handle) = self.read_handle(args) else {
+            return self.send_nack(peer, op, NackCode::OutOfBounds).await;
+        };
+        let crc = {
+            let l = self.logfs.as_ref().expect("logfs enabled");
+            match l.open {
+                Some((h, idx)) if h == handle => {
+                    Some(crate::firmware::crc32(&l.files[idx].data))
+                }
+                _ => None,
+            }
+        };
+        match crc {
+            Some(c) => {
+                let mut body = vec![op];
+                body.extend_from_slice(&c.to_le_bytes());
+                self.send_message(peer, MessageType::Ack, &body).await
+            }
+            None => self.send_nack(peer, op, NackCode::BadHandle).await,
+        }
+    }
+
+    async fn logfs_close(&mut self, peer: u8, args: &[u8]) -> Result<()> {
+        let op = CommandOpcode::LogfsClose.as_byte();
+        let Some(handle) = self.read_handle(args) else {
+            return self.send_nack(peer, op, NackCode::OutOfBounds).await;
+        };
+        let ok = {
+            let l = self.logfs.as_mut().expect("logfs enabled");
+            match l.open {
+                Some((h, _)) if h == handle => {
+                    l.open = None;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if ok {
+            self.send_message(peer, MessageType::Ack, &[op]).await
+        } else {
+            self.send_nack(peer, op, NackCode::BadHandle).await
+        }
     }
 
     async fn send_nack(&self, peer: u8, rejected_opcode: u8, code: NackCode) -> Result<()> {

@@ -82,15 +82,24 @@ pub struct PullResult {
 }
 
 fn open_session(request: &LogsRequest) -> Result<Session, String> {
+    // Never guess the target board (FMEA #271 G2, same rule as flash).
+    // The old default of 0x3 is uDV — a real board, and not the log
+    // source — which also made the bootloader probe answer and mislead
+    // the operator into reflashing the wrong ECU.
+    let target_node = request.node_id.ok_or_else(|| {
+        "no node id selected: pick the target board (the microSD log \
+         service is AMS-only today) before listing or pulling logs"
+            .to_string()
+    })?;
     let interface = parse_interface(&request.interface)?;
     let backend = open_backend(interface, request.channel.as_deref(), request.bitrate)
         .map_err(|e| format!("open backend: {e}"))?;
     Ok(Session::attach(
         backend,
         SessionConfig {
-            // Node id is caller-supplied — nothing hardcodes the AMS
-            // address, so the pending 0x01 -> 0x02 move is a settings change.
-            target_node: request.node_id.unwrap_or(0x3),
+            // Caller-supplied — nothing hardcodes the AMS address, so the
+            // pending 0x01 -> 0x02 move (IFS08-CE-AMS#403) is a settings change.
+            target_node,
             keepalive_interval: Duration::from_millis(5_000),
             command_timeout: Duration::from_millis(u64::from(request.timeout_ms)),
             ..SessionConfig::default()

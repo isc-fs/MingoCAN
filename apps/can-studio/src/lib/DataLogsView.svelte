@@ -25,6 +25,7 @@
         type LogFile,
         type LogsRequest,
     } from './logs';
+    import { ROLES } from './provision';
     import type { ViewId } from './stores';
 
     interface Props {
@@ -37,6 +38,18 @@
             (settings.adapter.interface === 'virtual' ||
                 settings.adapter.channel.length > 0),
     );
+
+    // LOGFS is AMS-only today. The app-wide adapter default is 0x3 (uDV),
+    // so without surfacing the target an operator can sit here timing out
+    // against the wrong board — and our bootloader probe would even get an
+    // answer from it and tell them to reflash it. Show the target, and say
+    // plainly when it isn't the AMS.
+    const AMS_NODE_ID = 0x02;
+    const targetNode = $derived(settings.adapter.nodeId);
+    const targetRole = $derived(
+        ROLES.find((r) => r.nodeId === settings.adapter.nodeId)?.name ?? null,
+    );
+    const targetIsAms = $derived(settings.adapter.nodeId === AMS_NODE_ID);
 
     let files = $state<LogFile[] | null>(null);
     let listing = $state<boolean>(false);
@@ -160,7 +173,7 @@
             <button
                 type="button"
                 class="btn btn-primary"
-                disabled={listing || pullingIndex !== null}
+                disabled={listing || pullingIndex !== null || !targetIsAms}
                 onclick={refresh}
             >
                 {listing ? 'Listing…' : 'List logs'}
@@ -178,7 +191,35 @@
                     <span>save to</span><strong class="mono">{destDir}</strong>
                 </span>
             {/if}
+            <span class="stat">
+                <span>target</span>
+                <strong class="mono">
+                    {targetNode === null
+                        ? 'none'
+                        : `${targetRole ? targetRole.toUpperCase() + ' ' : ''}0x${targetNode
+                              .toString(16)
+                              .padStart(2, '0')}`}
+                </strong>
+            </span>
         </div>
+
+        {#if !targetIsAms}
+            <div class="banner banner-warning">
+                <strong>Target is not the AMS.</strong>
+                The microSD log service is AMS-only today, but the selected
+                node is
+                {targetNode === null
+                    ? 'unset'
+                    : `${targetRole ? targetRole.toUpperCase() : 'node'} 0x${targetNode
+                          .toString(16)
+                          .padStart(2, '0')}`}. Listing will time out (or answer
+                from the wrong board). Change the node id in
+                <button type="button" class="linkish" onclick={() => navigateTo('adapters')}>
+                    Adapters
+                </button>
+                first.
+            </div>
+        {/if}
 
         {#if error !== null}
             <div class="banner banner-danger"><strong>Error:</strong> {error}</div>
@@ -292,6 +333,16 @@
     .stat strong {
         color: var(--text);
         font-weight: 600;
+    }
+    .linkish {
+        appearance: none;
+        border: none;
+        background: none;
+        padding: 0;
+        font: inherit;
+        color: var(--accent);
+        text-decoration: underline;
+        cursor: pointer;
     }
     .placeholder-card {
         display: flex;
