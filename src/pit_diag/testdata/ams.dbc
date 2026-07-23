@@ -998,5 +998,5 @@ CM_ SG_ 1736 pec_err_ic_9_count "IC 9 = module 4 lower LTC6811. Saturates at 0xF
 VAL_ 1184 fsm_state 0 "Start" 1 "Precharge" 2 "Transition" 3 "Run" 4 "Charge" 5 "Error" ;
 VAL_ 1728 fsm_state 0 "Start" 1 "Precharge" 2 "Transition" 3 "Run" 4 "Charge" 5 "Error" ;
 VAL_ 1728 mode_locked 0 "Undecided" 1 "Car" 2 "Charger" ;
-VAL_ 1728 fault_reason 0 "None" 1 "ForceError" 2 "BmsModuleOffline" 3 "BmsStale" 4 "CellUnderVoltage" 5 "CellOverVoltage" 6 "CellUnderTemp" 7 "CellOverTemp" 8 "CurrentSensorFault" 9 "CurrentStale" 10 "CurrentOverLimit" 11 "VcuStale" 12 "FsmError" ;
+VAL_ 1728 fault_reason 0 "None" 1 "ForceError" 2 "BmsModuleOffline" 3 "BmsStale" 4 "CellUnderVoltage" 5 "CellOverVoltage" 6 "CellUnderTemp" 7 "CellOverTemp" 8 "CurrentSensorFault" 9 "CurrentStale" 10 "CurrentOverLimit" 11 "VcuStale" 12 "FsmError" 13 "TempSensorDisconnected" 14 "ChargerStale" ;
 

@@ -110,7 +110,8 @@ export type PitDiagEvent =
           pecErrorTotal: number;
           /** Latched-ERROR predicate branch (#276): "none" when
            *  healthy, else "bmsStale" / "cellOverVoltage" / … /
-           *  "fsmError" / "unknown(0xNN)". */
+           *  "fsmError" / "tempSensorDisconnected" /
+           *  "chargerStale" / "unknown(0xNN)". */
           faultReason: string;
           /** Context for faultReason: module index (bmsStale),
            *  module_online_mask (bmsModuleOffline), or 0. */

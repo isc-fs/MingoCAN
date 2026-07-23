@@ -305,6 +305,8 @@ fn fault_reason_name(r: FaultReason) -> String {
         FaultReason::CurrentOverLimit => "currentOverLimit".into(),
         FaultReason::VcuStale => "vcuStale".into(),
         FaultReason::FsmError => "fsmError".into(),
+        FaultReason::TempSensorDisconnected => "tempSensorDisconnected".into(),
+        FaultReason::ChargerStale => "chargerStale".into(),
         FaultReason::Unknown(b) => format!("unknown(0x{b:02X})"),
     }
 }
