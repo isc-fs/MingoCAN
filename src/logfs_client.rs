@@ -99,7 +99,10 @@ async fn send_retrying(session: &Session, payload: Vec<u8>, what: &str) -> Sent 
                     _ => Sent::Ack(payload),
                 };
             }
-            Ok(Response::Nack { code, .. }) if code == NackCode::BadSession => {
+            Ok(Response::Nack {
+                code: NackCode::BadSession,
+                ..
+            }) => {
                 return Sent::SessionLost;
             }
             Ok(Response::Nack {
