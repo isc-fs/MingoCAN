@@ -32,6 +32,15 @@
 //! reading. A bus error that produces a stream of error frames would
 //! manifest as a `Timeout` at the caller — consistent with how the
 //! SLCAN backend would behave under the same bus conditions.
+//!
+//! Extended (29-bit) frames are dropped two ways: a kernel filter set
+//! at [`SocketCanBackend::open`] rejects them before delivery, and
+//! [`SocketCanBackend::recv`] skips any that slip through (a filter
+//! failure, or a bit-flip that flips the EFF bit under bus load). This
+//! matters because the accumulator bus is 11-bit-only: a single stray
+//! extended frame used to surface as a fatal backend error and kill the
+//! session RX task mid-transfer, aborting a multi-minute log pull on a
+//! busy in-car bus (IFS08_HIL#94, #506).
 
 #![cfg(target_os = "linux")]
 
@@ -39,12 +48,17 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use socketcan::tokio::CanSocket;
-use socketcan::{EmbeddedFrame, Id, StandardId};
+use socketcan::{CanFilter, EmbeddedFrame, Id, SocketOptions, StandardId};
 use tracing::{debug, trace, warn};
 
 use crate::protocol::CanFrame;
 
 use super::{CanBackend, Result, TransportError};
+
+/// `CAN_EFF_FLAG` — the bit set in a SocketCAN `can_id` for an extended
+/// (29-bit) frame. Defined locally rather than pulling in a `libc`
+/// dependency for one constant.
+const CAN_EFF_FLAG: u32 = 0x8000_0000;
 
 // ---- Backend ----
 
@@ -90,6 +104,21 @@ impl SocketCanBackend {
         })?;
 
         warn_on_bitrate_mismatch(interface, expected_bitrate);
+
+        // Reject extended (29-bit) frames in the kernel: match only
+        // frames whose EFF bit is clear. The bus is 11-bit-only, and a
+        // stray extended frame (bus noise, or a bit-flip under load)
+        // otherwise reaches userspace as a fatal decode error. `recv`
+        // skips any that still slip through, so a filter failure here is
+        // a lost optimisation, not a correctness hole — warn and go on.
+        if let Err(err) = socket.set_filters(&[CanFilter::new(0, CAN_EFF_FLAG)]) {
+            warn!(
+                interface,
+                ?err,
+                "SocketCAN: could not install 11-bit-only RX filter; \
+                 falling back to per-frame filtering in recv"
+            );
+        }
 
         let description = format!("SocketCAN (iface {interface})");
         Ok(Self {
@@ -167,12 +196,26 @@ impl CanBackend for SocketCanBackend {
             let next = tokio::time::timeout(remaining, self.socket.read_frame()).await;
             match next {
                 Ok(Ok(sc_frame)) => {
-                    if let Some(data_frame) = extract_data_frame(&sc_frame) {
-                        return socketcan_data_to_our(data_frame);
+                    let Some(data_frame) = extract_data_frame(&sc_frame) else {
+                        // Remote/error frame — skip and keep reading
+                        // within the remaining deadline.
+                        continue;
+                    };
+                    match socketcan_data_to_our(data_frame) {
+                        Ok(frame) => return Ok(frame),
+                        // Extended (29-bit) or oversized (CAN-FD) frame on
+                        // an 11-bit classic bus. This is bus noise, NOT a
+                        // fatal condition: returning it as an error would
+                        // propagate up and kill the session RX task,
+                        // aborting an in-flight log pull (IFS08_HIL#94).
+                        // Drop it and keep reading, same as a remote/error
+                        // frame. The kernel filter should catch most; this
+                        // is the backstop for what it doesn't.
+                        Err(reason) => {
+                            trace!(?reason, "socketcan rx: skipping unusable frame");
+                            continue;
+                        }
                     }
-                    // Remote/error frame — skip and keep reading
-                    // within the remaining deadline.
-                    continue;
                 }
                 Ok(Err(err)) => return Err(TransportError::Io(err)),
                 Err(_elapsed) => return Err(TransportError::Timeout(timeout)),
@@ -368,6 +411,35 @@ mod tests {
             let back = socketcan_data_to_our(data).unwrap();
             assert_eq!(f, back, "roundtrip of {f:?}");
         }
+    }
+
+    #[test]
+    fn extended_data_frame_is_an_error_so_recv_skips_it() {
+        // recv() relies on socketcan_data_to_our returning Err for an
+        // extended frame — that's the signal it uses to DROP the frame
+        // rather than kill the session RX task. An extended frame is
+        // still a Data frame, so extract_data_frame hands it over; the
+        // rejection has to happen here.
+        use socketcan::ExtendedId;
+        let id = ExtendedId::new(0x1234_5678).unwrap();
+        let sc = socketcan::CanDataFrame::new(id, &[0x01, 0x02]).unwrap();
+        assert!(
+            socketcan_data_to_our(&sc).is_err(),
+            "extended frame must be rejected, not decoded"
+        );
+    }
+
+    #[test]
+    fn eff_filter_matches_only_standard_frames() {
+        // The kernel accepts a frame when (recv_can_id & mask) == can_id.
+        // With can_id=0, mask=CAN_EFF_FLAG, that's true iff the EFF bit is
+        // clear — i.e. standard frames pass, extended frames are dropped.
+        let filter_id: u32 = 0;
+        let mask: u32 = CAN_EFF_FLAG;
+        let standard_id: u32 = 0x123; // EFF bit clear
+        let extended_id: u32 = 0x123 | CAN_EFF_FLAG; // EFF bit set
+        assert_eq!(standard_id & mask, filter_id, "standard frame passes");
+        assert_ne!(extended_id & mask, filter_id, "extended frame is dropped");
     }
 
     #[test]

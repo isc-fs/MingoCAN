@@ -22,12 +22,9 @@ use tokio::time::sleep;
 use tracing::{debug, warn};
 
 use super::GlobalFlags;
-use crate::firmware::crc32;
-use crate::protocol::commands::{
-    cmd_logfs_close, cmd_logfs_crc, cmd_logfs_finalize, cmd_logfs_list, cmd_logfs_open,
-    cmd_logfs_read,
-};
-use crate::protocol::logfs::{self, LogEntry, MAX_READ_LEN};
+use crate::logfs_client;
+use crate::protocol::commands::{cmd_logfs_finalize, cmd_logfs_list};
+use crate::protocol::logfs::{self, LogEntry};
 use crate::protocol::responses::Response;
 use crate::session::{Session, SessionConfig, SessionError};
 use crate::transport::open_backend;
@@ -321,76 +318,26 @@ async fn run_list(global: &GlobalFlags) -> Result<()> {
 }
 
 /// Pull one file: OPEN → READ until EOF → CRC → CLOSE. Returns the bytes.
+///
+/// Orchestration (transport retry + mid-pull session recovery) lives in
+/// [`logfs_client::pull_file`], shared with the Studio Data logs view. The
+/// CLI is not interactive here, so it never cancels.
 async fn pull_one(session: &Session, entry: &LogEntry, verify: bool) -> Result<Vec<u8>> {
-    let body = ack_body(session, cmd_logfs_open(entry.index), "LOGFS_OPEN").await?;
-    let open = logfs::parse_open(&body).context("parsing LOGFS_OPEN response")?;
-    debug!(
-        handle = open.handle,
-        size = open.size,
-        crc_deferred = open.crc_deferred(),
-        "opened log"
-    );
-
-    let mut data: Vec<u8> = Vec::with_capacity(open.size as usize);
-    let mut offset = 0u32;
-    loop {
-        let body = ack_body_retrying(
-            session,
-            cmd_logfs_read(open.handle, offset, MAX_READ_LEN),
-            "LOGFS_READ",
-        )
-        .await?;
-        let out = logfs::parse_read(MAX_READ_LEN, &body);
-        data.extend_from_slice(&out.data);
-        offset = offset.saturating_add(out.data.len() as u32);
-
-        // Progress on one rewritten line; size may be 0 if unknown.
-        if open.size > 0 {
-            let pct = (u64::from(offset) * 100 / u64::from(open.size)).min(100);
-            print!("\r  {} … {pct:>3}% ({offset}/{} B)", entry.name, open.size);
+    let name = entry.name.clone();
+    let on_progress = move |received: u32, total: u32| {
+        if total > 0 {
+            let pct = (u64::from(received) * 100 / u64::from(total)).min(100);
+            print!("\r  {name} … {pct:>3}% ({received}/{total} B)");
             let _ = std::io::stdout().flush();
         }
-
-        if out.eof {
-            break;
-        }
-        if out.data.is_empty() {
-            bail!("LOGFS_READ returned no data before EOF at offset {offset}");
-        }
-    }
+    };
+    let result = logfs_client::pull_file(session, entry.index, verify, on_progress, || false).await;
     println!();
-
-    if open.size > 0 && data.len() as u32 != open.size {
-        bail!(
-            "size mismatch for {}: OPEN said {} B, transfer produced {} B",
-            entry.name,
-            open.size,
-            data.len()
-        );
-    }
-
+    let out = result.map_err(|e| anyhow::anyhow!("pulling {}: {e}", entry.name))?;
     if verify {
-        // The firmware maintains a running CRC while logging and seals it
-        // with the file, so OPEN carries a real crc32 — no extra round
-        // trip needed. Only fall back to LOGFS_CRC if it declined.
-        let want = if open.crc_deferred() {
-            let body = ack_body(session, cmd_logfs_crc(open.handle), "LOGFS_CRC").await?;
-            logfs::parse_crc(&body).context("parsing LOGFS_CRC response")?
-        } else {
-            open.crc32
-        };
-        let got = crc32(&data);
-        if want != got {
-            bail!(
-                "CRC mismatch for {}: node says 0x{want:08X}, received bytes are 0x{got:08X}",
-                entry.name
-            );
-        }
-        debug!(crc = format!("0x{want:08X}"), "crc verified");
+        debug!("crc verified");
     }
-
-    let _ = ack_body(session, cmd_logfs_close(open.handle), "LOGFS_CLOSE").await?;
-    Ok(data)
+    Ok(out.data)
 }
 
 async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {

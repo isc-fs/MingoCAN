@@ -145,6 +145,11 @@ pub struct LogfsWire {
     /// multi-MB pull is thousands of round trips, and one dropped frame
     /// used to discard the whole transfer.
     pub drop_first_reads: u8,
+    /// After this many served reads, drop the diag session **once** so the
+    /// next read NACKs `BAD_SESSION` — models a busy-bus session timeout
+    /// mid-pull. Exercises the host's re-CONNECT + re-OPEN + resume-from-
+    /// offset recovery (IFS08_HIL#94). `0` = never.
+    pub drop_session_after_reads: u8,
 }
 
 impl LogfsWire {
@@ -160,6 +165,7 @@ impl LogfsWire {
         entries_per_page: 2,
         app_ctrl_only: true,
         drop_first_reads: 0,
+        drop_session_after_reads: 0,
     };
 
     /// The pre-#452 shape, kept so one test can prove the host *rejects*
@@ -172,6 +178,7 @@ impl LogfsWire {
         entries_per_page: 2,
         app_ctrl_only: true,
         drop_first_reads: 0,
+        drop_session_after_reads: 0,
     };
 }
 
@@ -242,6 +249,8 @@ struct LogfsState {
     open: Option<(u16, usize)>,
     next_handle: u16,
     reads_dropped: u8,
+    reads_served: u32,
+    session_dropped_once: bool,
     /// The log still being written. FINALIZE seals it into `files`;
     /// until then it is not listable, which is the whole reason the
     /// opcode exists.
@@ -284,6 +293,8 @@ impl StubDevice {
             open: None,
             next_handle: 1,
             reads_dropped: 0,
+            reads_served: 0,
+            session_dropped_once: false,
             active: None,
         });
         self
@@ -1382,6 +1393,27 @@ impl StubDevice {
                 return Ok(());
             }
         }
+        // Busy-bus session-drop injection: once, after N served reads, drop
+        // the session and NACK BAD_SESSION so the host must re-CONNECT +
+        // re-OPEN and resume. Also invalidate the open handle, exactly as
+        // the firmware does when a session ends.
+        let drop_session = {
+            let l = self.logfs.as_mut().expect("logfs enabled");
+            if l.wire.drop_session_after_reads > 0
+                && !l.session_dropped_once
+                && l.reads_served >= u32::from(l.wire.drop_session_after_reads)
+            {
+                l.session_dropped_once = true;
+                l.open = None;
+                true
+            } else {
+                false
+            }
+        };
+        if drop_session {
+            self.session_active = false;
+            return self.send_nack(peer, op, NackCode::BadSession).await;
+        }
         let hlen = self.logfs_handle_len();
         if args.len() < hlen + 6 {
             return self.send_nack(peer, op, NackCode::OutOfBounds).await;
@@ -1408,6 +1440,7 @@ impl StubDevice {
         match slice {
             // Short read (including empty) is the EOF signal.
             Some(bytes) => {
+                self.logfs.as_mut().expect("logfs enabled").reads_served += 1;
                 let mut body = vec![op];
                 body.extend_from_slice(&bytes);
                 self.send_message(peer, MessageType::Ack, &body).await
