@@ -411,3 +411,54 @@ async fn logfs_before_connect_is_refused() {
     let _ = cancel_tx.send(());
     let _ = handle.await;
 }
+
+// ---- robustness: mid-pull recovery (IFS08_HIL#94, #506) -----------
+
+#[tokio::test]
+async fn pull_recovers_from_a_mid_transfer_session_drop() {
+    use can_flasher::logfs_client;
+
+    // The node drops the diag session once, part-way through the pull —
+    // exactly what a busy shared bus does when a keepalive READ is lost and
+    // the firmware's idle timeout fires. The next READ NACKs BAD_SESSION and
+    // the open handle is gone. pull_file must re-CONNECT, re-OPEN, and resume
+    // from the same offset — the reassembled file must still be byte-exact.
+    let bus = VirtualBus::new();
+    let host = bus.host_backend();
+    let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+    drop(bus);
+
+    let payload: Vec<u8> = (0..1300u32).map(|i| i as u8).collect();
+    let wire = LogfsWire {
+        drop_session_after_reads: 1, // drop right after the first chunk
+        ..LogfsWire::SETTLED
+    };
+    let stub = StubDevice::new(device, STUB_NODE).with_logfs(
+        vec![StubLogFile::new("LOG0001.CSV", payload.clone(), 1)],
+        wire,
+    );
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let _ = stub.run(cancel_rx).await;
+    });
+
+    let session = Session::attach(
+        Box::new(host),
+        SessionConfig {
+            target_node: STUB_NODE,
+            keepalive_interval: Duration::from_millis(5_000),
+            command_timeout: Duration::from_millis(150),
+            ..SessionConfig::default()
+        },
+    );
+    session.app_connect().await.expect("initial app CONNECT");
+
+    let result = logfs_client::pull_file(&session, 0, true, |_, _| {}, || false)
+        .await
+        .expect("pull must recover from the session drop");
+    assert_eq!(result.data, payload, "resumed pull is byte-exact");
+    assert!(result.crc_verified, "crc verified after recovery");
+
+    let _ = cancel_tx.send(());
+    let _ = handle.await;
+}
