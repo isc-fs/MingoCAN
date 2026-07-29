@@ -298,6 +298,13 @@ pub enum FaultReason {
     VcuStale = 11,
     /// FSM-driven Error path — precharge timeout / TSMS / DASH_CHG drop.
     FsmError = 12,
+    /// A cell-temperature NTC read as open-circuit (disconnected sensor).
+    TempSensorDisconnected = 13,
+    /// Charger `0x101` heartbeat went stale while committed to Charger
+    /// mode — the WarioCharger was unplugged mid-charge, so the AMS
+    /// faults to Error and opens the AIRs (mirror of `VcuStale` for the
+    /// charge side; IFS08-CE-AMS#486). Only fires in Charger mode.
+    ChargerStale = 14,
     /// Any reason byte the firmware emits that this host build
     /// doesn't recognise — a forward-compat catch-all.
     Unknown(u8),
@@ -319,6 +326,8 @@ impl FaultReason {
             10 => Self::CurrentOverLimit,
             11 => Self::VcuStale,
             12 => Self::FsmError,
+            13 => Self::TempSensorDisconnected,
+            14 => Self::ChargerStale,
             other => Self::Unknown(other),
         }
     }
@@ -1185,9 +1194,9 @@ mod tests {
 
     #[test]
     fn fsm_status_unknown_fault_reason_byte() {
-        // A reason byte past the documented 0..=12 range surfaces as
-        // Unknown rather than silently mapping to None — forward-compat
-        // with a firmware that adds a 13th predicate.
+        // A reason byte past the documented range surfaces as Unknown
+        // rather than silently mapping to None — forward-compat with a
+        // firmware that adds a predicate this build doesn't know.
         let frame = CanFrame::new(
             AMS_FSM_STATUS_ID,
             &[0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00],
@@ -1198,6 +1207,28 @@ mod tests {
                 assert_eq!(f.fault_reason, FaultReason::Unknown(0x63));
             }
             other => panic!("expected FsmStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_temp_sensor_disconnected_and_charger_stale() {
+        // Append-only additions to the firmware FaultReason enum
+        // (IFS08-CE-AMS: 13 already on dev, 14 from #486). Both used to
+        // fall through to Unknown; pin them so a renumber on either side
+        // trips here.
+        for (byte, want) in [
+            (13u8, FaultReason::TempSensorDisconnected),
+            (14u8, FaultReason::ChargerStale),
+        ] {
+            let frame = CanFrame::new(
+                AMS_FSM_STATUS_ID,
+                &[0x05, 0x00, 0x00, 0x00, 0x00, 0x00, byte, 0x00],
+            )
+            .unwrap();
+            match decode_frame(&frame).unwrap() {
+                PitDiagFrame::FsmStatus(f) => assert_eq!(f.fault_reason, want),
+                other => panic!("expected FsmStatus, got {other:?}"),
+            }
         }
     }
 
