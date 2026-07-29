@@ -227,6 +227,10 @@ export type PitDiagEvent =
           startButton: boolean;
           /** DV (driverless) drive latched this cycle (#109). */
           dvMode: boolean;
+          /** Sticky since boot: a CAN frame was dropped by a full TX queue
+           *  (#127). Never clears short of a reset. The 0x100 heartbeat the
+           *  AMS watchdogs to hold the AIRs closed rides that same queue. */
+          txDropped: boolean;
           torquePct: number;
           vCellMinMv: number;
           torqueCmd: number;

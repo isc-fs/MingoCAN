@@ -802,7 +802,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
         F::Ack { enabled } => eprintln!("{prefix} ack enabled={enabled}"),
         F::Status(s) => println!(
             "{prefix} status fsm={:?} inv={:?} torque={}% vcell_min={}mV tcmd={} \
-             [ev23={} t11={} rtds={} preok={} start={} dv={}]",
+             [ev23={} t11={} rtds={} preok={} start={} dv={}]{}",
             s.fsm_state,
             s.inv_state,
             s.torque_pct,
@@ -814,6 +814,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             s.ok_precharge as u8,
             s.start_button as u8,
             s.dv_mode as u8,
+            if s.tx_dropped { " TX-DROPPED" } else { "" },
         ),
         F::Pedals(p) => println!(
             "{prefix} pedals apps1={}({}%) apps2={}({}%) brake_raw={}",
@@ -885,7 +886,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             println!(r#"{{"tsMs":{ts_ms},"kind":"ack","enabled":{enabled}}}"#);
         }
         F::Status(s) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuStatus","fsmState":"{:?}","invState":"{:?}","ev23":{},"t11_8_9":{},"rtdsActive":{},"okPrecharge":{},"startButton":{},"dvMode":{},"torquePct":{},"vCellMinMv":{},"torqueCmd":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuStatus","fsmState":"{:?}","invState":"{:?}","ev23":{},"t11_8_9":{},"rtdsActive":{},"okPrecharge":{},"startButton":{},"dvMode":{},"txDropped":{},"torquePct":{},"vCellMinMv":{},"torqueCmd":{}}}"#,
             s.fsm_state,
             s.inv_state,
             s.ev_2_3,
@@ -894,6 +895,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             s.ok_precharge,
             s.start_button,
             s.dv_mode,
+            s.tx_dropped,
             s.torque_pct,
             s.v_cell_min_mv,
             s.torque_cmd,
