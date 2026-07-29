@@ -311,6 +311,11 @@ pub struct EcuStatusFrame {
     pub start_button: bool,
     /// Byte 2 bit 5 — DV (driverless) drive latched this cycle (#109).
     pub dv_mode: bool,
+    /// Byte 2 bit 6 — **sticky**: at least one CAN frame has been dropped by a
+    /// full TX queue since boot (IFS08-CE-ECU #127). Never clears short of a
+    /// reset. A safety cyclic may have been lost — the `0x100` heartbeat the
+    /// AMS watchdogs at 200 ms to hold the AIRs closed rides that same queue.
+    pub tx_dropped: bool,
     /// Commanded torque, percent.
     pub torque_pct: u8,
     /// Minimum cell voltage seen by the AMS, millivolts (big-endian).
@@ -531,6 +536,7 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 ok_precharge: (flags & 0x08) != 0,
                 start_button: (flags & 0x10) != 0,
                 dv_mode: (flags & 0x20) != 0,
+                tx_dropped: (flags & 0x40) != 0,
                 torque_pct: p[3],
                 v_cell_min_mv: u16::from_be_bytes([p[4], p[5]]),
                 torque_cmd: i16::from_be_bytes([p[6], p[7]]),
@@ -943,7 +949,29 @@ mod tests {
                 assert!(s.dv_mode);
                 assert!(s.start_button);
                 assert!(!s.rtds_active);
+                assert!(!s.tx_dropped);
             }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_carries_tx_dropped() {
+        // byte2 bit 6 (#127) — sticky since boot. It sits one bit above
+        // dv_mode, so decoding the flags byte one bit short misses it
+        // entirely, which is how it went unnoticed until #528's follow-up.
+        let p = [5, 4, 0x40, 0, 0, 0, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_STATUS_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Status(s) => {
+                assert!(s.tx_dropped);
+                assert!(!s.dv_mode, "bit 5 must not bleed into bit 6");
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+        // And the neighbouring bit stays independent.
+        let p = [5, 4, 0x20, 0, 0, 0, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_STATUS_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Status(s) => assert!(s.dv_mode && !s.tx_dropped),
             other => panic!("expected Status, got {other:?}"),
         }
     }
