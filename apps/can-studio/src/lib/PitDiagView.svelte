@@ -183,6 +183,8 @@
         invError: number;
         invErrorName: string;
         demPresent: boolean;
+        invModeCmd: number;
+        invModeCmdName: string;
     }
     interface EcuFwSnapshot {
         versionMajor: number;
@@ -202,11 +204,16 @@
         taskControl: boolean;
         taskCanRx: boolean;
         taskCanTx: boolean;
+        taskTelemetry: boolean;
         taskDiag: boolean;
         resetCause: string;
         uptimeS: number;
         lastFault: number;
         lastFaultName: string;
+        stubNoAms: boolean;
+        stubNoInverter: boolean;
+        stubStart: boolean;
+        stubBrake: boolean;
     }
     interface EcuDvSnapshot {
         dvR2dReq: boolean;
@@ -514,11 +521,30 @@
         if (state === 'amsError' || state.startsWith('unknown')) return 'danger';
         return 'info';
     }
-    // Inverter state → tone. "ready" good, "standby" neutral.
-    function ecuInvTone(state: string): 'success' | 'info' | 'danger' {
-        if (state === 'ready') return 'success';
+    // Inverter state → tone. Driving states good, faults loud, the
+    // not-coming-up states (off / shutdown) warn. "standby" is neutral.
+    function ecuInvTone(state: string): 'success' | 'info' | 'warning' | 'danger' {
+        if (state === 'ready' || state === 'torqueEnable') return 'success';
+        if (state === 'softFault' || state === 'hardFault') return 'danger';
         if (state.startsWith('unknown')) return 'danger';
+        if (state === 'off' || state === 'shutdown') return 'warning';
         return 'info';
+    }
+
+    // Commanded-mode pill text — "cmd: Fault (0x13)". Pair it with the
+    // reported state above: that's what separates "the ECU is commanding
+    // the wrong word" from "the inverter is refusing a correct one" (#528).
+    function ecuInvCmdText(cmd: number, name: string): string {
+        const hex = `0x${cmd.toString(16).toUpperCase().padStart(2, '0')}`;
+        return name === 'none' ? 'cmd: none' : `cmd: ${name} (${hex})`;
+    }
+
+    // DEM fault pill text. A code the W90 §9.2.3 table doesn't cover is
+    // labelled explicitly — a bare "code 0x16" reads as a broken lookup,
+    // and that cost a real debug detour (#528).
+    function ecuDemText(code: number, name: string): string {
+        const hex = `0x${code.toString(16).toUpperCase().padStart(2, '0')}`;
+        return name === 'unknown' ? `${hex} (undocumented)` : name;
     }
 
     // Inverter-temp sentinel: 205 °C means the sensor is disconnected.
@@ -865,6 +891,8 @@
                     invError: event.invError,
                     invErrorName: event.invErrorName,
                     demPresent: event.demPresent,
+                    invModeCmd: event.invModeCmd,
+                    invModeCmdName: event.invModeCmdName,
                 };
                 framesThisScan += 1;
             } else if (event.kind === 'ecuInverterTemps') {
@@ -890,11 +918,16 @@
                     taskControl: event.taskControl,
                     taskCanRx: event.taskCanRx,
                     taskCanTx: event.taskCanTx,
+                    taskTelemetry: event.taskTelemetry,
                     taskDiag: event.taskDiag,
                     resetCause: event.resetCause,
                     uptimeS: event.uptimeS,
                     lastFault: event.lastFault,
                     lastFaultName: event.lastFaultName,
+                    stubNoAms: event.stubNoAms,
+                    stubNoInverter: event.stubNoInverter,
+                    stubStart: event.stubStart,
+                    stubBrake: event.stubBrake,
                 };
                 // 0x704 is 1 Hz, not part of the 100 ms cyclic scan —
                 // don't count it toward frames/scan.
@@ -1871,24 +1904,36 @@
                     <h3 class="card-h">Inverter</h3>
                     {#if ecuInverter !== null}
                         {@const iv = ecuInverter}
-                        <!-- App_State + named DEM fault + active/latched (#484). -->
+                        <!-- Reported App_State + commanded mode (#528) + named
+                             DEM fault + active/latched (#484). The state /
+                             cmd pair is the diagnostic: same word on both
+                             sides means the inverter is refusing us. -->
                         <div class="badge-row">
                             {#if ecuStatus !== null}
-                                <span class="pill pill-{ecuInvTone(ecuStatus.invState)}">
+                                <span
+                                    class="pill pill-{ecuInvTone(ecuStatus.invState)}"
+                                    title="What the inverter REPORTS (0x700 inv_state)"
+                                >
                                     state: {ecuStatus.invState}
                                 </span>
                             {/if}
+                            <span
+                                class="pill pill-{iv.invModeCmd === 0 ? 'info' : 'warning'}"
+                                title="What the ECU is COMMANDING on 0x360 right now (0x702 inv_mode_cmd). Compare with the reported state: if the ECU is commanding a fault reset and the inverter keeps reporting the fault, the inverter is refusing — not the ECU sending the wrong word."
+                            >
+                                {ecuInvCmdText(iv.invModeCmd, iv.invModeCmdName)}
+                            </span>
                             <span
                                 class="pill pill-{iv.invError === 0
                                     ? 'success'
                                     : iv.demPresent
                                       ? 'danger'
                                       : 'warning'}"
-                                title="Inverter DEM fault (0x702 inv_error) — EPowerLabs W90 code {iv.invError}"
+                                title={iv.invErrorName === 'unknown'
+                                    ? `Inverter DEM code ${iv.invError} — outside the EPowerLabs W90 §9.2.3 table (1–15), which documents no name for it. Forwarded verbatim; not a decode failure.`
+                                    : `Inverter DEM fault (0x702 inv_error) — EPowerLabs W90 code ${iv.invError}`}
                             >
-                                {iv.invErrorName === 'unknown'
-                                    ? `code 0x${iv.invError.toString(16).toUpperCase().padStart(2, '0')}`
-                                    : iv.invErrorName}
+                                {ecuDemText(iv.invError, iv.invErrorName)}
                             </span>
                             {#if iv.invError !== 0}
                                 <span class="pill pill-{iv.demPresent ? 'danger' : 'info'}">
@@ -1955,8 +2000,31 @@
                                 </span>
                                 <span class="flag" class:on={ecuHealth.taskCanRx}>CAN-RX</span>
                                 <span class="flag" class:on={ecuHealth.taskCanTx}>CAN-TX</span>
+                                <span class="flag" class:on={ecuHealth.taskTelemetry}>
+                                    Telemetry
+                                </span>
                                 <span class="flag" class:on={ecuHealth.taskDiag}>Diag</span>
                             </div>
+                            <!-- Bench stubs (#528). Hidden entirely on a flight
+                                 build, where every announce bit is clear. -->
+                            {#if ecuHealth.stubNoAms || ecuHealth.stubNoInverter || ecuHealth.stubStart || ecuHealth.stubBrake}
+                                <div class="badge-row">
+                                    <span
+                                        class="pill pill-warning"
+                                        title="The ECU is announcing bench stubs (0x704) — it is faking these inputs. Never expected on the car."
+                                    >
+                                        stubs:
+                                        {[
+                                            ecuHealth.stubNoAms ? 'no-AMS' : null,
+                                            ecuHealth.stubNoInverter ? 'no-inverter' : null,
+                                            ecuHealth.stubStart ? 'start' : null,
+                                            ecuHealth.stubBrake ? 'brake' : null,
+                                        ]
+                                            .filter((s) => s !== null)
+                                            .join(', ')}
+                                    </span>
+                                </div>
+                            {/if}
                             <div class="reads">
                                 <span class="stat">
                                     <span>free heap</span>

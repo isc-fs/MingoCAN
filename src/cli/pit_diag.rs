@@ -756,6 +756,45 @@ fn print_record_json(ts_ms: u64, record: &PitDiagFrame) {
 
 // ---- ECU output formatting --------------------------------------
 
+/// Text for the inverter `err=` field. A code the W90 §9.2.3 table doesn't
+/// cover is labelled *undocumented* rather than left as a bare number, so it
+/// can't be mistaken for a failed lookup (#528).
+fn ecu_dem_text(code: u8) -> String {
+    let name = ecu::dem_fault_name(code);
+    if name == "unknown" {
+        format!("0x{code:02X} ({})", ecu::DEM_UNDOCUMENTED_NOTE)
+    } else {
+        format!("{code} ({name})")
+    }
+}
+
+/// Text for the commanded mode word — `Fault(0x13)`. Read it against the
+/// reported `inv=` on the status line: commanding-X / reporting-Y is what
+/// separates an ECU sending the wrong word from an inverter refusing a
+/// correct one (#528).
+fn ecu_inv_mode_text(mode: u8) -> String {
+    format!("{}(0x{mode:02X})", ecu::inv_mode_cmd_name(mode))
+}
+
+/// Bench-stub announces from `0x704`, as a trailing ` stubs[…]` group.
+/// Empty on a flight build, where every bit is clear.
+fn ecu_stub_text(h: &ecu::EcuHealthFrame) -> String {
+    let stubs: Vec<&str> = [
+        (h.stub_no_ams, "no_ams"),
+        (h.stub_no_inverter, "no_inverter"),
+        (h.stub_start, "start"),
+        (h.stub_brake, "brake"),
+    ]
+    .into_iter()
+    .filter_map(|(on, name)| on.then_some(name))
+    .collect();
+    if stubs.is_empty() {
+        String::new()
+    } else {
+        format!(" stubs[{}]", stubs.join(","))
+    }
+}
+
 fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
     use ecu::EcuPitDiagFrame as F;
     let prefix = format!("[+{:>7.3}s]", (ts_ms as f64) / 1000.0);
@@ -786,12 +825,12 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             b.brake_pct,
         ),
         F::Inverter(i) => println!(
-            "{prefix} inv   vdc={}V rpm={} err={} ({}) {}",
+            "{prefix} inv   vdc={}V rpm={} err={} {} cmd={}",
             i.dc_bus_voltage,
             i.inv_rpm,
-            i.inv_error,
-            ecu::dem_fault_name(i.inv_error),
+            ecu_dem_text(i.inv_error),
             if i.dem_present { "active" } else { "latched" },
+            ecu_inv_mode_text(i.inv_mode_cmd),
         ),
         F::InverterTemps(t) => println!(
             "{prefix} temps board={}°C pwrstg={}°C motor1={}°C motor2={}°C",
@@ -808,17 +847,19 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             f.git_hash[3],
         ),
         F::Health(h) => println!(
-            "{prefix} health heap={}/{} tasks[ctrl={} rx={} tx={} diag={}] reset={:?} \
-             uptime={}s last_fault=0x{:02X}",
+            "{prefix} health heap={}/{} tasks[ctrl={} rx={} tx={} tlm={} diag={}] reset={:?} \
+             uptime={}s last_fault=0x{:02X}{}",
             h.free_heap,
             h.min_free_heap,
             h.task_control as u8,
             h.task_can_rx as u8,
             h.task_can_tx as u8,
+            h.task_telemetry as u8,
             h.task_diag as u8,
             h.reset_cause,
             h.uptime_s,
             h.last_fault,
+            ecu_stub_text(h),
         ),
         F::Dv(d) => println!(
             "{prefix} dv    mode_torque={}% rpm={} [r2d_req={} cmd_fresh={} ts={} brk_lim={} r2d_ok={}]",
@@ -866,12 +907,14 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             b.brake_pressure_dbar, b.brake_pct,
         ),
         F::Inverter(i) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuInverter","dcBusVoltage":{},"invRpm":{},"invError":{},"invErrorName":"{}","demPresent":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuInverter","dcBusVoltage":{},"invRpm":{},"invError":{},"invErrorName":"{}","demPresent":{},"invModeCmd":{},"invModeCmdName":"{}"}}"#,
             i.dc_bus_voltage,
             i.inv_rpm,
             i.inv_error,
             ecu::dem_fault_name(i.inv_error),
             i.dem_present,
+            i.inv_mode_cmd,
+            ecu::inv_mode_cmd_name(i.inv_mode_cmd),
         ),
         F::InverterTemps(t) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"ecuInverterTemps","boardDegc":{},"pwrstgDegc":{},"motor1Degc":{},"motor2Degc":{}}}"#,
@@ -888,16 +931,21 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             f.git_hash[3],
         ),
         F::Health(h) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskDiag":{},"resetCause":"{:?}","uptimeS":{},"lastFault":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskTelemetry":{},"taskDiag":{},"resetCause":"{:?}","uptimeS":{},"lastFault":{},"stubNoAms":{},"stubNoInverter":{},"stubStart":{},"stubBrake":{}}}"#,
             h.free_heap,
             h.min_free_heap,
             h.task_control,
             h.task_can_rx,
             h.task_can_tx,
+            h.task_telemetry,
             h.task_diag,
             h.reset_cause,
             h.uptime_s,
             h.last_fault,
+            h.stub_no_ams,
+            h.stub_no_inverter,
+            h.stub_start,
+            h.stub_brake,
         ),
         F::Dv(d) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"ecuDv","dvR2dReq":{},"dvCmdFresh":{},"tsActive":{},"brakeOverLimit":{},"r2dConfirm":{},"dvTorquePct":{},"motorRpmMech":{}}}"#,
@@ -1147,7 +1195,49 @@ async fn arm(backend: &dyn CanBackend, profile: Profile, enable: bool) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_profile, Profile};
+    use super::{ecu_dem_text, ecu_inv_mode_text, ecu_stub_text, parse_profile, Profile};
+    use crate::pit_diag::ecu;
+
+    #[test]
+    fn dem_text_marks_codes_the_w90_table_does_not_cover() {
+        assert_eq!(ecu_dem_text(2), "2 (Undervoltage)");
+        // Code 22 is real on the car and genuinely absent from §9.2.3 —
+        // it must not read as a failed lookup (#528).
+        let undocumented = ecu_dem_text(22);
+        assert!(undocumented.starts_with("0x16 ("), "{undocumented}");
+        assert!(undocumented.contains("undocumented"), "{undocumented}");
+    }
+
+    #[test]
+    fn inv_mode_text_names_the_commanded_word() {
+        assert_eq!(ecu_inv_mode_text(ecu::INV_MODE_FAULT), "Fault(0x13)");
+        assert_eq!(ecu_inv_mode_text(ecu::INV_MODE_READY), "Ready(0x04)");
+        assert_eq!(ecu_inv_mode_text(ecu::INV_MODE_NONE), "none(0x00)");
+    }
+
+    #[test]
+    fn stub_text_is_empty_on_a_flight_build() {
+        let mut h = ecu::EcuHealthFrame {
+            free_heap: 0,
+            min_free_heap: 0,
+            task_control: true,
+            task_can_rx: true,
+            task_can_tx: true,
+            task_telemetry: true,
+            task_diag: true,
+            stub_no_ams: false,
+            stub_no_inverter: false,
+            stub_start: false,
+            stub_brake: false,
+            reset_cause: ecu::EcuResetCause::PowerOn,
+            uptime_s: 15,
+            last_fault: 0,
+        };
+        assert_eq!(ecu_stub_text(&h), "");
+        h.stub_no_ams = true;
+        h.stub_brake = true;
+        assert_eq!(ecu_stub_text(&h), " stubs[no_ams,brake]");
+    }
 
     #[test]
     fn parse_profile_accepts_ams_ecu_udv() {
