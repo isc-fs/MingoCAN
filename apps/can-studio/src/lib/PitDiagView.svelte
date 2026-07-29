@@ -162,6 +162,7 @@
         okPrecharge: boolean;
         startButton: boolean;
         dvMode: boolean;
+        txDropped: boolean;
         torquePct: number;
         vCellMinMv: number;
         torqueCmd: number;
@@ -864,6 +865,7 @@
                     okPrecharge: event.okPrecharge,
                     startButton: event.startButton,
                     dvMode: event.dvMode,
+                    txDropped: event.txDropped,
                     torquePct: event.torquePct,
                     vCellMinMv: event.vCellMinMv,
                     torqueCmd: event.torqueCmd,
@@ -1804,6 +1806,16 @@
                             >
                                 {ecuStatus.dvMode ? 'driverless' : 'manual'}
                             </span>
+                            <!-- Sticky TX-drop announce (#127). Absent on a
+                                 healthy board, so only show it when set. -->
+                            {#if ecuStatus.txDropped}
+                                <span
+                                    class="pill pill-danger"
+                                    title="Sticky since boot (0x700 tx_dropped): the ECU dropped at least one CAN frame to a full TX queue. The 0x100 heartbeat the AMS watchdogs at 200 ms to hold the AIRs closed rides that same queue, so a lost cyclic is a safety-relevant event. Does not clear without a reset."
+                                >
+                                    TX dropped
+                                </span>
+                            {/if}
                         </div>
                         <div class="flags">
                             <span class="flag" class:on={ecuStatus.ev23}>EV 2.3</span>
