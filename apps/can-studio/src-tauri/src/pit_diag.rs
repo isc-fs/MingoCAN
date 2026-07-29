@@ -207,8 +207,13 @@ fn ecu_fsm_state_name(s: EcuFsmState) -> String {
 /// firmware `VAL_` table.
 fn ecu_inv_state_name(s: EcuInvState) -> String {
     match s {
+        EcuInvState::Off => "off".into(),
         EcuInvState::Standby => "standby".into(),
         EcuInvState::Ready => "ready".into(),
+        EcuInvState::TorqueEnable => "torqueEnable".into(),
+        EcuInvState::SoftFault => "softFault".into(),
+        EcuInvState::HardFault => "hardFault".into(),
+        EcuInvState::Shutdown => "shutdown".into(),
         EcuInvState::Unknown(b) => format!("unknown(0x{b:02X})"),
     }
 }
@@ -305,6 +310,8 @@ fn fault_reason_name(r: FaultReason) -> String {
         FaultReason::CurrentOverLimit => "currentOverLimit".into(),
         FaultReason::VcuStale => "vcuStale".into(),
         FaultReason::FsmError => "fsmError".into(),
+        FaultReason::TempSensorDisconnected => "tempSensorDisconnected".into(),
+        FaultReason::ChargerStale => "chargerStale".into(),
         FaultReason::Unknown(b) => format!("unknown(0x{b:02X})"),
     }
 }
@@ -460,13 +467,17 @@ pub enum PitDiagEvent {
         brake_pct: u8,
     },
     /// ECU `0x702` — inverter DC-bus voltage, RPM (signed), DEM fault code +
-    /// decoded name + active/latched bit (#484).
+    /// decoded name + active/latched bit (#484), and the mode word the ECU is
+    /// commanding on `0x360` (#528). Everything but `inv_mode_cmd` is what the
+    /// inverter reports; pairing the two is the diagnostic.
     EcuInverter {
         dc_bus_voltage: u16,
         inv_rpm: i32,
         inv_error: u8,
         inv_error_name: String,
         dem_present: bool,
+        inv_mode_cmd: u8,
+        inv_mode_cmd_name: String,
     },
     /// ECU `0x706` — inverter temperatures (°C; 205 = sensor disconnected).
     EcuInverterTemps {
@@ -482,18 +493,24 @@ pub enum PitDiagEvent {
         version_patch: u8,
         git_hash: [u8; 4],
     },
-    /// ECU `0x704` — firmware health (heap, task liveness, reset cause, faults).
+    /// ECU `0x704` — firmware health (heap, task liveness, reset cause, faults)
+    /// plus the bench-stub announces (#528; all clear on a flight build).
     EcuHealth {
         free_heap: u16,
         min_free_heap: u16,
         task_control: bool,
         task_can_rx: bool,
         task_can_tx: bool,
+        task_telemetry: bool,
         task_diag: bool,
         reset_cause: String,
         uptime_s: u8,
         last_fault: u8,
         last_fault_name: String,
+        stub_no_ams: bool,
+        stub_no_inverter: bool,
+        stub_start: bool,
+        stub_brake: bool,
     },
     /// ECU `0x707` — DV (driverless) integration view (#109). The `dv_mode`
     /// latch itself rides `EcuStatus`; this carries the handshake around it.
@@ -825,12 +842,15 @@ impl PitDiagEvent {
                 inv_rpm,
                 inv_error,
                 dem_present,
+                inv_mode_cmd,
             }) => Self::EcuInverter {
                 dc_bus_voltage,
                 inv_rpm,
                 inv_error,
                 inv_error_name: ecu::dem_fault_name(inv_error).to_string(),
                 dem_present,
+                inv_mode_cmd,
+                inv_mode_cmd_name: ecu::inv_mode_cmd_name(inv_mode_cmd).to_string(),
             },
             EcuPitDiagFrame::InverterTemps(EcuInverterTempsFrame {
                 board_degc,
@@ -860,21 +880,31 @@ impl PitDiagEvent {
                 task_control,
                 task_can_rx,
                 task_can_tx,
+                task_telemetry,
                 task_diag,
                 reset_cause,
                 uptime_s,
                 last_fault,
+                stub_no_ams,
+                stub_no_inverter,
+                stub_start,
+                stub_brake,
             }) => Self::EcuHealth {
                 free_heap,
                 min_free_heap,
                 task_control,
                 task_can_rx,
                 task_can_tx,
+                task_telemetry,
                 task_diag,
                 reset_cause: ecu_reset_cause_name(reset_cause),
                 uptime_s,
                 last_fault,
                 last_fault_name: ecu_last_fault_name(last_fault),
+                stub_no_ams,
+                stub_no_inverter,
+                stub_start,
+                stub_brake,
             },
             EcuPitDiagFrame::Dv(EcuDvFrame {
                 dv_r2d_req,

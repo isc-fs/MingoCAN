@@ -328,6 +328,8 @@ fn fault_reason_value_table_matches_decoder() {
         (10, "CurrentOverLimit"),
         (11, "VcuStale"),
         (12, "FsmError"),
+        (13, "TempSensorDisconnected"),
+        (14, "ChargerStale"),
     ]
     .iter()
     .map(|(i, s)| (*i, s.to_string()))

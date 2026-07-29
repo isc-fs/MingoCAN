@@ -110,7 +110,8 @@ export type PitDiagEvent =
           pecErrorTotal: number;
           /** Latched-ERROR predicate branch (#276): "none" when
            *  healthy, else "bmsStale" / "cellOverVoltage" / … /
-           *  "fsmError" / "unknown(0xNN)". */
+           *  "fsmError" / "tempSensorDisconnected" /
+           *  "chargerStale" / "unknown(0xNN)". */
           faultReason: string;
           /** Context for faultReason: module index (bmsStale),
            *  module_online_mask (bmsModuleOffline), or 0. */
@@ -208,7 +209,11 @@ export type PitDiagEvent =
            *  "waitStartBrake" | "r2dDelay" | "waitInvStandby" |
            *  "active" | "amsError" | "unknown(0xNN)". */
           fsmState: string;
-          /** Inverter state: "standby" | "ready" | "unknown(0xNN)". */
+          /** Inverter App_State: "off" | "standby" | "ready" |
+           *  "torqueEnable" | "softFault" | "hardFault" | "shutdown" |
+           *  "unknown(0xNN)". The full firmware VAL_ table (#528) — before
+           *  that only standby/ready were named and every fault state
+           *  rendered as unknown. */
           invState: string;
           /** APPS plausibility (EV 2.3) OK. */
           ev23: boolean;
@@ -245,14 +250,22 @@ export type PitDiagEvent =
     | {
           /** ECU 0x702 — inverter telemetry. `invRpm` is signed.
            *  `invError` is the DEM fault code, `invErrorName` its decoded
-           *  name (EPowerLabs W90 table), `demPresent` = active now vs
-           *  latched history (#484). */
+           *  name (EPowerLabs W90 table, `"unknown"` above 15 — the table
+           *  itself stops there), `demPresent` = active now vs latched
+           *  history (#484). */
           kind: 'ecuInverter';
           dcBusVoltage: number;
           invRpm: number;
           invError: number;
           invErrorName: string;
           demPresent: boolean;
+          /** App_State_Req the ECU is COMMANDING on 0x360 (#528). Every
+           *  other field here is what the inverter REPORTS — read the two
+           *  together. 0 = the frame carried none (pre-#150 firmware). */
+          invModeCmd: number;
+          /** "none" | "Off" | "Ready" | "TorqueEnable" | "HardFaultReset" |
+           *  "Fault" | "unknown". */
+          invModeCmdName: string;
       }
     | {
           /** ECU 0x706 — inverter temperatures, °C. `205` = sensor
@@ -279,6 +292,8 @@ export type PitDiagEvent =
           taskControl: boolean;
           taskCanRx: boolean;
           taskCanTx: boolean;
+          /** TelemetryTask stepped — dashboard (FDCAN3) + radio snapshot. */
+          taskTelemetry: boolean;
           taskDiag: boolean;
           /** "powerOn" | "pin" | "software" | "iwdg" | … */
           resetCause: string;
@@ -286,6 +301,12 @@ export type PitDiagEvent =
           lastFault: number;
           /** "none" | "hardFault" | "stackOverflow" | … */
           lastFaultName: string;
+          /** Bench-stub announces (#528). All false on a flight build; any
+           *  one true means the ECU is faking an input. */
+          stubNoAms: boolean;
+          stubNoInverter: boolean;
+          stubStart: boolean;
+          stubBrake: boolean;
       }
     | {
           /** ECU 0x707 — DV (driverless) integration view (#109). The

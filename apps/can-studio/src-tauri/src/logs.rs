@@ -16,12 +16,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use can_flasher::firmware::crc32;
-use can_flasher::protocol::commands::{
-    cmd_logfs_close, cmd_logfs_crc, cmd_logfs_finalize, cmd_logfs_list, cmd_logfs_open,
-    cmd_logfs_read,
-};
-use can_flasher::protocol::logfs::{self, MAX_READ_LEN};
+use can_flasher::logfs_client;
+use can_flasher::protocol::commands::{cmd_logfs_finalize, cmd_logfs_list};
+use can_flasher::protocol::logfs;
 use can_flasher::protocol::Response;
 use can_flasher::session::{Session, SessionConfig, SessionError};
 use can_flasher::transport::open_backend;
@@ -337,85 +334,41 @@ async fn pull_inner(
         .find(|e| e.index == index)
         .ok_or_else(|| format!("no log with index {index} on the card"))?;
 
-    let body = ack_body(session, cmd_logfs_open(entry.index), "LOGFS_OPEN").await?;
-    let open = logfs::parse_open(&body).map_err(|e| format!("parse LOGFS_OPEN: {e}"))?;
-
-    let mut data: Vec<u8> = Vec::with_capacity(open.size as usize);
-    let mut offset = 0u32;
-    loop {
-        let body = ack_body_retrying(
-            session,
-            cmd_logfs_read(open.handle, offset, MAX_READ_LEN),
-            "LOGFS_READ",
-        )
-        .await?;
-        let out = logfs::parse_read(MAX_READ_LEN, &body);
-        data.extend_from_slice(&out.data);
-        offset = offset.saturating_add(out.data.len() as u32);
-
+    // Orchestration (OPEN → READ with transport retry + mid-pull session
+    // recovery → CRC → CLOSE) lives in the shared client, so the CLI and
+    // this view harden identically. We supply progress + cancel.
+    let name = entry.name.clone();
+    let on_progress = |received: u32, total: u32| {
         let _ = app.emit(
             EVENT_NAME,
             PullProgress {
-                index: entry.index,
-                name: entry.name.clone(),
-                received: offset,
-                total: open.size,
+                index,
+                name: name.clone(),
+                received,
+                total,
             },
         );
-
-        if out.eof {
-            break;
-        }
-        if out.data.is_empty() {
-            return Err(format!("LOGFS_READ stalled at offset {offset} before EOF"));
-        }
-        // Poll between reads — each is one bounded ISO-TP round trip, so
-        // a cancel lands within a few hundred ms. Close the handle so the
-        // node doesn't leak it.
-        if CANCEL_PULL.load(Ordering::Relaxed) {
-            let _ = ack_body(session, cmd_logfs_close(open.handle), "LOGFS_CLOSE").await;
-            return Err(CANCELLED_MSG.to_string());
-        }
-    }
-
-    if open.size > 0 && data.len() as u32 != open.size {
-        return Err(format!(
-            "size mismatch for {}: OPEN said {} B, got {} B",
-            entry.name,
-            open.size,
-            data.len()
-        ));
-    }
-
-    // The firmware keeps a running CRC while logging and seals it with
-    // the file, so OPEN carries a real crc32 — no extra round trip. Only
-    // fall back to LOGFS_CRC if the node declined to provide one.
-    let want = if open.crc_deferred() {
-        let body = ack_body(session, cmd_logfs_crc(open.handle), "LOGFS_CRC").await?;
-        logfs::parse_crc(&body).map_err(|e| format!("parse LOGFS_CRC: {e}"))?
-    } else {
-        open.crc32
     };
-    let got = crc32(&data);
-    if want != got {
-        let _ = ack_body(session, cmd_logfs_close(open.handle), "LOGFS_CLOSE").await;
-        return Err(format!(
-            "CRC mismatch for {}: node 0x{want:08X}, received 0x{got:08X}",
-            entry.name
-        ));
-    }
+    let is_cancelled = || CANCEL_PULL.load(Ordering::Relaxed);
 
-    let _ = ack_body(session, cmd_logfs_close(open.handle), "LOGFS_CLOSE").await?;
+    let pulled = logfs_client::pull_file(session, index, true, on_progress, is_cancelled)
+        .await
+        .map_err(|e| match e {
+            // Surface a cancel with the exact marker the frontend matches
+            // so it renders as a neutral outcome, not a red error.
+            logfs_client::PullError::Cancelled => CANCELLED_MSG.to_string(),
+            logfs_client::PullError::Failed(msg) => format!("{}: {msg}", entry.name),
+        })?;
 
     let dir = PathBuf::from(dest_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = unique_path(&dir, &entry.name);
-    std::fs::write(&path, &data).map_err(|e| format!("write {}: {e}", path.display()))?;
+    std::fs::write(&path, &pulled.data).map_err(|e| format!("write {}: {e}", path.display()))?;
 
     Ok(PullResult {
         path: path.display().to_string(),
-        bytes: data.len() as u32,
-        crc_verified: true,
+        bytes: pulled.data.len() as u32,
+        crc_verified: pulled.crc_verified,
     })
 }
 

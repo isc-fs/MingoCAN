@@ -22,7 +22,7 @@
 //!     bits, torque %, min cell voltage (mV), torque command.
 //!   - `0x701` — pedals: APPS1/APPS2 raw ADC + computed %, brake raw ADC.
 //!   - `0x702` — inverter: DC-bus voltage (V), motor RPM (signed),
-//!     inverter error code.
+//!     inverter error code, and the mode word the ECU is commanding.
 //!   - `0x703` — fwinfo: firmware semver + first 4 bytes of the git hash.
 //!   - `0x705` — brake: physical brake pressure (×0.1 bar) + brake %.
 //!
@@ -122,13 +122,29 @@ impl EcuFsmState {
 }
 
 /// Inverter application state (`0x700` byte 1). Mirrors the inverter
-/// `App_State`; the firmware only models the two values it gates on.
+/// `App_State` — the full seven-value table the firmware names in the DSL
+/// (`pit_diag_status.def`, IFS08-CE-ECU #150) and therefore in `ecu.dbc`.
+///
+/// Decoding only the two values the FSM *gates* on (Standby / Ready) left
+/// every state that matters when the drive will not come up — off, both
+/// faults, shutdown — rendering as `unknown(0x..)`, which is precisely the
+/// case the pit tool exists for (#528).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EcuInvState {
+    /// 0 — inverter off.
+    Off,
     /// 3 — inverter standby.
     Standby,
     /// 4 — inverter ready.
     Ready,
+    /// 6 — torque enabled (drive).
+    TorqueEnable,
+    /// 10 — soft fault; the ECU clears it by commanding [`INV_MODE_FAULT`].
+    SoftFault,
+    /// 11 — hard fault; cleared by commanding [`INV_MODE_HARD_FAULT_RESET`].
+    HardFault,
+    /// 13 — shutdown.
+    Shutdown,
     /// Any value outside the known table.
     Unknown(u8),
 }
@@ -138,10 +154,22 @@ impl EcuInvState {
     #[must_use]
     pub fn from_byte(b: u8) -> Self {
         match b {
+            0 => Self::Off,
             3 => Self::Standby,
             4 => Self::Ready,
+            6 => Self::TorqueEnable,
+            10 => Self::SoftFault,
+            11 => Self::HardFault,
+            13 => Self::Shutdown,
             other => Self::Unknown(other),
         }
+    }
+
+    /// `true` for the two fault states — the inverter is refusing to leave
+    /// fault until the ECU commands the matching reset word.
+    #[must_use]
+    pub fn is_fault(self) -> bool {
+        matches!(self, Self::SoftFault | Self::HardFault)
     }
 }
 
@@ -184,10 +212,55 @@ impl EcuResetCause {
     }
 }
 
+// ---- Commanded inverter mode (`0x702` inv_mode_cmd) ---------------
+
+/// `inv_mode_cmd` sentinel for "the frame carried no commanded mode" — a
+/// short (DLC 7) frame from firmware older than IFS08-CE-ECU #150. Not a
+/// valid `App_State_Req`, so it can't collide with a real command.
+pub const INV_MODE_NONE: u8 = 0;
+/// `App_State_Req` 0x01 — command the inverter off.
+pub const INV_MODE_OFF: u8 = 0x01;
+/// `App_State_Req` 0x04 — command Ready (the `WaitInvStandby` word).
+pub const INV_MODE_READY: u8 = 0x04;
+/// `App_State_Req` 0x06 — command torque enable (drive).
+pub const INV_MODE_TORQUE_ENABLE: u8 = 0x06;
+/// `App_State_Req` 0x0D — hard-fault reset, for [`EcuInvState::HardFault`].
+pub const INV_MODE_HARD_FAULT_RESET: u8 = 0x0D;
+/// `App_State_Req` 0x13 — soft-fault reset, for [`EcuInvState::SoftFault`].
+pub const INV_MODE_FAULT: u8 = 0x13;
+
+/// Name for the mode word the ECU is **commanding** on `0x360` (`0x702`
+/// `inv_mode_cmd`, 7 bits at bit 57 — IFS08-CE-ECU #150). Mirrors the
+/// `ecu.dbc` `VAL_` table, whose values are decimal: `HardFaultReset` is
+/// 13 = `0x0D`, `Fault` is 19 = `0x13`.
+///
+/// Everything else in `0x702` is what the inverter *reports*; this is the
+/// only field that says what the ECU is asking for. The pair is the whole
+/// diagnostic — it separates "the ECU is commanding the wrong word" from
+/// "the ECU is commanding correctly and the inverter is refusing", the
+/// ambiguity that stalled the TS-off recovery debug (IFS08-CE-ECU #148).
+///
+/// [`INV_MODE_NONE`] returns `"none"`; anything else outside the table
+/// returns `"unknown"` and the caller shows the raw value.
+#[must_use]
+pub fn inv_mode_cmd_name(mode: u8) -> &'static str {
+    match mode {
+        INV_MODE_NONE => "none",
+        INV_MODE_OFF => "Off",
+        INV_MODE_READY => "Ready",
+        INV_MODE_TORQUE_ENABLE => "TorqueEnable",
+        INV_MODE_HARD_FAULT_RESET => "HardFaultReset",
+        INV_MODE_FAULT => "Fault",
+        _ => "unknown",
+    }
+}
+
 /// Name for an inverter DEM fault code (`0x702` `inv_error`) — the EPowerLabs
 /// W90 (EMC150) fault table (User Manual §9.2.3, mirrors the `ecu.dbc`
 /// `VAL_` table, IFS08-CE-ECU #124). Codes outside `0..=15` return `"unknown"`;
-/// the caller shows the raw code for those.
+/// the caller renders those as *undocumented* (see [`DEM_UNDOCUMENTED_NOTE`])
+/// rather than as a lookup failure — the W90 §9.2.3 table genuinely stops at
+/// 15 and the inverter does emit codes above it (code 22 on the car, #528).
 #[must_use]
 pub fn dem_fault_name(code: u8) -> &'static str {
     match code {
@@ -210,6 +283,11 @@ pub fn dem_fault_name(code: u8) -> &'static str {
         _ => "unknown",
     }
 }
+
+/// Suffix for a DEM code [`dem_fault_name`] can't name. Says *the table
+/// stops here*, not *the lookup broke* — without it a bare `code 0x16` reads
+/// as a tool failure and costs a debug detour (#528).
+pub const DEM_UNDOCUMENTED_NOTE: &str = "undocumented — not in W90 §9.2.3";
 
 // ---- Frame records -----------------------------------------------
 
@@ -280,6 +358,12 @@ pub struct EcuInverterFrame {
     /// vs latched history (`false`). The NX boots latched — code set but this
     /// bit clear. `false` on a short (DLC 7) frame from older firmware.
     pub dem_present: bool,
+    /// `inv_mode_cmd` (byte 7 bits 1-7, #150): the `App_State_Req` the ECU is
+    /// **commanding** on `0x360` right now — name via [`inv_mode_cmd_name`].
+    /// Pair it with the reported [`EcuStatusFrame::inv_state`]; that's the
+    /// commanding-X / reporting-Y read the panel exists for.
+    /// [`INV_MODE_NONE`] on a short (DLC 7) frame from older firmware.
+    pub inv_mode_cmd: u8,
 }
 
 /// `0x703` — firmware semantic version + git-hash prefix.
@@ -314,6 +398,13 @@ pub struct EcuInverterTempsFrame {
 
 /// `0x704` — firmware-health telemetry (parity with the AMS health diag).
 /// Emitted from DiagTask so it survives a ControlTask stall.
+///
+/// Byte layout tracks `pit_diag_health.def`, which moved twice after this
+/// decoder was first written (#528): TelemetryTask took byte 4 bit 3 — pushing
+/// `task_diag` to bit 4 — and `reset_cause` was narrowed to byte 5 bits 0-2 to
+/// free bit 3 for `stub_brake`. Reading byte 5 whole made a `stub_brake` board
+/// report `reset_cause` 8..=14, i.e. `unknown` on a board that had just
+/// power-on reset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EcuHealthFrame {
     /// Current free heap, bytes (big-endian).
@@ -326,9 +417,21 @@ pub struct EcuHealthFrame {
     pub task_can_rx: bool,
     /// CAN-TX task stepped.
     pub task_can_tx: bool,
+    /// TelemetryTask stepped (byte 4 bit 3 — dashboard + radio snapshot).
+    pub task_telemetry: bool,
     /// DiagTask stepped.
     pub task_diag: bool,
-    /// Cause of the most recent MCU reset.
+    /// Bench stub — AMS absent, precharge gate faked (byte 4 bit 5).
+    pub stub_no_ams: bool,
+    /// Bench stub — inverter absent (byte 4 bit 6).
+    pub stub_no_inverter: bool,
+    /// Bench stub — start button forced (byte 4 bit 7).
+    pub stub_start: bool,
+    /// Bench stub — brake reading injected (byte 5 bit 3). Gates nothing on
+    /// its own, but a live `brake_raw` on a car nobody is braking is worth
+    /// seeing on the health card.
+    pub stub_brake: bool,
+    /// Cause of the most recent MCU reset (byte 5 bits 0-2).
     pub reset_cause: EcuResetCause,
     /// Seconds since boot (wraps at 255).
     pub uptime_s: u8,
@@ -462,9 +565,11 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 dc_bus_voltage: u16::from_be_bytes([p[0], p[1]]),
                 inv_rpm: i32::from_be_bytes([p[2], p[3], p[4], p[5]]),
                 inv_error: p[6],
-                // dem_present rides byte 7 bit 0 (DLC 8); older DLC-7 frames
-                // carry no such byte — default to latched (false).
+                // dem_present rides byte 7 bit 0 and inv_mode_cmd its bits
+                // 1-7 (DLC 8); older DLC-7 frames carry no such byte —
+                // default to latched (false) / no command (INV_MODE_NONE).
                 dem_present: p.get(7).is_some_and(|b| b & 0x01 != 0),
+                inv_mode_cmd: p.get(7).map_or(INV_MODE_NONE, |b| b >> 1),
             }))
         }
         ECU_FWINFO_ID => {
@@ -496,14 +601,21 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 return None;
             }
             let live = p[4];
+            let cause = p[5];
             Some(EcuPitDiagFrame::Health(EcuHealthFrame {
                 free_heap: u16::from_be_bytes([p[0], p[1]]),
                 min_free_heap: u16::from_be_bytes([p[2], p[3]]),
                 task_control: (live & 0x01) != 0,
                 task_can_rx: (live & 0x02) != 0,
                 task_can_tx: (live & 0x04) != 0,
-                task_diag: (live & 0x08) != 0,
-                reset_cause: EcuResetCause::from_byte(p[5]),
+                task_telemetry: (live & 0x08) != 0,
+                task_diag: (live & 0x10) != 0,
+                stub_no_ams: (live & 0x20) != 0,
+                stub_no_inverter: (live & 0x40) != 0,
+                stub_start: (live & 0x80) != 0,
+                stub_brake: (cause & 0x08) != 0,
+                // reset_cause is 3 bits (b0-b2); bit 3 is stub_brake above.
+                reset_cause: EcuResetCause::from_byte(cause & 0x07),
                 uptime_s: p[6],
                 last_fault: p[7],
             }))
@@ -628,6 +740,8 @@ mod tests {
                 assert_eq!(inv.inv_error, 0x07);
                 assert_eq!(dem_fault_name(inv.inv_error), "CAN1_BusOff");
                 assert!(!inv.dem_present);
+                assert_eq!(inv.inv_mode_cmd, INV_MODE_NONE);
+                assert_eq!(inv_mode_cmd_name(inv.inv_mode_cmd), "none");
             }
             other => panic!("expected Inverter, got {other:?}"),
         }
@@ -647,6 +761,75 @@ mod tests {
         }
         assert_eq!(dem_fault_name(15), "EmachineOverspeed");
         assert_eq!(dem_fault_name(200), "unknown");
+    }
+
+    #[test]
+    fn inverter_decodes_mode_cmd_from_the_reference_capture() {
+        // The #528 capture, decoded by hand at the time:
+        //   0x702  01 63 00 00 00 00 16 27
+        // dc_bus=355V, dem=22 (above the W90 table), byte7=0x27 ->
+        // dem_present=1 + inv_mode_cmd=0x13 (the ECU commanding the
+        // soft-fault reset continuously).
+        let p = [0x01, 0x63, 0x00, 0x00, 0x00, 0x00, 0x16, 0x27];
+        match decode_frame(&CanFrame::new(ECU_INVERTER_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Inverter(inv) => {
+                assert_eq!(inv.dc_bus_voltage, 355);
+                assert_eq!(inv.inv_error, 22);
+                assert_eq!(dem_fault_name(inv.inv_error), "unknown");
+                assert!(inv.dem_present);
+                assert_eq!(inv.inv_mode_cmd, INV_MODE_FAULT);
+                assert_eq!(inv_mode_cmd_name(inv.inv_mode_cmd), "Fault");
+            }
+            other => panic!("expected Inverter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_mode_cmd_names_cover_the_val_table() {
+        assert_eq!(inv_mode_cmd_name(INV_MODE_OFF), "Off");
+        assert_eq!(inv_mode_cmd_name(INV_MODE_READY), "Ready");
+        assert_eq!(inv_mode_cmd_name(INV_MODE_TORQUE_ENABLE), "TorqueEnable");
+        assert_eq!(
+            inv_mode_cmd_name(INV_MODE_HARD_FAULT_RESET),
+            "HardFaultReset"
+        );
+        assert_eq!(inv_mode_cmd_name(INV_MODE_FAULT), "Fault");
+        assert_eq!(inv_mode_cmd_name(0x7F), "unknown");
+    }
+
+    #[test]
+    fn inv_mode_cmd_uses_all_seven_bits() {
+        // 7 bits at bit 57: the widest value the field can hold must survive
+        // the shift without bleeding dem_present into it.
+        let p = [0, 0, 0, 0, 0, 0, 0, 0xFE];
+        match decode_frame(&CanFrame::new(ECU_INVERTER_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Inverter(inv) => {
+                assert_eq!(inv.inv_mode_cmd, 0x7F);
+                assert!(!inv.dem_present);
+            }
+            other => panic!("expected Inverter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_state_covers_the_full_val_table() {
+        // All seven the firmware names (#150) — every one but Standby/Ready
+        // used to fall through to Unknown, including the fault states the
+        // pit tool exists to show (#528).
+        for (raw, want) in [
+            (0u8, EcuInvState::Off),
+            (3, EcuInvState::Standby),
+            (4, EcuInvState::Ready),
+            (6, EcuInvState::TorqueEnable),
+            (10, EcuInvState::SoftFault),
+            (11, EcuInvState::HardFault),
+            (13, EcuInvState::Shutdown),
+        ] {
+            assert_eq!(EcuInvState::from_byte(raw), want, "raw {raw}");
+        }
+        assert_eq!(EcuInvState::from_byte(9), EcuInvState::Unknown(9));
+        assert!(EcuInvState::SoftFault.is_fault() && EcuInvState::HardFault.is_fault());
+        assert!(!EcuInvState::Ready.is_fault() && !EcuInvState::Off.is_fault());
     }
 
     #[test]
@@ -680,19 +863,71 @@ mod tests {
 
     #[test]
     fn health_decodes() {
-        // free=0x1234, min=0x0800, live=0b1011 (control+can_rx+diag, not
-        // can_tx), reset=4 (IWDG), uptime=42, last_fault=0xF5 (stack overflow).
-        let p = [0x12, 0x34, 0x08, 0x00, 0b1011, 4, 42, 0xF5];
+        // free=0x1234, min=0x0800, live=0b1_0111 (control+can_rx+can_tx+diag,
+        // telemetry stalled), reset=4 (IWDG), uptime=42, last_fault=0xF5
+        // (stack overflow).
+        let p = [0x12, 0x34, 0x08, 0x00, 0b1_0111, 4, 42, 0xF5];
         let frame = CanFrame::new(ECU_HEALTH_ID, &p).unwrap();
         match decode_frame(&frame).unwrap() {
             EcuPitDiagFrame::Health(h) => {
                 assert_eq!(h.free_heap, 0x1234);
                 assert_eq!(h.min_free_heap, 0x0800);
-                assert!(h.task_control && h.task_can_rx && h.task_diag);
-                assert!(!h.task_can_tx);
+                assert!(h.task_control && h.task_can_rx && h.task_can_tx && h.task_diag);
+                assert!(!h.task_telemetry);
                 assert_eq!(h.reset_cause, EcuResetCause::Iwdg);
                 assert_eq!(h.uptime_s, 42);
                 assert_eq!(h.last_fault, 0xF5);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_task_diag_is_bit4_not_bit3() {
+        // TelemetryTask took byte 4 bit 3 and pushed task_diag to bit 4
+        // (#528). A board with only telemetry alive must not read as
+        // "diag alive" — that was the pre-fix behaviour.
+        let p = [0, 0, 0, 0, 0b0000_1000, 0, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_HEALTH_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert!(h.task_telemetry);
+                assert!(!h.task_diag);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_masks_stub_brake_out_of_reset_cause() {
+        // byte5 = 0x09 -> stub_brake (bit 3) + PowerOn (bits 0-2 = 1). Reading
+        // the byte whole yielded 9 -> Other(9) -> "unknown reset" on a board
+        // that had plainly just powered on (#528).
+        let p = [0, 0, 0, 0, 0, 0x09, 15, 0];
+        match decode_frame(&CanFrame::new(ECU_HEALTH_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert_eq!(h.reset_cause, EcuResetCause::PowerOn);
+                assert!(h.stub_brake);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_decodes_stub_announces() {
+        // byte4 b5-b7 = the bench-stub cluster; all clear on a flight build.
+        let p = [0, 0, 0, 0, 0b1110_0000, 0, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_HEALTH_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert!(h.stub_no_ams && h.stub_no_inverter && h.stub_start);
+                assert!(!h.task_control);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+        let flight = [0, 0, 0, 0, 0b0001_1111, 1, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_HEALTH_ID, &flight).unwrap()).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert!(!h.stub_no_ams && !h.stub_no_inverter && !h.stub_start);
+                assert!(!h.stub_brake);
             }
             other => panic!("expected Health, got {other:?}"),
         }
