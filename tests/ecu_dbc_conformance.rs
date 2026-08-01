@@ -286,6 +286,7 @@ fn signal_layouts_match_the_decoder() {
             ("stub_start", 39, 1, false, false),
             ("reset_cause", 40, 3, false, false),
             ("stub_brake", 43, 1, false, false),
+            ("cal_status", 44, 2, false, false),
             ("uptime_s", 48, 8, false, false),
             ("last_fault", 56, 8, false, false),
         ]),
@@ -491,6 +492,33 @@ fn reset_cause_value_table_matches_decoder() {
                 ecu::EcuResetCause::Other(_)
             ),
             "reset_cause {raw} is named in the DBC but decodes to Other"
+        );
+    }
+}
+
+/// The 2-bit field is total — all four values are named, so the decoder
+/// needs no fallback variant and must agree on every one.
+#[test]
+fn cal_status_value_table_matches_decoder() {
+    let dbc = load();
+    let dbc_table = val_table(&dbc, ECU_HEALTH_ID, "cal_status");
+    assert_eq!(
+        dbc_table,
+        table(&[
+            (0, "Defaults"),
+            (1, "Loaded"),
+            (2, "InvalidFellBack"),
+            (3, "BadVersionFellBack"),
+        ])
+    );
+    // Only "Loaded" means a stored calibration is actually in force; the
+    // other three all leave the pedals on compile-time defaults.
+    for (raw, name) in &dbc_table {
+        let decoded = ecu::EcuCalStatus::from_bits(u8::try_from(*raw).unwrap());
+        assert_eq!(
+            decoded.is_fallback(),
+            name != "Loaded",
+            "cal_status {raw} ({name}) fallback classification"
         );
     }
 }

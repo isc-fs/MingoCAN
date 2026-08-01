@@ -849,7 +849,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
         ),
         F::Health(h) => println!(
             "{prefix} health heap={}/{} tasks[ctrl={} rx={} tx={} tlm={} diag={}] reset={:?} \
-             uptime={}s last_fault=0x{:02X}{}",
+             uptime={}s last_fault=0x{:02X} cal={:?}{}",
             h.free_heap,
             h.min_free_heap,
             h.task_control as u8,
@@ -860,6 +860,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.reset_cause,
             h.uptime_s,
             h.last_fault,
+            h.cal_status,
             ecu_stub_text(h),
         ),
         F::InvFaults(f) => {
@@ -958,7 +959,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             f.git_hash[3],
         ),
         F::Health(h) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskTelemetry":{},"taskDiag":{},"resetCause":"{:?}","uptimeS":{},"lastFault":{},"stubNoAms":{},"stubNoInverter":{},"stubStart":{},"stubBrake":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskTelemetry":{},"taskDiag":{},"resetCause":"{:?}","calStatus":"{:?}","uptimeS":{},"lastFault":{},"stubNoAms":{},"stubNoInverter":{},"stubStart":{},"stubBrake":{}}}"#,
             h.free_heap,
             h.min_free_heap,
             h.task_control,
@@ -967,6 +968,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.task_telemetry,
             h.task_diag,
             h.reset_cause,
+            h.cal_status,
             h.uptime_s,
             h.last_fault,
             h.stub_no_ams,
@@ -1274,6 +1276,7 @@ mod tests {
             stub_no_inverter: false,
             stub_start: false,
             stub_brake: false,
+            cal_status: ecu::EcuCalStatus::Loaded,
             reset_cause: ecu::EcuResetCause::PowerOn,
             uptime_s: 15,
             last_fault: 0,
