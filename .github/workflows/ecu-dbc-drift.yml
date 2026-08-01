@@ -16,6 +16,10 @@
 #   drift persists -> edit that issue's body (never a new comment)
 #   drift resolved -> close it with a note
 #
+# Whether a change affects the decoder is decided by parsing both files
+# (.github/scripts/dbc_decoder_diff.py), not by grepping the diff — a
+# substring match misses a signal added to a message we already decode.
+#
 # The job itself stays green while drift exists; a red scheduled workflow
 # gets tuned out within a week, an assigned issue does not. Genuine
 # failures (fetch broken, upstream branch renamed) still fail the step.
@@ -87,13 +91,16 @@ jobs:
           # character issue-body limit.
           diff -u "$VENDORED" upstream-ecu.dbc | head -c 40000 > drift.diff || true
 
-          # The decoder only asserts the PitDiag_* messages, so separate
-          # "the decoder is affected" from "the snapshot is merely stale".
-          if grep -qE '^[+-].*PitDiag_' drift.diff; then
-            echo "affects_decoder=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "affects_decoder=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Separate "the decoder is affected" from "the snapshot is
+          # merely stale" by PARSING both files, not by grepping the
+          # diff. A signal added to a message we already decode changes
+          # a line that never mentions the message name, so a substring
+          # match answers "no" for the most dangerous case — see the
+          # script's docstring for the one that got through.
+          python3 .github/scripts/dbc_decoder_diff.py \
+            --vendored "$VENDORED" \
+            --upstream upstream-ecu.dbc \
+            --summary-out decoder-changes.md >> "$GITHUB_OUTPUT"
 
           # New/removed messages are the highest-signal lines — surface
           # them on their own rather than making a human read the hunk.
@@ -146,6 +153,7 @@ jobs:
             const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim() : '');
             const diff = read('drift.diff');
             const msgChanges = read('msg-changes.txt');
+            const decoderChanges = read('decoder-changes.md');
             const affects = process.env.AFFECTS_DECODER === 'true';
 
             const title = 'ECU DBC snapshot is behind upstream';
@@ -166,6 +174,9 @@ jobs:
                 : `This diff does not touch any \`PitDiag_*\` message, so the decoder is unaffected. `
                   + `Refreshing the snapshot is still worth doing so the next real drift shows up small.`,
               ``,
+              ...(decoderChanges
+                ? ['### What this changes for the decoder', '', decoderChanges, '']
+                : []),
               ...(msgChanges
                 ? ['### Messages added or removed', '', '```diff', msgChanges, '```', '']
                 : []),
