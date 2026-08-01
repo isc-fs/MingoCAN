@@ -240,6 +240,52 @@ pub const INV_MODE_HARD_FAULT_RESET: u8 = 0x0D;
 /// `App_State_Req` 0x13 — soft-fault reset, for [`EcuInvState::SoftFault`].
 pub const INV_MODE_FAULT: u8 = 0x13;
 
+/// Whether the ECU is running a stored pedal calibration or fell back to
+/// its compile-time defaults (`0x704` bits 44-45, IFS08-CE-ECU #169).
+///
+/// Rides the **ungated** health frame on purpose: an operator can see
+/// without arming anything whether the calibration they just committed is
+/// actually live. A silently-ignored calibration is otherwise
+/// indistinguishable from an applied one — and since these values gate the
+/// EV.2.3 torque cut and the driverless R2D, "I committed it" is not the
+/// same question as "is it in force". The per-rule reason for a rejection
+/// lives on the `0x7E3` calibration-session frame, not here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EcuCalStatus {
+    /// 0 — no stored calibration; running compile-time defaults.
+    Defaults,
+    /// 1 — a stored calibration was read and applied.
+    Loaded,
+    /// 2 — a stored calibration was found but failed validation; the ECU
+    /// fell back to defaults rather than run it.
+    InvalidFellBack,
+    /// 3 — a stored calibration was found with an unrecognised record
+    /// version; fell back to defaults.
+    BadVersionFellBack,
+}
+
+impl EcuCalStatus {
+    /// Decode the 2-bit field. Every one of the four values is defined, so
+    /// this is total — no `Unknown` variant is reachable.
+    #[must_use]
+    pub fn from_bits(b: u8) -> Self {
+        match b & 0x03 {
+            0 => Self::Defaults,
+            1 => Self::Loaded,
+            2 => Self::InvalidFellBack,
+            _ => Self::BadVersionFellBack,
+        }
+    }
+
+    /// `true` when the ECU is NOT running a stored calibration — either
+    /// none exists, or the one that does was rejected. Both mean the
+    /// pedals are on compile-time defaults.
+    #[must_use]
+    pub fn is_fallback(self) -> bool {
+        !matches!(self, Self::Loaded)
+    }
+}
+
 /// Name for the mode word the ECU is **commanding** on `0x360` (`0x702`
 /// `inv_mode_cmd`, 7 bits at bit 57 — IFS08-CE-ECU #150). Mirrors the
 /// `ecu.dbc` `VAL_` table, whose values are decimal: `HardFaultReset` is
@@ -447,6 +493,9 @@ pub struct EcuHealthFrame {
     /// its own, but a live `brake_raw` on a car nobody is braking is worth
     /// seeing on the health card.
     pub stub_brake: bool,
+    /// Pedal-calibration provenance (byte 5 bits 4-5, #169) — stored and
+    /// applied, or fell back to compile-time defaults.
+    pub cal_status: EcuCalStatus,
     /// Cause of the most recent MCU reset (byte 5 bits 0-2).
     pub reset_cause: EcuResetCause,
     /// Seconds since boot (wraps at 255).
@@ -782,7 +831,9 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 stub_no_inverter: (live & 0x40) != 0,
                 stub_start: (live & 0x80) != 0,
                 stub_brake: (cause & 0x08) != 0,
-                // reset_cause is 3 bits (b0-b2); bit 3 is stub_brake above.
+                // Byte 5 is packed: reset_cause b0-b2, stub_brake b3,
+                // cal_status b4-b5. b6-b7 remain free.
+                cal_status: EcuCalStatus::from_bits(cause >> 4),
                 reset_cause: EcuResetCause::from_byte(cause & 0x07),
                 uptime_s: p[6],
                 last_fault: p[7],
@@ -1112,6 +1163,57 @@ mod tests {
                 assert!(h.stub_brake);
             }
             other => panic!("expected Health, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_decodes_cal_status_alongside_its_bitfield_neighbours() {
+        // Byte 5 packs three things: reset_cause b0-b2, stub_brake b3,
+        // cal_status b4-b5. 0x2D = 0b0010_1101 -> cause 5 (WWDG),
+        // stub_brake set, cal_status 2 (InvalidFellBack). Each must come
+        // out independent of the others.
+        let p = [0, 0, 0, 0, 0, 0x2D, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_HEALTH_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert_eq!(h.reset_cause, EcuResetCause::Wwdg);
+                assert!(h.stub_brake);
+                assert_eq!(h.cal_status, EcuCalStatus::InvalidFellBack);
+                assert!(h.cal_status.is_fallback());
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+
+        // A board running a stored calibration: cal_status 1 in b4-b5
+        // (0x10), PowerOn, no stub.
+        let p = [0, 0, 0, 0, 0, 0x11, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_HEALTH_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert_eq!(h.cal_status, EcuCalStatus::Loaded);
+                assert!(!h.cal_status.is_fallback());
+                assert_eq!(h.reset_cause, EcuResetCause::PowerOn);
+                assert!(!h.stub_brake);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cal_status_is_total_over_two_bits() {
+        // All four values are defined, so no input can fall through, and
+        // only Loaded means a stored calibration is actually in force.
+        assert_eq!(EcuCalStatus::from_bits(0), EcuCalStatus::Defaults);
+        assert_eq!(EcuCalStatus::from_bits(1), EcuCalStatus::Loaded);
+        assert_eq!(EcuCalStatus::from_bits(2), EcuCalStatus::InvalidFellBack);
+        assert_eq!(EcuCalStatus::from_bits(3), EcuCalStatus::BadVersionFellBack);
+        // High bits are masked off, not misread.
+        assert_eq!(EcuCalStatus::from_bits(0xFE), EcuCalStatus::InvalidFellBack);
+        assert!(!EcuCalStatus::Loaded.is_fallback());
+        for s in [
+            EcuCalStatus::Defaults,
+            EcuCalStatus::InvalidFellBack,
+            EcuCalStatus::BadVersionFellBack,
+        ] {
+            assert!(s.is_fallback(), "{s:?} leaves the pedals on defaults");
         }
     }
 

@@ -39,9 +39,9 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use can_flasher::pit_diag::ecu::{
-    self, EcuBrakeFrame, EcuDvFrame, EcuFsmState, EcuFwInfoFrame, EcuHealthFrame, EcuInvState,
-    EcuInverterFrame, EcuInverterTempsFrame, EcuPedalsFrame, EcuPitDiagFrame, EcuResetCause,
-    EcuStatusFrame, ECU_ACK_ID,
+    self, EcuBrakeFrame, EcuCalStatus, EcuDvFrame, EcuFsmState, EcuFwInfoFrame, EcuHealthFrame,
+    EcuInvState, EcuInverterFrame, EcuInverterTempsFrame, EcuPedalsFrame, EcuPitDiagFrame,
+    EcuResetCause, EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::udv::{
     self, UdvCalibFrame, UdvCalibRelayFrame, UdvCanHealthFrame, UdvEbsPressFrame, UdvFwInfoFrame,
@@ -230,6 +230,17 @@ fn ecu_reset_cause_name(c: EcuResetCause) -> String {
         EcuResetCause::Wwdg => "wwdg".into(),
         EcuResetCause::LowPower => "lowPower".into(),
         EcuResetCause::Other(b) => format!("other(0x{b:02X})"),
+    }
+}
+
+/// Display name for the pedal-calibration provenance (`0x704` #169).
+/// camelCase; mirrors the firmware `VAL_` table.
+fn ecu_cal_status_name(c: EcuCalStatus) -> String {
+    match c {
+        EcuCalStatus::Defaults => "defaults".into(),
+        EcuCalStatus::Loaded => "loaded".into(),
+        EcuCalStatus::InvalidFellBack => "invalidFellBack".into(),
+        EcuCalStatus::BadVersionFellBack => "badVersionFellBack".into(),
     }
 }
 
@@ -505,6 +516,7 @@ pub enum PitDiagEvent {
         task_telemetry: bool,
         task_diag: bool,
         reset_cause: String,
+        cal_status: String,
         uptime_s: u8,
         last_fault: u8,
         last_fault_name: String,
@@ -899,6 +911,7 @@ impl PitDiagEvent {
                 task_can_tx,
                 task_telemetry,
                 task_diag,
+                cal_status,
                 reset_cause,
                 uptime_s,
                 last_fault,
@@ -915,6 +928,7 @@ impl PitDiagEvent {
                 task_telemetry,
                 task_diag,
                 reset_cause: ecu_reset_cause_name(reset_cause),
+                cal_status: ecu_cal_status_name(cal_status),
                 uptime_s,
                 last_fault,
                 last_fault_name: ecu_last_fault_name(last_fault),

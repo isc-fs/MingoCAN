@@ -301,6 +301,12 @@ export type PitDiagEvent =
           taskDiag: boolean;
           /** "powerOn" | "pin" | "software" | "iwdg" | … */
           resetCause: string;
+          /** Pedal-calibration provenance (#169): "loaded" = a stored
+           *  calibration is in force; "defaults" | "invalidFellBack" |
+           *  "badVersionFellBack" all mean the ECU is running
+           *  compile-time defaults. Ungated, so it is readable without
+           *  arming — the proof that a committed calibration took. */
+          calStatus: string;
           uptimeS: number;
           lastFault: number;
           /** "none" | "hardFault" | "stackOverflow" | … */

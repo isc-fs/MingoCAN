@@ -217,6 +217,7 @@
         taskTelemetry: boolean;
         taskDiag: boolean;
         resetCause: string;
+        calStatus: string;
         uptimeS: number;
         lastFault: number;
         lastFaultName: string;
@@ -934,6 +935,7 @@
                     taskTelemetry: event.taskTelemetry,
                     taskDiag: event.taskDiag,
                     resetCause: event.resetCause,
+                    calStatus: event.calStatus,
                     uptimeS: event.uptimeS,
                     lastFault: event.lastFault,
                     lastFaultName: event.lastFaultName,
@@ -2147,6 +2149,19 @@
                                 <span class="stat" class:bad={ecuHealth.lastFault !== 0}>
                                     <span>last fault</span>
                                     <strong>{ecuHealth.lastFaultName}</strong>
+                                </span>
+                                <!-- Pedal calibration provenance (#169).
+                                     Anything but "loaded" means the pedals
+                                     are on compile-time defaults, which is
+                                     the failure a committed-but-ignored
+                                     calibration would otherwise hide. -->
+                                <span
+                                    class="stat"
+                                    class:bad={ecuHealth.calStatus !== 'loaded'}
+                                    title="Whether a STORED pedal calibration is in force (0x704 cal_status). 'defaults' = none stored; 'invalidFellBack' / 'badVersionFellBack' = one was stored but rejected at boot, so the ECU is running compile-time values. Ungated — readable without arming."
+                                >
+                                    <span>pedal cal</span>
+                                    <strong>{ecuHealth.calStatus}</strong>
                                 </span>
                             </div>
                         {:else}
