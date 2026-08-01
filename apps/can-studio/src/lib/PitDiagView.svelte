@@ -49,6 +49,7 @@
         type PitDiagProfile,
         type PitDiagStatus,
     } from './pit_diag';
+    import CalibrationPanel from './CalibrationPanel.svelte';
     import { settings } from './settings.svelte';
     import type { ViewId } from './stores';
 
@@ -1485,6 +1486,19 @@
             <div class="ecu-grid">
                 {@render ecuCards(true)}
             </div>
+            <!-- Calibration (#534). Only on the dedicated ECU tab, never in
+                 the aggregated cockpit: it WRITES to the car, and burying a
+                 write behind a side-by-side overview of three boards is how
+                 someone commits one by accident. It reuses this view's armed
+                 session and decoded pedal values rather than opening its own. -->
+            <CalibrationPanel
+                armed={armState.kind === 'armed'}
+                pedals={ecuPedals}
+                fsmState={ecuStatus?.fsmState ?? null}
+                tsActive={ecuDv?.tsActive ?? null}
+                motorRpm={ecuDv?.motorRpmMech ?? null}
+                torquePct={ecuStatus?.torquePct ?? null}
+            />
         {/if}
     {:else}
     <!-- Controls row -->
