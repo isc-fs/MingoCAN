@@ -62,18 +62,35 @@
 
     // ---- Stability window ----
     //
-    // A capture is only meaningful once the reading has settled, and the
-    // ECU rejects an unstable sample outright (SampleUnstable). Rather
-    // than let the operator find that out by being refused, gate the
-    // button on the spread over the last second and show them the number.
+    // The job of this gate is to tell "the operator is still moving the
+    // pedal" apart from "the signal is at rest and simply noisy". It is
+    // NOT a noise filter, and it must not try to be one.
     //
-    // The window is also why BRAKE_REST is worth dwelling on: the released
-    // brake sits around 580 counts but its noise reaches ~730, and the
-    // armed threshold derived from it has only ~20 counts of headroom
-    // above that band. Capturing mid-wobble is how a car ends up arming
-    // R2D on an untouched pedal.
+    // It is also the ONLY stability check in the system: `SampleUnstable`
+    // exists in the protocol but the firmware never emits it (grep
+    // cal_session.cpp), so the ECU accepts whatever it is handed. Nothing
+    // downstream will catch a capture taken mid-sweep.
+    //
+    // Thresholds are per-signal because the two sensors are nothing alike:
+    //
+    //   Brake — the released pedal sits near 580 counts but its noise
+    //   reaches ~730 on the car (ecu_config.hpp, on-car cal 2026-06-27).
+    //   That is a ~150-count band at rest. Anything tighter than that can
+    //   never be satisfied, and BRAKE_REST is the capture the derived
+    //   arming threshold depends on.
+    //
+    //   APPS — the bench calibration applies ~13 counts of margin at each
+    //   endpoint, so the channels are far quieter.
+    //
+    // Both sit well below real pedal movement: APPS travel is 860 and 680
+    // counts, brake travel a couple of thousand, so a pedal actually being
+    // moved blows past these by an order of magnitude.
     const STABILITY_WINDOW_MS = 1000;
-    const STABLE_SPREAD_COUNTS = 12;
+    /** ~5 % of the smaller APPS span (680 counts). */
+    const STABLE_SPREAD_APPS = 40;
+    /** Clears the measured ~150-count rest-noise band with margin, and is
+     *  still under a tenth of usable brake travel. */
+    const STABLE_SPREAD_BRAKE = 200;
 
     interface Sample {
         t: number;
@@ -105,8 +122,11 @@
     function pointSpread(p: CalPoint): number {
         return isAppsPoint(p) ? appsSpread : brakeSpread;
     }
+    function pointTolerance(p: CalPoint): number {
+        return isAppsPoint(p) ? STABLE_SPREAD_APPS : STABLE_SPREAD_BRAKE;
+    }
     function pointIsStable(p: CalPoint): boolean {
-        return pointSpread(p) <= STABLE_SPREAD_COUNTS;
+        return pointSpread(p) <= pointTolerance(p);
     }
 
     // ---- Session state (0x7E3) ----
@@ -392,11 +412,11 @@
                     <span class="stat"><span>APPS2 %</span><strong>{pedals.apps2Pct}%</strong></span>
                 </div>
                 <div class="reads">
-                    <span class="stat" class:bad={appsSpread > STABLE_SPREAD_COUNTS}>
+                    <span class="stat" class:bad={appsSpread > STABLE_SPREAD_APPS}>
                         <span>accelerator spread (1 s)</span>
                         <strong class="mono">{appsSpread === Infinity ? '—' : appsSpread}</strong>
                     </span>
-                    <span class="stat" class:bad={brakeSpread > STABLE_SPREAD_COUNTS}>
+                    <span class="stat" class:bad={brakeSpread > STABLE_SPREAD_BRAKE}>
                         <span>brake spread (1 s)</span>
                         <strong class="mono">{brakeSpread === Infinity ? '—' : brakeSpread}</strong>
                     </span>
@@ -526,7 +546,7 @@
                         disabled={busy || pedals === null || !pointIsStable(currentPoint)}
                         title={pointIsStable(currentPoint)
                             ? 'Capture this point'
-                            : 'The reading is still moving. The ECU rejects an unstable sample, so wait for it to settle.'}
+                            : `Still moving — spread ${pointSpread(currentPoint)} counts, needs ${pointTolerance(currentPoint)} or less. The ECU does not check this, so a capture taken mid-sweep would be accepted and stored.`}
                     >
                         Capture
                     </button>
