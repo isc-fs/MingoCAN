@@ -53,3 +53,11 @@ update this file's commit/date. If the conformance test then fails, the
 ECU wire changed — reconcile src/pit_diag/ecu.rs *and* the CLI/Studio
 surfaces that carry the field before shipping. Six drifts accumulated
 silently before this test existed (see the test's module docs).
+
+You should not have to remember to refresh it. The conformance test
+compares the decoder against THIS SNAPSHOT, so it cannot notice the
+snapshot itself going stale — upstream moving changes nothing in this
+repo. `.github/workflows/ecu-dbc-drift.yml` covers that blind spot: it
+diffs this file against the ECU's dev branch daily and keeps a single
+`dbc-drift` issue in sync (opened on drift, body updated while it
+persists, closed automatically once the snapshot matches again).

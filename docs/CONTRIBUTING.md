@@ -59,6 +59,25 @@ Docs-only changes (README / REQUIREMENTS / ARCHITECTURE / ROADMAP /
 `docs/**`) skip CI via path filters — no runner minutes for comment
 tweaks.
 
+### Upstream DBC drift watch
+
+`.github/workflows/ecu-dbc-drift.yml` runs daily (06:00 UTC) and on
+manual dispatch. It diffs the vendored `src/pit_diag/testdata/ecu.dbc`
+against the ECU repo's `dev` branch and keeps one `dbc-drift` issue in
+sync: opened when they diverge, body updated while the drift persists,
+closed automatically once the snapshot is refreshed.
+
+It exists because `tests/ecu_dbc_conformance.rs` has a blind spot by
+construction — it checks the decoder against the *vendored snapshot*, so
+it can only fail once somebody re-vendors. Nothing in this repo changes
+when the ECU wire moves. Six decode drifts accumulated behind that gap
+before #528, and `0x708` sat undecoded after it merged upstream.
+
+> **This is a scheduled workflow, so it only runs from the default
+> branch.** Merging it to `dev` is not enough — it stays dormant until
+> `dev` reaches `main` at the next release. Same applies to any
+> `schedule`-triggered workflow added later.
+
 ---
 
 ## How we work with this repository
