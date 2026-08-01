@@ -1,0 +1,201 @@
+# Upstream drift watch for the vendored ECU DBC.
+#
+# `tests/ecu_dbc_conformance.rs` checks the decoder against the vendored
+# snapshot in `src/pit_diag/testdata/ecu.dbc`. That catches a decoder that
+# disagrees with the snapshot — but it cannot notice the snapshot itself
+# going stale, because upstream moving changes nothing in this repo. Drift
+# only surfaced when somebody happened to re-vendor.
+#
+# That gap is how six decode drifts accumulated silently before #528, and
+# how 0x708 sat undecoded after it merged upstream. This job closes it:
+# fetch the ECU's dev DBC daily, diff it against the snapshot, and keep a
+# single issue in sync with the result.
+#
+# Lifecycle — one issue, no spam:
+#   drift appears  -> open an issue with the diff
+#   drift persists -> edit that issue's body (never a new comment)
+#   drift resolved -> close it with a note
+#
+# The job itself stays green while drift exists; a red scheduled workflow
+# gets tuned out within a week, an assigned issue does not. Genuine
+# failures (fetch broken, upstream branch renamed) still fail the step.
+name: ECU DBC drift watch
+
+on:
+  schedule:
+    # 06:00 UTC daily — before European working hours, so a drift that
+    # landed upstream overnight is waiting when someone starts.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ecu-dbc-drift
+  cancel-in-progress: false
+
+env:
+  ECU_REPO: isc-fs/IFS08-CE-ECU
+  ECU_BRANCH: dev
+  ECU_DBC_PATH: docs/dbc/ecu.dbc
+  VENDORED: src/pit_diag/testdata/ecu.dbc
+  DRIFT_LABEL: dbc-drift
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both repos are public, so the default GITHUB_TOKEN can read the
+      # ECU. No PAT to rotate.
+      - name: Fetch upstream ECU DBC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${ECU_REPO}/contents/${ECU_DBC_PATH}?ref=${ECU_BRANCH}" \
+            --jq '.content' | base64 -d > upstream-ecu.dbc
+          # A silently-empty fetch would look identical to "no drift"
+          # against a deleted snapshot, so refuse to continue on one.
+          if [ ! -s upstream-ecu.dbc ]; then
+            echo "::error::fetched an empty ${ECU_DBC_PATH} from ${ECU_REPO}@${ECU_BRANCH}"
+            exit 1
+          fi
+          COMMIT=$(gh api "repos/${ECU_REPO}/commits/${ECU_BRANCH}" --jq '.sha')
+          COMMIT_DATE=$(gh api "repos/${ECU_REPO}/commits/${ECU_BRANCH}" --jq '.commit.committer.date')
+          {
+            echo "commit=${COMMIT}"
+            echo "commit_date=${COMMIT_DATE}"
+          } >> "$GITHUB_ENV"
+
+      - name: Diff against the vendored snapshot
+        id: diff
+        run: |
+          set -euo pipefail
+          if diff -q "$VENDORED" upstream-ecu.dbc >/dev/null 2>&1; then
+            echo "drifted=false" >> "$GITHUB_OUTPUT"
+            echo "Snapshot matches ${ECU_REPO}@${ECU_BRANCH}."
+            exit 0
+          fi
+
+          echo "drifted=true" >> "$GITHUB_OUTPUT"
+
+          # Cap the diff so a wholesale regeneration can't blow the 65536
+          # character issue-body limit.
+          diff -u "$VENDORED" upstream-ecu.dbc | head -c 40000 > drift.diff || true
+
+          # The decoder only asserts the PitDiag_* messages, so separate
+          # "the decoder is affected" from "the snapshot is merely stale".
+          if grep -qE '^[+-].*PitDiag_' drift.diff; then
+            echo "affects_decoder=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "affects_decoder=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # New/removed messages are the highest-signal lines — surface
+          # them on their own rather than making a human read the hunk.
+          grep -E '^[+-]BO_ ' drift.diff > msg-changes.txt || true
+
+      - name: Sync the drift issue
+        uses: actions/github-script@v7
+        env:
+          DRIFTED: ${{ steps.diff.outputs.drifted }}
+          AFFECTS_DECODER: ${{ steps.diff.outputs.affects_decoder }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const label = process.env.DRIFT_LABEL;
+            const drifted = process.env.DRIFTED === 'true';
+
+            // Label is created on first use, matching branch-issue.yml.
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch {
+              await github.rest.issues.createLabel({
+                owner, repo, name: label, color: 'd93f0b',
+                description: 'Vendored DBC snapshot is behind its upstream source',
+              });
+            }
+
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, labels: label, state: 'open', per_page: 100,
+            });
+            const existing = open.find((i) => !i.pull_request);
+
+            if (!drifted) {
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `Snapshot re-vendored — \`src/pit_diag/testdata/ecu.dbc\` now matches `
+                      + `\`${process.env.ECU_REPO}@${process.env.ECU_BRANCH}\`. Closing automatically.`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number, state: 'closed',
+                });
+                core.info(`Closed #${existing.number} — drift resolved.`);
+              } else {
+                core.info('No drift, no open issue. Nothing to do.');
+              }
+              return;
+            }
+
+            const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim() : '');
+            const diff = read('drift.diff');
+            const msgChanges = read('msg-changes.txt');
+            const affects = process.env.AFFECTS_DECODER === 'true';
+
+            const title = 'ECU DBC snapshot is behind upstream';
+            const body = [
+              `The vendored \`src/pit_diag/testdata/ecu.dbc\` no longer matches`,
+              `[\`${process.env.ECU_REPO}@${process.env.ECU_BRANCH}\`](https://github.com/${process.env.ECU_REPO}/blob/${process.env.ECU_BRANCH}/${process.env.ECU_DBC_PATH}).`,
+              ``,
+              `| | |`,
+              `|---|---|`,
+              `| Upstream commit | \`${process.env.commit}\` |`,
+              `| Upstream date | ${process.env.commit_date} |`,
+              `| Touches \`PitDiag_*\` | ${affects ? '**yes — the decoder is affected**' : 'no — snapshot is merely stale'} |`,
+              ``,
+              affects
+                ? `\`tests/ecu_dbc_conformance.rs\` only asserts the \`PitDiag_*\` messages, and this diff touches them. `
+                  + `Re-vendoring will make it fail, which is the intended signal: reconcile \`src/pit_diag/ecu.rs\` `
+                  + `and the CLI/Studio surfaces that carry the field.`
+                : `This diff does not touch any \`PitDiag_*\` message, so the decoder is unaffected. `
+                  + `Refreshing the snapshot is still worth doing so the next real drift shows up small.`,
+              ``,
+              ...(msgChanges
+                ? ['### Messages added or removed', '', '```diff', msgChanges, '```', '']
+                : []),
+              `### Full diff (vendored → upstream)`,
+              ``,
+              '```diff',
+              diff,
+              '```',
+              ``,
+              `### To resolve`,
+              ``,
+              '```bash',
+              `git -C ../IFS08-CE-ECU show ${process.env.ECU_BRANCH}:${process.env.ECU_DBC_PATH} > ${process.env.VENDORED}`,
+              '```',
+              ``,
+              `Then update the \`ecu.dbc\` commit + date in \`src/pit_diag/testdata/PROVENANCE.txt\` and run \`cargo test --test ecu_dbc_conformance\`.`,
+              ``,
+              `<sub>Kept up to date automatically by \`.github/workflows/ecu-dbc-drift.yml\`. This issue closes itself once the snapshot matches.</sub>`,
+            ].join('\n');
+
+            if (existing) {
+              // Edit in place — a daily comment on a long-lived drift
+              // would train everyone to ignore the thread.
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, title, body,
+              });
+              core.info(`Updated #${existing.number} with the current diff.`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner, repo, title, body, labels: [label],
+              });
+              core.info(`Opened #${created.data.number}.`);
+            }

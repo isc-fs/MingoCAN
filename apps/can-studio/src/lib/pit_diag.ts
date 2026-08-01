@@ -227,6 +227,10 @@ export type PitDiagEvent =
           startButton: boolean;
           /** DV (driverless) drive latched this cycle (#109). */
           dvMode: boolean;
+          /** Sticky since boot: a CAN frame was dropped by a full TX queue
+           *  (#127). Never clears short of a reset. The 0x100 heartbeat the
+           *  AMS watchdogs to hold the AIRs closed rides that same queue. */
+          txDropped: boolean;
           torquePct: number;
           vCellMinMv: number;
           torqueCmd: number;
@@ -307,6 +311,30 @@ export type PitDiagEvent =
           stubNoInverter: boolean;
           stubStart: boolean;
           stubBrake: boolean;
+      }
+    | {
+          /** ECU 0x708 — the inverter's two lower fault layers (#168).
+           *  L3 (the DEM code) rides `ecuInverter`; these are the layers
+           *  UNDER it. Anomaly names arrive ready to render — the health
+           *  bits (alive / enable / init_ok, where CLEAR is the fault) are
+           *  already inverted backend-side. */
+          kind: 'ecuInvFaults';
+          /** Active L1 power-stage anomalies, e.g. `["HVIL_Open"]`. */
+          l1Anomalies: string[];
+          /** Active L2 machine-control anomalies. */
+          l2Anomalies: string[];
+          /** While true, NO CAN command clears the DEM — the root cause is
+           *  still live. Send the operator to the hardware, not the tool. */
+          l1BlocksDemClear: boolean;
+          /** Follow-up words sent after the primary recovery word (0..3). */
+          cmdFollowN: number;
+          /** The ECU asserted Flt_Clear on 0x360. */
+          cmdFltClear: boolean;
+          /** ms since the last 0x461, saturating at 255. */
+          invStateAgeMs: number;
+          /** Increments per 0x461; the delta between consecutive frames is
+           *  the arrival count per 100 ms (10 => 10 ms period, 1 => 100 ms). */
+          invStateSeq: number;
       }
     | {
           /** ECU 0x707 — DV (driverless) integration view (#109). The
