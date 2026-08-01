@@ -81,18 +81,21 @@
         apps2: number;
         brake: number;
     }
-    let window_ = $state<Sample[]>([]);
+    // Deliberately NOT $state. The effect that fills this buffer has to
+    // read the previous contents to prune them, and reading + writing the
+    // same reactive value inside one effect is an infinite update cycle —
+    // Svelte 5 aborts the component when it sees one, which silently takes
+    // onMount (and therefore the event listener) down with it. The derived
+    // spreads below are the reactive surface instead.
+    let samples: Sample[] = [];
+    let appsSpread = $state(Infinity);
+    let brakeSpread = $state(Infinity);
 
-    function spread(pick: (s: Sample) => number): number | null {
-        if (window_.length < 3) return null;
-        const vs = window_.map(pick);
+    function spreadOf(pick: (s: Sample) => number): number {
+        if (samples.length < 3) return Infinity;
+        const vs = samples.map(pick);
         return Math.max(...vs) - Math.min(...vs);
     }
-
-    const appsSpread = $derived(
-        Math.max(spread((s) => s.apps1) ?? Infinity, spread((s) => s.apps2) ?? Infinity),
-    );
-    const brakeSpread = $derived(spread((s) => s.brake) ?? Infinity);
 
     /** Which signal a capture point watches — APPS points gate on the two
      *  accelerator channels, brake points on the brake. */
@@ -186,10 +189,10 @@
         const p = pedals;
         if (p === null) return;
         const now = Date.now();
-        window_ = [
-            ...window_.filter((s) => now - s.t < STABILITY_WINDOW_MS),
-            { t: now, apps1: p.apps1Raw, apps2: p.apps2Raw, brake: p.brakeRaw },
-        ];
+        samples = samples.filter((s) => now - s.t < STABILITY_WINDOW_MS);
+        samples.push({ t: now, apps1: p.apps1Raw, apps2: p.apps2Raw, brake: p.brakeRaw });
+        appsSpread = Math.max(spreadOf((s) => s.apps1), spreadOf((s) => s.apps2));
+        brakeSpread = spreadOf((s) => s.brake);
     });
 
     onMount(async () => {
