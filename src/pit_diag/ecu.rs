@@ -2,9 +2,11 @@
 //!
 //! Companion to the AMS observer in the parent module. The ECU exposes
 //! a *separate*, much smaller stream than the AMS: when armed it emits
-//! five frames at 100 ms carrying the vehicle-control picture — FSM /
-//! inverter state, the two APPS pedal channels, the brake, the
-//! inverter DC-bus / RPM / error, and a firmware-ID frame.
+//! [`ECU_EXPECTED_FRAMES_PER_SCAN`] frames at 100 ms carrying the
+//! vehicle-control picture — FSM / inverter state, the two APPS pedal
+//! channels, the brake, the inverter DC-bus / RPM / error and its two
+//! lower fault layers, the DV handshake, and a firmware-ID frame — plus
+//! an ungated `0x704` health frame at 1 Hz.
 //!
 //! ## Wire protocol
 //!
@@ -25,6 +27,11 @@
 //!     inverter error code, and the mode word the ECU is commanding.
 //!   - `0x703` — fwinfo: firmware semver + first 4 bytes of the git hash.
 //!   - `0x705` — brake: physical brake pressure (×0.1 bar) + brake %.
+//!   - `0x706` — inverter temperatures (board / power stage / motors).
+//!   - `0x707` — the DV (driverless) handshake view.
+//!   - `0x708` — the inverter's L1/L2 fault layers + commanded burst.
+//!   - `0x704` — firmware health. **Ungated** and 1 Hz, not part of the
+//!     100 ms cyclic set above.
 //!
 //! Endianness: the multi-byte numeric fields (cell-V, torque cmd,
 //! APPS/brake raw, DC-bus, RPM, brake pressure, git hash) are
@@ -66,6 +73,9 @@ pub const ECU_INVERTER_TEMPS_ID: u16 = 0x706;
 /// `0x704` — firmware health (heap, per-task liveness, reset cause, faults).
 /// Emitted at 1 Hz (slower than the 100 ms cyclic frames) from DiagTask.
 pub const ECU_HEALTH_ID: u16 = 0x704;
+/// `0x708` — the inverter's two LOWER fault layers, forwarded from `0x461`
+/// (IFS08-CE-ECU #168). 100 ms while armed.
+pub const ECU_INV_FAULTS_ID: u16 = 0x708;
 /// `0x707` — the ECU's view of the DV (driverless) integration (#109):
 /// R2D/torque-stream freshness + the TX-side autonomy handshake verdicts +
 /// the conditioned autonomous torque. 100 ms while armed.
@@ -76,9 +86,10 @@ pub const ECU_DV_ID: u16 = 0x707;
 pub const ECU_INV_TEMP_DISCONNECTED_C: i16 = 205;
 
 /// Number of CYCLIC (100 ms) stream frames emitted per scan when armed:
-/// status / pedals / inverter / fwinfo / brake / inverter-temps / dv (#109).
-/// The `0x704` health frame is acyclic-ish (1 Hz) and not counted here.
-pub const ECU_EXPECTED_FRAMES_PER_SCAN: usize = 7;
+/// status / pedals / inverter / fwinfo / brake / inverter-temps / dv (#109) /
+/// inv-faults (#168). The `0x704` health frame is acyclic-ish (1 Hz) and not
+/// counted here.
+pub const ECU_EXPECTED_FRAMES_PER_SCAN: usize = 8;
 
 // ---- Enums -------------------------------------------------------
 
@@ -466,6 +477,155 @@ pub struct EcuDvFrame {
     pub motor_rpm_mech: i16,
 }
 
+/// `0x708` — the inverter's two lower fault layers, forwarded from `0x461`
+/// (IFS08-CE-ECU #168), plus the commanded side of the fault handshake and a
+/// freshness measure for the state the ECU is steering on.
+///
+/// The W90 has three fault layers and they cascade upward (manual §9.2):
+/// L1 `PwrStg_BitState` (hardware protection), L2 `EMCtrl_FOC_BitState`
+/// (machine control), L3 `DEM_Code` — and only L3 rides `0x702`. That made a
+/// latched DEM refusing to clear indistinguishable from a live L1/L2
+/// condition holding it up. **If an L1 bit is asserted, no CAN command clears
+/// the DEM** — the root cause is still present. That is the difference
+/// between a firmware bug and a wiring or interlock fault, and
+/// [`hvil_open`](Self::pwrstg_hvil_open) is the load-bearing one.
+///
+/// Both layers are bitmasks, not enums — several bits can be set at once.
+/// Note `pwrstg_alive`, `pwrstg_enable` and `emctrl_init_ok` are **health**
+/// bits: set is normal, **clear** is the anomaly. [`l1_anomalies`] and
+/// [`l2_anomalies`] fold that inversion in so callers can't get it backwards.
+///
+/// [`l1_anomalies`]: Self::l1_anomalies
+/// [`l2_anomalies`]: Self::l2_anomalies
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuInvFaultsFrame {
+    // ---- L1: power stage (manual §9.2.1), bits 0-8 ----
+    /// Health bit — power stage alive. **Clear is the anomaly.**
+    pub pwrstg_alive: bool,
+    /// Health bit — power stage enabled. **Clear is the anomaly.**
+    pub pwrstg_enable: bool,
+    /// Under-voltage lockout.
+    pub pwrstg_uvlo: bool,
+    /// Desaturation (IGBT short-circuit protection).
+    pub pwrstg_desat: bool,
+    /// Dead-time violation.
+    pub pwrstg_dt_violation: bool,
+    /// **HVIL open** — the interlock loop is broken. No CAN command clears a
+    /// DEM while this is asserted; go and find the unmated connector.
+    pub pwrstg_hvil_open: bool,
+    /// Over-current protection.
+    pub pwrstg_ocp: bool,
+    /// Over-voltage, threshold 1.
+    pub pwrstg_ovp_th1: bool,
+    /// Over-voltage, threshold 2.
+    pub pwrstg_ovp_th2: bool,
+
+    // ---- L2: electric machine control (manual §9.2.2), bits 16-23 ----
+    /// Health bit — machine control initialised. **Clear is the anomaly.**
+    pub emctrl_init_ok: bool,
+    /// Position-feedback fault (resolver / encoder).
+    pub emctrl_posfb: bool,
+    /// Active short circuit engaged.
+    pub emctrl_asc: bool,
+    /// Phase-current imbalance.
+    pub emctrl_curr_imbalance: bool,
+    /// Power-stage fault — manual §9.2.2 defines this as literally "see the
+    /// L1 faults", so it is the cascade marker: when set, read L1.
+    pub emctrl_pwrstg_fault: bool,
+    /// Current derating active.
+    pub emctrl_curr_derating: bool,
+    /// Control loop de-locked.
+    pub emctrl_loop_delocked: bool,
+    /// Phase-current acquisition fault.
+    pub emctrl_phcurr_acq: bool,
+
+    // ---- Commanded side of the handshake (byte 3) ----
+    /// How many follow-up words the ECU sent after the primary recovery word
+    /// (2 bits, 0..=3). The pit tool sits on FDCAN2 while the inverter
+    /// setpoints go out on FDCAN1, so without this you cannot tell "the ECU
+    /// never emitted the burst" from "it did and the inverter ignored it" —
+    /// `0x702` `inv_mode_cmd` only carries the primary word. Read together
+    /// with [`EcuStatusFrame::tx_dropped`]: burst emitted and nothing dropped
+    /// means it reached the FDCAN1 TX FIFO.
+    pub cmd_follow_n: u8,
+    /// The ECU asserted `Flt_Clear` on `0x360`.
+    pub cmd_flt_clear: bool,
+
+    // ---- Freshness of the state the ladder is driven by (bytes 4-5) ----
+    /// Milliseconds since the last `0x461`, saturating at 255. The whole
+    /// climb/fault ladder is driven by `inv_state`, which comes from `0x461`;
+    /// anything near 255 means far too stale to steer a state machine with.
+    pub inv_state_age_ms: u8,
+    /// Increments once per `0x461` received, wrapping. Since `0x708` is
+    /// emitted every 100 ms, **the delta between consecutive frames is the
+    /// arrival count per 100 ms** — 10 means a 10 ms period, 1 means 100 ms,
+    /// mostly-zero means 500 ms. That measurement needs no FDCAN1 access,
+    /// which the pit adapter does not have.
+    pub inv_state_seq: u8,
+}
+
+impl EcuInvFaultsFrame {
+    /// Names of the active L1 anomalies, health-bit inversion already
+    /// applied. Empty means the power stage is clean.
+    #[must_use]
+    pub fn l1_anomalies(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        // Health bits: absence is the fault.
+        if !self.pwrstg_alive {
+            v.push("PwrStg not alive");
+        }
+        if !self.pwrstg_enable {
+            v.push("PwrStg not enabled");
+        }
+        for (set, name) in [
+            (self.pwrstg_uvlo, "UVLO"),
+            (self.pwrstg_desat, "Desat"),
+            (self.pwrstg_dt_violation, "DeadTimeViolation"),
+            (self.pwrstg_hvil_open, "HVIL_Open"),
+            (self.pwrstg_ocp, "OCP"),
+            (self.pwrstg_ovp_th1, "OVP_Th1"),
+            (self.pwrstg_ovp_th2, "OVP_Th2"),
+        ] {
+            if set {
+                v.push(name);
+            }
+        }
+        v
+    }
+
+    /// Names of the active L2 anomalies, health-bit inversion already applied.
+    #[must_use]
+    pub fn l2_anomalies(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if !self.emctrl_init_ok {
+            v.push("EMCtrl not initialised");
+        }
+        for (set, name) in [
+            (self.emctrl_posfb, "PosFeedback"),
+            (self.emctrl_asc, "ASC"),
+            (self.emctrl_curr_imbalance, "CurrentImbalance"),
+            (self.emctrl_pwrstg_fault, "PwrStgFault (see L1)"),
+            (self.emctrl_curr_derating, "CurrentDerating"),
+            (self.emctrl_loop_delocked, "LoopDelocked"),
+            (self.emctrl_phcurr_acq, "PhaseCurrentAcq"),
+        ] {
+            if set {
+                v.push(name);
+            }
+        }
+        v
+    }
+
+    /// `true` while an L1 condition is holding a DEM up. **No CAN command
+    /// will clear the fault in this state** — the root cause is still live,
+    /// so a recovery burst is wasted effort and the operator should be sent
+    /// looking at hardware instead.
+    #[must_use]
+    pub fn l1_blocks_dem_clear(&self) -> bool {
+        !self.l1_anomalies().is_empty()
+    }
+}
+
 /// A decoded ECU pit-diag frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EcuPitDiagFrame {
@@ -490,6 +650,8 @@ pub enum EcuPitDiagFrame {
     Health(EcuHealthFrame),
     /// `0x707` — DV (driverless) integration view.
     Dv(EcuDvFrame),
+    /// `0x708` — inverter L1/L2 fault layers + commanded burst (#168).
+    InvFaults(EcuInvFaultsFrame),
 }
 
 // ---- Encode / decode ---------------------------------------------
@@ -639,6 +801,41 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 r2d_confirm: (flags & 0x10) != 0,
                 dv_torque_pct: p[1],
                 motor_rpm_mech: i16::from_le_bytes([p[2], p[3]]),
+            }))
+        }
+        ECU_INV_FAULTS_ID => {
+            if p.len() < 6 {
+                return None;
+            }
+            // L1 is bits 0-8: all of byte 0 plus bit 0 of byte 1. L2 is
+            // byte 2. The commanded handshake is byte 3 bits 0-2.
+            let l1_lo = p[0];
+            let l1_hi = p[1];
+            let l2 = p[2];
+            let cmd = p[3];
+            Some(EcuPitDiagFrame::InvFaults(EcuInvFaultsFrame {
+                pwrstg_alive: (l1_lo & 0x01) != 0,
+                pwrstg_enable: (l1_lo & 0x02) != 0,
+                pwrstg_uvlo: (l1_lo & 0x04) != 0,
+                pwrstg_desat: (l1_lo & 0x08) != 0,
+                pwrstg_dt_violation: (l1_lo & 0x10) != 0,
+                pwrstg_hvil_open: (l1_lo & 0x20) != 0,
+                pwrstg_ocp: (l1_lo & 0x40) != 0,
+                pwrstg_ovp_th1: (l1_lo & 0x80) != 0,
+                // bit 8 — the ninth L1 bit, alone in byte 1.
+                pwrstg_ovp_th2: (l1_hi & 0x01) != 0,
+                emctrl_init_ok: (l2 & 0x01) != 0,
+                emctrl_posfb: (l2 & 0x02) != 0,
+                emctrl_asc: (l2 & 0x04) != 0,
+                emctrl_curr_imbalance: (l2 & 0x08) != 0,
+                emctrl_pwrstg_fault: (l2 & 0x10) != 0,
+                emctrl_curr_derating: (l2 & 0x20) != 0,
+                emctrl_loop_delocked: (l2 & 0x40) != 0,
+                emctrl_phcurr_acq: (l2 & 0x80) != 0,
+                cmd_follow_n: cmd & 0x03,
+                cmd_flt_clear: (cmd & 0x04) != 0,
+                inv_state_age_ms: p[4],
+                inv_state_seq: p[5],
             }))
         }
         _ => None,
@@ -991,6 +1188,76 @@ mod tests {
             }
             other => panic!("expected Dv, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn inv_faults_decodes_both_layers_and_freshness() {
+        // byte0 = HVIL_Open (bit 5) + the two health bits set (alive,
+        // enable) => 0x23. byte1 bit 0 = OVP_Th2, the ninth L1 bit.
+        // byte2 = init_ok + PwrStgFault (the cascade marker) => 0x11.
+        // byte3 = follow_n 2 + Flt_Clear => 0b110 = 0x06.
+        let p = [0x23, 0x01, 0x11, 0x06, 40, 7];
+        match decode_frame(&CanFrame::new(ECU_INV_FAULTS_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::InvFaults(f) => {
+                assert!(f.pwrstg_alive && f.pwrstg_enable);
+                assert!(f.pwrstg_hvil_open);
+                assert!(f.pwrstg_ovp_th2, "ninth L1 bit lives in byte 1");
+                assert!(!f.pwrstg_ocp && !f.pwrstg_uvlo);
+                assert!(f.emctrl_init_ok && f.emctrl_pwrstg_fault);
+                assert_eq!(f.cmd_follow_n, 2);
+                assert!(f.cmd_flt_clear);
+                assert_eq!(f.inv_state_age_ms, 40);
+                assert_eq!(f.inv_state_seq, 7);
+
+                // Health bits set => not anomalies; the fault bits are.
+                assert_eq!(f.l1_anomalies(), vec!["HVIL_Open", "OVP_Th2"]);
+                assert_eq!(f.l2_anomalies(), vec!["PwrStgFault (see L1)"]);
+                assert!(f.l1_blocks_dem_clear());
+            }
+            other => panic!("expected InvFaults, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_faults_treats_cleared_health_bits_as_anomalies() {
+        // All-zero payload: every fault bit clear, but alive / enable /
+        // init_ok are HEALTH bits, so clear is the anomaly. Reading them
+        // the same way as the fault bits would call this frame clean.
+        let p = [0, 0, 0, 0, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_INV_FAULTS_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::InvFaults(f) => {
+                assert_eq!(
+                    f.l1_anomalies(),
+                    vec!["PwrStg not alive", "PwrStg not enabled"]
+                );
+                assert_eq!(f.l2_anomalies(), vec!["EMCtrl not initialised"]);
+                assert!(f.l1_blocks_dem_clear());
+            }
+            other => panic!("expected InvFaults, got {other:?}"),
+        }
+
+        // A genuinely clean power stage: health bits set, nothing else.
+        let clean = [0x03, 0x00, 0x01, 0x00, 5, 200];
+        match decode_frame(&CanFrame::new(ECU_INV_FAULTS_ID, &clean).unwrap()).unwrap() {
+            EcuPitDiagFrame::InvFaults(f) => {
+                assert!(f.l1_anomalies().is_empty());
+                assert!(f.l2_anomalies().is_empty());
+                assert!(
+                    !f.l1_blocks_dem_clear(),
+                    "clean L1 must not claim it blocks a DEM clear"
+                );
+            }
+            other => panic!("expected InvFaults, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_faults_rejects_a_short_frame() {
+        // DLC 6 is the contract; the draft that briefly carried DLC 4 had
+        // no age/seq bytes and never shipped, so a short frame is corrupt
+        // rather than old-firmware.
+        let short = [0x03, 0x00, 0x01, 0x00];
+        assert!(decode_frame(&CanFrame::new(ECU_INV_FAULTS_ID, &short).unwrap()).is_none());
     }
 
     #[test]

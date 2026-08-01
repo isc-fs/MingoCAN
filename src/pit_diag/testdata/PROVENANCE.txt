@@ -31,20 +31,22 @@ kept current by that repo's dbcinator bot, which regenerates and
 force-pushes it on every PR. Used by tests/ecu_dbc_conformance.rs.
 
 Vendored from branch: dev
-Commit:  a8165564a87e3202d50b8f63fba2d22ca8819910
-Date:    2026-07-22T01:56:41+02:00
+Commit:  6c381f39a48e25260d6c95341bba8cd038fc8fb5
+Date:    2026-07-29T15:58:27+02:00
 
 Vendor from the ECU's **dev** branch only — dev is the merged wire
 contract. Vendoring from a feature branch would pin this decoder to a
 layout that is still under review and may move before it lands.
 
-As of this snapshot the ECU has an unmerged branch (fix/inv-fault-off-word)
-adding 0x708 PitDiag_inv_faults — the W90 L1/L2 fault-layer bitmasks.
-That frame is deliberately NOT in this snapshot and NOT decoded. When it
-merges to dev, re-vendor: ecu_dbc_conformance.rs will fail on the
-PitDiag_* message set, which is the intended signal to add the decoder
-(and bump ECU_EXPECTED_FRAMES_PER_SCAN to 8, since 0x708 is cyclic at
-100 ms).
+That rule earned itself. The previous snapshot deliberately excluded
+0x708 PitDiag_inv_faults while it sat on an unmerged ECU branch. Between
+then and this refresh the frame changed on its way through review — DLC
+4 became DLC 6, gaining inv_state_age_ms and inv_state_seq. A decoder
+written against the feature branch would have shipped wrong.
+
+The workflow worked as intended: re-vendoring made
+ecu_dbc_conformance.rs fail on the PitDiag_* message set with
+instructions, and the decoder was added in response.
 
 To refresh: re-copy docs/dbc/ecu.dbc from the ECU repo's dev branch and
 update this file's commit/date. If the conformance test then fails, the

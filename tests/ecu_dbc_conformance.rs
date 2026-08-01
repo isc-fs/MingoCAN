@@ -37,8 +37,8 @@
 use can_dbc::{ByteOrder, Dbc, MessageId, ValueType};
 use can_flasher::pit_diag::ecu::{
     self, ECU_ACK_ID, ECU_ARM_ID, ECU_BRAKE_ID, ECU_DV_ID, ECU_EXPECTED_FRAMES_PER_SCAN,
-    ECU_FWINFO_ID, ECU_HEALTH_ID, ECU_INVERTER_ID, ECU_INVERTER_TEMPS_ID, ECU_PEDALS_ID,
-    ECU_STATUS_ID,
+    ECU_FWINFO_ID, ECU_HEALTH_ID, ECU_INVERTER_ID, ECU_INVERTER_TEMPS_ID, ECU_INV_FAULTS_ID,
+    ECU_PEDALS_ID, ECU_STATUS_ID,
 };
 
 const ECU_DBC: &str = include_str!(concat!(
@@ -82,6 +82,7 @@ const KNOWN_PIT_DIAG_MESSAGES: &[(&str, u16)] = &[
     ("PitDiag_brake", ECU_BRAKE_ID),
     ("PitDiag_inverter_temps", ECU_INVERTER_TEMPS_ID),
     ("PitDiag_dv", ECU_DV_ID),
+    ("PitDiag_inv_faults", ECU_INV_FAULTS_ID),
 ];
 
 // ---- Message set + IDs -------------------------------------------
@@ -157,6 +158,7 @@ fn message_lengths_match_the_decoder_minimums() {
         ("PitDiag_brake", 3),
         ("PitDiag_inverter_temps", 4),
         ("PitDiag_dv", 8),
+        ("PitDiag_inv_faults", 6),
     ];
     for (name, dlc) in expected {
         assert_eq!(
@@ -324,6 +326,37 @@ fn signal_layouts_match_the_decoder() {
             ("motor_rpm_mech", 16, 16, false, true),
         ]),
         "0x707 layout drifted"
+    );
+
+    // 0x708 — two bitmask layers. L1 is nine bits, so it straddles a byte
+    // boundary: bits 0-7 in byte 0 and bit 8 alone in byte 1. Getting that
+    // ninth bit wrong silently loses OVP_Th2.
+    assert_eq!(
+        layout(&dbc, "PitDiag_inv_faults"),
+        expect(&[
+            ("pwrstg_alive", 0, 1, false, false),
+            ("pwrstg_enable", 1, 1, false, false),
+            ("pwrstg_uvlo", 2, 1, false, false),
+            ("pwrstg_desat", 3, 1, false, false),
+            ("pwrstg_dt_violation", 4, 1, false, false),
+            ("pwrstg_hvil_open", 5, 1, false, false),
+            ("pwrstg_ocp", 6, 1, false, false),
+            ("pwrstg_ovp_th1", 7, 1, false, false),
+            ("pwrstg_ovp_th2", 8, 1, false, false),
+            ("emctrl_init_ok", 16, 1, false, false),
+            ("emctrl_posfb", 17, 1, false, false),
+            ("emctrl_asc", 18, 1, false, false),
+            ("emctrl_curr_imbalance", 19, 1, false, false),
+            ("emctrl_pwrstg_fault", 20, 1, false, false),
+            ("emctrl_curr_derating", 21, 1, false, false),
+            ("emctrl_loop_delocked", 22, 1, false, false),
+            ("emctrl_phcurr_acq", 23, 1, false, false),
+            ("cmd_follow_n", 24, 2, false, false),
+            ("cmd_flt_clear", 26, 1, false, false),
+            ("inv_state_age_ms", 32, 8, false, false),
+            ("inv_state_seq", 40, 8, false, false),
+        ]),
+        "0x708 layout drifted"
     );
 }
 

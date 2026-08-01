@@ -513,6 +513,20 @@ pub enum PitDiagEvent {
         stub_start: bool,
         stub_brake: bool,
     },
+    /// ECU `0x708` — the inverter's L1 (power stage) / L2 (machine control)
+    /// fault layers (#168). Anomaly lists arrive pre-named and health-bit
+    /// inversion already applied, so the frontend renders strings verbatim.
+    /// `l1_blocks_dem_clear` is the actionable one: while true, no CAN
+    /// command clears the DEM — the root cause is still live.
+    EcuInvFaults {
+        l1_anomalies: Vec<String>,
+        l2_anomalies: Vec<String>,
+        l1_blocks_dem_clear: bool,
+        cmd_follow_n: u8,
+        cmd_flt_clear: bool,
+        inv_state_age_ms: u8,
+        inv_state_seq: u8,
+    },
     /// ECU `0x707` — DV (driverless) integration view (#109). The `dv_mode`
     /// latch itself rides `EcuStatus`; this carries the handshake around it.
     EcuDv {
@@ -908,6 +922,15 @@ impl PitDiagEvent {
                 stub_no_inverter,
                 stub_start,
                 stub_brake,
+            },
+            EcuPitDiagFrame::InvFaults(f) => Self::EcuInvFaults {
+                l1_anomalies: f.l1_anomalies().iter().map(|s| (*s).to_string()).collect(),
+                l2_anomalies: f.l2_anomalies().iter().map(|s| (*s).to_string()).collect(),
+                l1_blocks_dem_clear: f.l1_blocks_dem_clear(),
+                cmd_follow_n: f.cmd_follow_n,
+                cmd_flt_clear: f.cmd_flt_clear,
+                inv_state_age_ms: f.inv_state_age_ms,
+                inv_state_seq: f.inv_state_seq,
             },
             EcuPitDiagFrame::Dv(EcuDvFrame {
                 dv_r2d_req,
