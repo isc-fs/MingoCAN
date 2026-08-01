@@ -25,6 +25,7 @@
     import AdaptersView from './lib/AdaptersView.svelte';
     import FlashView from './lib/FlashView.svelte';
     import SwdFlashView from './lib/SwdFlashView.svelte';
+    import CalibrationView from './lib/CalibrationView.svelte';
     import DiagnosticsView from './lib/DiagnosticsView.svelte';
     import BusMonitorView from './lib/BusMonitorView.svelte';
     import PitDiagView from './lib/PitDiagView.svelte';
@@ -92,6 +93,8 @@
             <FlashView navigateTo={selectView} />
         {:else if activeView === 'swdFlash'}
             <SwdFlashView />
+        {:else if activeView === 'calibration'}
+            <CalibrationView navigateTo={selectView} />
         {:else if activeView === 'diagnostics'}
             <DiagnosticsView navigateTo={selectView} />
         {:else if activeView === 'busMonitor'}

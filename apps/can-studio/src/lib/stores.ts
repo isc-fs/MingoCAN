@@ -17,6 +17,7 @@ export type ViewId =
     | 'adapters'
     | 'flash'
     | 'swdFlash'
+    | 'calibration'
     | 'diagnostics'
     | 'busMonitor'
     | 'pitDiag'
@@ -58,6 +59,15 @@ export const VIEWS: ViewMeta[] = [
         status: 'live',
         section: 'program',
         description: 'First-boot bootloader via SWD',
+    },
+    {
+        id: 'calibration',
+        label: 'Pedal calibration',
+        status: 'live',
+        // Program, not Observe: this WRITES to the car, and what it writes
+        // gates the EV.2.3 torque cut and the driverless R2D.
+        section: 'program',
+        description: 'Set APPS & brake endpoints over CAN',
     },
     {
         id: 'diagnostics',
