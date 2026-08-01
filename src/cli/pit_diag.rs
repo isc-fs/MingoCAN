@@ -802,7 +802,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
         F::Ack { enabled } => eprintln!("{prefix} ack enabled={enabled}"),
         F::Status(s) => println!(
             "{prefix} status fsm={:?} inv={:?} torque={}% vcell_min={}mV tcmd={} \
-             [ev23={} t11={} rtds={} preok={} start={} dv={}]",
+             [ev23={} t11={} rtds={} preok={} start={} dv={}]{}",
             s.fsm_state,
             s.inv_state,
             s.torque_pct,
@@ -814,6 +814,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             s.ok_precharge as u8,
             s.start_button as u8,
             s.dv_mode as u8,
+            if s.tx_dropped { " TX-DROPPED" } else { "" },
         ),
         F::Pedals(p) => println!(
             "{prefix} pedals apps1={}({}%) apps2={}({}%) brake_raw={}",
@@ -861,6 +862,31 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.last_fault,
             ecu_stub_text(h),
         ),
+        F::InvFaults(f) => {
+            let l1 = f.l1_anomalies();
+            let l2 = f.l2_anomalies();
+            let fmt = |v: &Vec<&'static str>| {
+                if v.is_empty() {
+                    "clean".to_string()
+                } else {
+                    v.join(",")
+                }
+            };
+            println!(
+                "{prefix} invflt L1[{}] L2[{}] cmd[follow={} flt_clear={}] 0x461_age={}ms seq={}{}",
+                fmt(&l1),
+                fmt(&l2),
+                f.cmd_follow_n,
+                f.cmd_flt_clear as u8,
+                f.inv_state_age_ms,
+                f.inv_state_seq,
+                if f.l1_blocks_dem_clear() {
+                    "  <- L1 LIVE: no CAN command will clear the DEM"
+                } else {
+                    ""
+                },
+            );
+        }
         F::Dv(d) => println!(
             "{prefix} dv    mode_torque={}% rpm={} [r2d_req={} cmd_fresh={} ts={} brk_lim={} r2d_ok={}]",
             d.dv_torque_pct,
@@ -885,7 +911,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             println!(r#"{{"tsMs":{ts_ms},"kind":"ack","enabled":{enabled}}}"#);
         }
         F::Status(s) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuStatus","fsmState":"{:?}","invState":"{:?}","ev23":{},"t11_8_9":{},"rtdsActive":{},"okPrecharge":{},"startButton":{},"dvMode":{},"torquePct":{},"vCellMinMv":{},"torqueCmd":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuStatus","fsmState":"{:?}","invState":"{:?}","ev23":{},"t11_8_9":{},"rtdsActive":{},"okPrecharge":{},"startButton":{},"dvMode":{},"txDropped":{},"torquePct":{},"vCellMinMv":{},"torqueCmd":{}}}"#,
             s.fsm_state,
             s.inv_state,
             s.ev_2_3,
@@ -894,6 +920,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             s.ok_precharge,
             s.start_button,
             s.dv_mode,
+            s.tx_dropped,
             s.torque_pct,
             s.v_cell_min_mv,
             s.torque_cmd,
@@ -946,6 +973,24 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.stub_no_inverter,
             h.stub_start,
             h.stub_brake,
+        ),
+        F::InvFaults(f) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"ecuInvFaults","l1Anomalies":[{}],"l2Anomalies":[{}],"l1BlocksDemClear":{},"cmdFollowN":{},"cmdFltClear":{},"invStateAgeMs":{},"invStateSeq":{}}}"#,
+            f.l1_anomalies()
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(","),
+            f.l2_anomalies()
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(","),
+            f.l1_blocks_dem_clear(),
+            f.cmd_follow_n,
+            f.cmd_flt_clear,
+            f.inv_state_age_ms,
+            f.inv_state_seq,
         ),
         F::Dv(d) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"ecuDv","dvR2dReq":{},"dvCmdFresh":{},"tsActive":{},"brakeOverLimit":{},"r2dConfirm":{},"dvTorquePct":{},"motorRpmMech":{}}}"#,

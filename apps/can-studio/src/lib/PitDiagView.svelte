@@ -162,6 +162,7 @@
         okPrecharge: boolean;
         startButton: boolean;
         dvMode: boolean;
+        txDropped: boolean;
         torquePct: number;
         vCellMinMv: number;
         torqueCmd: number;
@@ -198,6 +199,15 @@
         motor1Degc: number;
         motor2Degc: number;
     }
+    interface EcuInvFaultsSnapshot {
+        l1Anomalies: string[];
+        l2Anomalies: string[];
+        l1BlocksDemClear: boolean;
+        cmdFollowN: number;
+        cmdFltClear: boolean;
+        invStateAgeMs: number;
+        invStateSeq: number;
+    }
     interface EcuHealthSnapshot {
         freeHeap: number;
         minFreeHeap: number;
@@ -233,6 +243,7 @@
     let ecuFw = $state<EcuFwSnapshot | null>(null);
     let ecuHealth = $state<EcuHealthSnapshot | null>(null);
     let ecuDv = $state<EcuDvSnapshot | null>(null);
+    let ecuInvFaults = $state<EcuInvFaultsSnapshot | null>(null);
 
     // ---- uDV pit-diag snapshots (0x7A0..=0x7A4) ----
     interface UdvStatusSnapshot {
@@ -722,6 +733,7 @@
         ecuFw = null;
         ecuHealth = null;
         ecuDv = null;
+        ecuInvFaults = null;
         udvStatus = null;
         udvRes = null;
         udvPipe = null;
@@ -864,6 +876,7 @@
                     okPrecharge: event.okPrecharge,
                     startButton: event.startButton,
                     dvMode: event.dvMode,
+                    txDropped: event.txDropped,
                     torquePct: event.torquePct,
                     vCellMinMv: event.vCellMinMv,
                     torqueCmd: event.torqueCmd,
@@ -931,6 +944,17 @@
                 };
                 // 0x704 is 1 Hz, not part of the 100 ms cyclic scan —
                 // don't count it toward frames/scan.
+            } else if (event.kind === 'ecuInvFaults') {
+                ecuInvFaults = {
+                    l1Anomalies: event.l1Anomalies,
+                    l2Anomalies: event.l2Anomalies,
+                    l1BlocksDemClear: event.l1BlocksDemClear,
+                    cmdFollowN: event.cmdFollowN,
+                    cmdFltClear: event.cmdFltClear,
+                    invStateAgeMs: event.invStateAgeMs,
+                    invStateSeq: event.invStateSeq,
+                };
+                framesThisScan += 1;
             } else if (event.kind === 'ecuDv') {
                 ecuDv = {
                     dvR2dReq: event.dvR2dReq,
@@ -1804,6 +1828,16 @@
                             >
                                 {ecuStatus.dvMode ? 'driverless' : 'manual'}
                             </span>
+                            <!-- Sticky TX-drop announce (#127). Absent on a
+                                 healthy board, so only show it when set. -->
+                            {#if ecuStatus.txDropped}
+                                <span
+                                    class="pill pill-danger"
+                                    title="Sticky since boot (0x700 tx_dropped): the ECU dropped at least one CAN frame to a full TX queue. The 0x100 heartbeat the AMS watchdogs at 200 ms to hold the AIRs closed rides that same queue, so a lost cyclic is a safety-relevant event. Does not clear without a reset."
+                                >
+                                    TX dropped
+                                </span>
+                            {/if}
                         </div>
                         <div class="flags">
                             <span class="flag" class:on={ecuStatus.ev23}>EV 2.3</span>
@@ -1985,6 +2019,70 @@
                                 <strong>{fmtInvTemp(ecuInvTemps.motor2Degc)}</strong>
                             </span>
                         </div>
+                    {/if}
+                </div>
+
+                <!-- Inverter fault layers (0x708, #168). Sits next to the
+                     Inverter card because it explains that card's DEM code:
+                     L3 is the code, L1/L2 are the layers underneath it. -->
+                <div class="card">
+                    <h3 class="card-h">Inverter fault layers</h3>
+                    {#if ecuInvFaults !== null}
+                        {@const fl = ecuInvFaults}
+                        {#if fl.l1BlocksDemClear}
+                            <!-- The actionable verdict. While an L1 condition
+                                 is live the DEM cannot be cleared by any CAN
+                                 command, so stop retrying and go look at the
+                                 hardware. -->
+                            <p class="banner banner-danger small">
+                                <strong>L1 condition live — the DEM will not clear over CAN.</strong>
+                                The root cause is still present; a fault-reset burst cannot
+                                help. Check the hardware
+                                {#if fl.l1Anomalies.includes('HVIL_Open')}
+                                    — <strong>HVIL is open</strong>, so start with the
+                                    interlock loop and unmated connectors.
+                                {/if}
+                            </p>
+                        {/if}
+                        <div class="reads">
+                            <span class="stat" class:bad={fl.l1Anomalies.length > 0}>
+                                <span>L1 power stage</span>
+                                <strong>
+                                    {fl.l1Anomalies.length > 0
+                                        ? fl.l1Anomalies.join(', ')
+                                        : 'clean'}
+                                </strong>
+                            </span>
+                            <span class="stat" class:bad={fl.l2Anomalies.length > 0}>
+                                <span>L2 machine control</span>
+                                <strong>
+                                    {fl.l2Anomalies.length > 0
+                                        ? fl.l2Anomalies.join(', ')
+                                        : 'clean'}
+                                </strong>
+                            </span>
+                        </div>
+                        <div class="reads">
+                            <span
+                                class="stat"
+                                title="What the ECU SENT: follow-up words after the primary recovery word, and whether Flt_Clear was asserted on 0x360. The pit adapter cannot see FDCAN1, so this is the only view of the commanded side."
+                            >
+                                <span>cmd burst</span>
+                                <strong>
+                                    {fl.cmdFollowN} follow{fl.cmdFltClear ? ' + Flt_Clear' : ''}
+                                </strong>
+                            </span>
+                            <span
+                                class="stat"
+                                class:bad={fl.invStateAgeMs >= 200}
+                                title="Age of the 0x461 the ECU is steering its state machine on. The control loop runs at 100 Hz, so a stale reading means many command bursts fired off one observation."
+                            >
+                                <span>0x461 age</span>
+                                <strong>{fl.invStateAgeMs} ms</strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No fault-layer frame yet.</p>
                     {/if}
                 </div>
 
