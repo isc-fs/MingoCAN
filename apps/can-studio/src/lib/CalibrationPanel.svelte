@@ -162,7 +162,6 @@
 
     type Mode = 'idle' | 'measure' | 'session';
     let mode = $state<Mode>('idle');
-    let armed = $state(false);
     let busy = $state(false);
     let error = $state<string | null>(null);
     let stepIdx = $state(0);
