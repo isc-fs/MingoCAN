@@ -16,6 +16,7 @@ pub mod firmware;
 pub mod flash;
 pub mod logfs_client;
 pub mod logging;
+pub mod pit_cal;
 pub mod pit_diag;
 pub mod protocol;
 pub mod session;

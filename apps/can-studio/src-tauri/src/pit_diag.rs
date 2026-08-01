@@ -38,10 +38,11 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use can_flasher::pit_cal::{self, CalAppsFrame, CalBrakeFrame, CalCommand, CalFrame, CalPoint};
 use can_flasher::pit_diag::ecu::{
-    self, EcuBrakeFrame, EcuDvFrame, EcuFsmState, EcuFwInfoFrame, EcuHealthFrame, EcuInvState,
-    EcuInverterFrame, EcuInverterTempsFrame, EcuPedalsFrame, EcuPitDiagFrame, EcuResetCause,
-    EcuStatusFrame, ECU_ACK_ID,
+    self, EcuBrakeFrame, EcuCalStatus, EcuDvFrame, EcuFsmState, EcuFwInfoFrame, EcuHealthFrame,
+    EcuInvState, EcuInverterFrame, EcuInverterTempsFrame, EcuPedalsFrame, EcuPitDiagFrame,
+    EcuResetCause, EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::udv::{
     self, UdvCalibFrame, UdvCalibRelayFrame, UdvCanHealthFrame, UdvEbsPressFrame, UdvFwInfoFrame,
@@ -178,10 +179,19 @@ impl Profile {
     fn decode_event(self, frame: &CanFrame) -> Option<PitDiagEvent> {
         match self {
             Self::Ams => decode_frame(frame).map(PitDiagEvent::from_library),
-            Self::Ecu => ecu::decode_frame(frame).map(PitDiagEvent::from_ecu),
+            // The calibration session (0x7E2-0x7E5) rides the armed ECU
+            // session rather than opening its own backend: on PCAN/Vector
+            // only one process can own the adapter, and the operator needs
+            // 0x701 live anyway to know when to capture. So an armed ECU
+            // stream is a structural precondition for calibrating, not a
+            // convention the client has to remember.
+            Self::Ecu => ecu::decode_frame(frame)
+                .map(PitDiagEvent::from_ecu)
+                .or_else(|| pit_cal::decode_frame(frame).map(PitDiagEvent::from_cal)),
             Self::Udv => udv::decode_frame(frame).map(PitDiagEvent::from_udv),
             Self::All => ecu::decode_frame(frame)
                 .map(PitDiagEvent::from_ecu)
+                .or_else(|| pit_cal::decode_frame(frame).map(PitDiagEvent::from_cal))
                 .or_else(|| decode_frame(frame).map(PitDiagEvent::from_library))
                 .or_else(|| udv::decode_frame(frame).map(PitDiagEvent::from_udv)),
         }
@@ -230,6 +240,17 @@ fn ecu_reset_cause_name(c: EcuResetCause) -> String {
         EcuResetCause::Wwdg => "wwdg".into(),
         EcuResetCause::LowPower => "lowPower".into(),
         EcuResetCause::Other(b) => format!("other(0x{b:02X})"),
+    }
+}
+
+/// Display name for the pedal-calibration provenance (`0x704` #169).
+/// camelCase; mirrors the firmware `VAL_` table.
+fn ecu_cal_status_name(c: EcuCalStatus) -> String {
+    match c {
+        EcuCalStatus::Defaults => "defaults".into(),
+        EcuCalStatus::Loaded => "loaded".into(),
+        EcuCalStatus::InvalidFellBack => "invalidFellBack".into(),
+        EcuCalStatus::BadVersionFellBack => "badVersionFellBack".into(),
     }
 }
 
@@ -505,6 +526,7 @@ pub enum PitDiagEvent {
         task_telemetry: bool,
         task_diag: bool,
         reset_cause: String,
+        cal_status: String,
         uptime_s: u8,
         last_fault: u8,
         last_fault_name: String,
@@ -537,6 +559,41 @@ pub enum PitDiagEvent {
         r2d_confirm: bool,
         dv_torque_pct: u8,
         motor_rpm_mech: i16,
+    },
+    // ---- Calibration session (0x7E3..=0x7E5) ----
+    /// `0x7E3` — calibration session status. `pendingRead` says whether the
+    /// `calApps`/`calBrake` pair that follows is the stored or the staged
+    /// set; it is the ONLY discriminator, since both value frames are full.
+    /// `resultMessage` and `validationMessages` are pre-rendered — #534
+    /// forbids surfacing a result code or flag bitmask as a number.
+    CalStatus {
+        session_state: String,
+        last_cmd: u8,
+        result: String,
+        result_message: String,
+        result_is_error: bool,
+        captured_mask: u8,
+        missing_points: Vec<String>,
+        all_points_captured: bool,
+        validation_flags: u8,
+        validation_messages: Vec<String>,
+        cal_load: String,
+        cal_load_is_fallback: bool,
+        pending_read: Option<String>,
+    },
+    /// `0x7E4` — APPS endpoint values.
+    CalApps {
+        apps1_min: u16,
+        apps1_max: u16,
+        apps2_min: u16,
+        apps2_max: u16,
+    },
+    /// `0x7E5` — brake rest point plus the three ECU-derived thresholds.
+    CalBrake {
+        brake_rest: u16,
+        brake_arm: u16,
+        brake_dv_hard: u16,
+        brake_pressed: u16,
     },
     /// AMS `0x6CA` — ungated firmware health (#411). Field names mirror
     /// `EcuHealth` so the frontend renders both boards' health uniformly.
@@ -899,6 +956,7 @@ impl PitDiagEvent {
                 task_can_tx,
                 task_telemetry,
                 task_diag,
+                cal_status,
                 reset_cause,
                 uptime_s,
                 last_fault,
@@ -915,6 +973,7 @@ impl PitDiagEvent {
                 task_telemetry,
                 task_diag,
                 reset_cause: ecu_reset_cause_name(reset_cause),
+                cal_status: ecu_cal_status_name(cal_status),
                 uptime_s,
                 last_fault,
                 last_fault_name: ecu_last_fault_name(last_fault),
@@ -948,6 +1007,58 @@ impl PitDiagEvent {
                 r2d_confirm,
                 dv_torque_pct,
                 motor_rpm_mech,
+            },
+        }
+    }
+
+    /// Map a decoded calibration frame into a UI event. All operator-facing
+    /// text is rendered here from the library's canonical strings, so the
+    /// frontend never has to know a result code or a flag bit exists.
+    fn from_cal(frame: CalFrame) -> Self {
+        match frame {
+            CalFrame::Status(s) => Self::CalStatus {
+                session_state: format!("{:?}", s.session_state),
+                last_cmd: s.last_cmd,
+                result: format!("{:?}", s.result),
+                result_message: s.result.message().to_string(),
+                result_is_error: s.result.is_error(),
+                captured_mask: s.captured_mask,
+                missing_points: s
+                    .missing_points()
+                    .into_iter()
+                    .map(|p| format!("{p:?}"))
+                    .collect(),
+                all_points_captured: s.all_points_captured(),
+                validation_flags: s.validation_flags,
+                validation_messages: pit_cal::validation_messages(s.validation_flags)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                cal_load: format!("{:?}", s.cal_load),
+                cal_load_is_fallback: s.cal_load.is_fallback(),
+                pending_read: s.pending_read().map(|r| format!("{r:?}")),
+            },
+            CalFrame::Apps(CalAppsFrame {
+                apps1_min,
+                apps1_max,
+                apps2_min,
+                apps2_max,
+            }) => Self::CalApps {
+                apps1_min,
+                apps1_max,
+                apps2_min,
+                apps2_max,
+            },
+            CalFrame::Brake(CalBrakeFrame {
+                brake_rest,
+                brake_arm,
+                brake_dv_hard,
+                brake_pressed,
+            }) => Self::CalBrake {
+                brake_rest,
+                brake_arm,
+                brake_dv_hard,
+                brake_pressed,
             },
         }
     }
@@ -1303,6 +1414,120 @@ pub async fn pit_diag_udv_calibrate(
         .tx
         .send(udv::build_calib_trigger(start))
         .map_err(|_| "the uDV session ended — re-arm and try again".to_string())?;
+    Ok(())
+}
+
+/// Send a calibration command on `0x7E2` (#534).
+///
+/// Routes through the running pit-diag reader because that task owns the
+/// adapter — the same path `pit_diag_udv_calibrate` uses. That is not just
+/// plumbing convenience: it makes an armed ECU stream a **precondition** for
+/// calibrating, which is what the operator needs anyway (live `0x701` values
+/// are the only way to know when a reading has settled enough to capture).
+///
+/// `commit_*` carry the staged set the operator reviewed. `COMMIT` sends a
+/// CRC-32 of exactly those sixteen bytes, so the ECU rejects a commit whose
+/// values the client no longer actually holds — the guard and the consistency
+/// check are the same field. The caller must pass the values it DISPLAYED,
+/// not re-read them, or the check is worthless.
+///
+/// Deliberately not enforced here: whether the operator confirmed. #534
+/// forbids auto-commit and retry-on-failure, but "an explicit human action in
+/// this session" is not a thing a backend can verify — it belongs to the view,
+/// which is where the confirmation gate lives.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn pit_cal_command(
+    state: State<'_, PitDiagState>,
+    command: String,
+    point: Option<String>,
+    commit_apps1_min: Option<u16>,
+    commit_apps1_max: Option<u16>,
+    commit_apps2_min: Option<u16>,
+    commit_apps2_max: Option<u16>,
+    commit_brake_rest: Option<u16>,
+    commit_brake_arm: Option<u16>,
+    commit_brake_dv_hard: Option<u16>,
+    commit_brake_pressed: Option<u16>,
+) -> Result<(), String> {
+    let cmd = match command.as_str() {
+        "poll" => CalCommand::Poll,
+        "enter" => CalCommand::Enter,
+        "capture" => CalCommand::Capture,
+        "readStored" => CalCommand::ReadStored,
+        "readStaged" => CalCommand::ReadStaged,
+        "commit" => CalCommand::Commit,
+        "abort" => CalCommand::Abort,
+        "resetDefaults" => CalCommand::ResetDefaults,
+        other => return Err(format!("unknown calibration command '{other}'")),
+    };
+
+    let point = match point.as_deref() {
+        None => None,
+        Some("appsRest") => Some(CalPoint::AppsRest),
+        Some("appsFull") => Some(CalPoint::AppsFull),
+        Some("appsMid") => Some(CalPoint::AppsMid),
+        Some("brakeRest") => Some(CalPoint::BrakeRest),
+        Some("brakePressed") => Some(CalPoint::BrakePressed),
+        Some(other) => return Err(format!("unknown capture point '{other}'")),
+    };
+    if cmd == CalCommand::Capture && point.is_none() {
+        return Err("CAPTURE needs a capture point".to_string());
+    }
+
+    // The staged set is required for COMMIT and meaningless otherwise.
+    let staged = match (
+        commit_apps1_min,
+        commit_apps1_max,
+        commit_apps2_min,
+        commit_apps2_max,
+        commit_brake_rest,
+        commit_brake_arm,
+        commit_brake_dv_hard,
+        commit_brake_pressed,
+    ) {
+        (Some(a1n), Some(a1x), Some(a2n), Some(a2x), Some(br), Some(ba), Some(bd), Some(bp)) => {
+            Some((
+                CalAppsFrame {
+                    apps1_min: a1n,
+                    apps1_max: a1x,
+                    apps2_min: a2n,
+                    apps2_max: a2x,
+                },
+                CalBrakeFrame {
+                    brake_rest: br,
+                    brake_arm: ba,
+                    brake_dv_hard: bd,
+                    brake_pressed: bp,
+                },
+            ))
+        }
+        _ => None,
+    };
+    if cmd == CalCommand::Commit && staged.is_none() {
+        return Err(
+            "COMMIT needs the full staged set the operator reviewed — without it the \
+             ECU cannot verify the client is committing the values it displayed"
+                .to_string(),
+        );
+    }
+
+    let slot = state.inner.lock().await;
+    let running = slot.as_ref().ok_or(
+        "no pit-diag session is armed — arm the ECU telemetry first, so the \
+                live pedal values the wizard needs are streaming",
+    )?;
+    if !matches!(running.profile, Profile::Ecu | Profile::All) {
+        return Err(
+            "pedal calibration is an ECU action — switch to the ECU profile and arm it".to_string(),
+        );
+    }
+
+    let frame = pit_cal::build_command(cmd, point, staged.as_ref().map(|(a, b)| (a, b)));
+    running
+        .tx
+        .send(frame)
+        .map_err(|_| "the ECU session ended — re-arm and try again".to_string())?;
     Ok(())
 }
 

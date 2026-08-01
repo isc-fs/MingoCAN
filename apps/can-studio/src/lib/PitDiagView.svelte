@@ -49,6 +49,7 @@
         type PitDiagProfile,
         type PitDiagStatus,
     } from './pit_diag';
+    import CalibrationPanel from './CalibrationPanel.svelte';
     import { settings } from './settings.svelte';
     import type { ViewId } from './stores';
 
@@ -217,6 +218,7 @@
         taskTelemetry: boolean;
         taskDiag: boolean;
         resetCause: string;
+        calStatus: string;
         uptimeS: number;
         lastFault: number;
         lastFaultName: string;
@@ -934,6 +936,7 @@
                     taskTelemetry: event.taskTelemetry,
                     taskDiag: event.taskDiag,
                     resetCause: event.resetCause,
+                    calStatus: event.calStatus,
                     uptimeS: event.uptimeS,
                     lastFault: event.lastFault,
                     lastFaultName: event.lastFaultName,
@@ -1483,6 +1486,19 @@
             <div class="ecu-grid">
                 {@render ecuCards(true)}
             </div>
+            <!-- Calibration (#534). Only on the dedicated ECU tab, never in
+                 the aggregated cockpit: it WRITES to the car, and burying a
+                 write behind a side-by-side overview of three boards is how
+                 someone commits one by accident. It reuses this view's armed
+                 session and decoded pedal values rather than opening its own. -->
+            <CalibrationPanel
+                armed={armState.kind === 'armed'}
+                pedals={ecuPedals}
+                fsmState={ecuStatus?.fsmState ?? null}
+                tsActive={ecuDv?.tsActive ?? null}
+                motorRpm={ecuDv?.motorRpmMech ?? null}
+                torquePct={ecuStatus?.torquePct ?? null}
+            />
         {/if}
     {:else}
     <!-- Controls row -->
@@ -2147,6 +2163,19 @@
                                 <span class="stat" class:bad={ecuHealth.lastFault !== 0}>
                                     <span>last fault</span>
                                     <strong>{ecuHealth.lastFaultName}</strong>
+                                </span>
+                                <!-- Pedal calibration provenance (#169).
+                                     Anything but "loaded" means the pedals
+                                     are on compile-time defaults, which is
+                                     the failure a committed-but-ignored
+                                     calibration would otherwise hide. -->
+                                <span
+                                    class="stat"
+                                    class:bad={ecuHealth.calStatus !== 'loaded'}
+                                    title="Whether a STORED pedal calibration is in force (0x704 cal_status). 'defaults' = none stored; 'invalidFellBack' / 'badVersionFellBack' = one was stored but rejected at boot, so the ECU is running compile-time values. Ungated — readable without arming."
+                                >
+                                    <span>pedal cal</span>
+                                    <strong>{ecuHealth.calStatus}</strong>
                                 </span>
                             </div>
                         {:else}
