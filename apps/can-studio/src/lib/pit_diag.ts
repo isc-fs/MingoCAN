@@ -256,6 +256,18 @@ export type PitDiagEvent =
           brakeDvHard: number;
           brakePressed: number;
       }
+    | {
+          /** 0x130 — pack state of charge, whole percent (#559).
+           *
+           *  `null` means the AMS has NO trustworthy estimate — the
+           *  estimator has not converged, or the pack current sensor is
+           *  faulted or stale. The wire carries 0xFF for this; a generic
+           *  DBC decode would render it as 255 %, which is why the backend
+           *  maps it to null before it gets here. Render it as unknown,
+           *  and when plotting leave a gap rather than a spike. */
+          kind: 'soc';
+          socPercent: number | null;
+      }
     // ---- ECU profile (0x700..=0x705) ----
     | {
           /** ECU 0x700 — FSM / inverter state, cockpit flags, torque,

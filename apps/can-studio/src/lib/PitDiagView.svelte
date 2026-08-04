@@ -150,6 +150,10 @@
     let relays = $state<RelaySnapshot | null>(null);
     let pack = $state<PackSnapshot | null>(null);
     let currents = $state<CurrentsSnapshot | null>(null);
+    // 0x130 state of charge (#559). Two levels of "nothing": no frame seen
+    // yet (outer null) vs the AMS reporting no trustworthy estimate (inner
+    // null). They mean different things and the card distinguishes them.
+    let soc = $state<{ percent: number | null } | null>(null);
 
     // ---- ECU pit-diag snapshots (0x700..=0x705) ----
     // The ECU stream is small and unrelated to the AMS one: five
@@ -727,6 +731,7 @@
         relays = null;
         pack = null;
         currents = null;
+        soc = null;
         ecuStatus = null;
         ecuPedals = null;
         ecuBrake = null;
@@ -862,6 +867,8 @@
                 };
             } else if (event.kind === 'acuCurrents') {
                 currents = { accuDa: event.accuDa, dcdcDa: event.dcdcDa };
+            } else if (event.kind === 'soc') {
+                soc = { percent: event.socPercent };
             } else if (event.kind === 'pack') {
                 pack = {
                     packVoltageMv: event.packVoltageMv,
@@ -1755,7 +1762,7 @@
                     <span class="flag" class:on={relays.amsOk}>AMS_OK</span>
                 </div>
             {/if}
-            {#if pack !== null || currents !== null}
+            {#if pack !== null || currents !== null || soc !== null}
                 <div class="diag-grid">
                     {#if pack !== null}
                         <div class="diag-cell">
@@ -1769,6 +1776,32 @@
                             <span class="diag-value mono">
                                 {(pack.filteredMa / 1000).toFixed(1)} A
                             </span>
+                        </div>
+                    {/if}
+                    {#if soc !== null}
+                        <!-- 0xFF on the wire means the AMS has no trustworthy
+                             estimate; the backend maps it to null so it can
+                             never render as 255 %. Shown distinctly rather
+                             than hidden: it appearing mid-session means the
+                             current path went stale or faulted, which is
+                             itself diagnostic. -->
+                        <div class="diag-cell">
+                            <span class="diag-label">State of charge</span>
+                            {#if soc.percent === null}
+                                <span
+                                    class="diag-value mono bad"
+                                    title="The AMS reports no trustworthy estimate (0x130 = 0xFF). Either the estimator has not converged yet — normal for the first seconds after boot — or the pack current sensor is faulted or stale. Worth correlating with the fault state above."
+                                >
+                                    unknown
+                                </span>
+                            {:else}
+                                <span
+                                    class="diag-value mono"
+                                    title="Pack state of charge (0x130). Whole percent is the honest resolution — the estimator runs on datasheet-nominal capacity and reasoned filter tuning, both still COMMISSION on the AMS side."
+                                >
+                                    {soc.percent} %
+                                </span>
+                            {/if}
                         </div>
                     {/if}
                     {#if currents !== null}

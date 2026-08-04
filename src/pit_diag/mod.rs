@@ -172,6 +172,20 @@ pub const AMS_RELAY_STATUS_ID: u16 = 0x4A4;
 pub const AMS_ACU_CURRENTS_ID: u16 = 0x135;
 /// `0x4A1` — pack voltage (mV) + filtered pack current (mA), LE (500 ms).
 pub const AMS_PACK_ID: u16 = 0x4A1;
+/// `0x130` — pack state of charge, whole percent (250 ms), IFS08-CE-AMS #518.
+pub const AMS_SOC_ID: u16 = 0x130;
+
+/// Raw `0x130` value meaning **no trustworthy estimate** (`ams::soc::Unknown`).
+///
+/// Not a reading. A generic DBC decode renders it as `255 %`, which on a
+/// diagnostic tool is worse than showing nothing — hence [`AmsSoc`], which
+/// makes the distinction unrepresentable rather than merely documented.
+///
+/// The AMS publishes it while the estimator has not converged (the first
+/// seconds after boot) and whenever the pack current sensor faults or goes
+/// stale. Both are worth seeing: it appearing mid-session means the current
+/// path went bad, which correlates with the `0x6C0` fault state.
+pub const AMS_SOC_UNKNOWN: u8 = 0xFF;
 
 /// Number of monitor ICs in the pack: 2 per module × 5 modules.
 /// Chain index → module: IC `2m` = upper, IC `2m+1` = lower of
@@ -557,6 +571,54 @@ pub struct AcuCurrentsFrame {
     pub dcdc_da: i16,
 }
 
+/// Decoded `0x130` — pack state of charge.
+///
+/// A dedicated type rather than a bare `u8` so the sentinel cannot be
+/// mistaken for a reading: there is no way to hold [`AMS_SOC_UNKNOWN`] and
+/// have it render as a percentage.
+///
+/// Whole percent is the honest resolution. The estimator is an EKF over
+/// Coulomb counting corrected against the cell OCV curve, and two of its
+/// inputs are still `COMMISSION` on the firmware side — pack capacity is
+/// datasheet nominal rather than measured, and the filter tuning is
+/// reasoned rather than fitted. Decimals would imply precision that is not
+/// there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmsSoc {
+    /// A usable estimate, 0..=100 %.
+    Percent(u8),
+    /// The AMS has no trustworthy estimate — estimator not yet converged,
+    /// or the pack current sensor is faulted or stale.
+    Unknown,
+}
+
+impl AmsSoc {
+    /// Decode the raw byte, mapping [`AMS_SOC_UNKNOWN`] to
+    /// [`AmsSoc::Unknown`].
+    ///
+    /// Values above 100 that are not the sentinel are also treated as
+    /// unknown: the contract is 0..=100, so anything else is a sender this
+    /// build does not understand, and inventing a percentage from it would
+    /// be the same mistake as rendering the sentinel.
+    #[must_use]
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            AMS_SOC_UNKNOWN => Self::Unknown,
+            0..=100 => Self::Percent(b),
+            _ => Self::Unknown,
+        }
+    }
+
+    /// The percentage, or `None` when there is no trustworthy estimate.
+    #[must_use]
+    pub fn percent(self) -> Option<u8> {
+        match self {
+            Self::Percent(p) => Some(p),
+            Self::Unknown => None,
+        }
+    }
+}
+
 /// Decoded `0x4A1` — pack voltage (sum-of-cells, mV) + filtered pack
 /// current (mA, `+` discharge / `−` charge).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -632,6 +694,9 @@ pub enum PitDiagFrame {
     AcuCurrents(AcuCurrentsFrame),
     /// `0x4A1` — always-on pack voltage + filtered pack current.
     Pack(PackFrame),
+    /// `0x130` — always-on pack state of charge (#518). Telemetry only;
+    /// nothing in the AMS safety path reads it.
+    Soc(AmsSoc),
     /// `0x6CA` — ungated firmware health (#411), for passive `listen`.
     Health(AmsHealthFrame),
 }
@@ -892,6 +957,12 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
             pack_voltage_mv: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
             filtered_ma: i32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
         }));
+    }
+
+    // State of charge — 0x130, a single byte with a sentinel.
+    if id == AMS_SOC_ID {
+        let b = payload.first().copied()?;
+        return Some(PitDiagFrame::Soc(AmsSoc::from_byte(b)));
     }
 
     None
@@ -1470,6 +1541,48 @@ mod tests {
             }
             other => panic!("expected Pack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decodes_soc_and_treats_0xff_as_unknown() {
+        match decode_frame(&CanFrame::new(AMS_SOC_ID, &[73]).unwrap()).unwrap() {
+            PitDiagFrame::Soc(s) => {
+                assert_eq!(s, AmsSoc::Percent(73));
+                assert_eq!(s.percent(), Some(73));
+            }
+            other => panic!("expected Soc, got {other:?}"),
+        }
+        // The contract's endpoints are readings, not sentinels.
+        for raw in [0u8, 100] {
+            match decode_frame(&CanFrame::new(AMS_SOC_ID, &[raw]).unwrap()).unwrap() {
+                PitDiagFrame::Soc(s) => assert_eq!(s.percent(), Some(raw), "raw {raw}"),
+                other => panic!("expected Soc, got {other:?}"),
+            }
+        }
+        // 0xFF means "no trustworthy estimate". Rendering it as 255 % is
+        // the exact failure this type exists to make unrepresentable.
+        match decode_frame(&CanFrame::new(AMS_SOC_ID, &[AMS_SOC_UNKNOWN]).unwrap()).unwrap() {
+            PitDiagFrame::Soc(s) => {
+                assert_eq!(s, AmsSoc::Unknown);
+                assert_eq!(s.percent(), None);
+            }
+            other => panic!("expected Soc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn soc_rejects_out_of_contract_values() {
+        // 101..=254 are outside the contract (0..=100 plus the sentinel).
+        // Inventing a percentage from one would be the same mistake as
+        // rendering 0xFF, so they read as unknown too.
+        for raw in [101u8, 150, 254] {
+            match decode_frame(&CanFrame::new(AMS_SOC_ID, &[raw]).unwrap()).unwrap() {
+                PitDiagFrame::Soc(s) => assert_eq!(s.percent(), None, "raw {raw}"),
+                other => panic!("expected Soc, got {other:?}"),
+            }
+        }
+        // DLC 0 carries nothing to decode.
+        assert!(decode_frame(&CanFrame::new(AMS_SOC_ID, &[]).unwrap()).is_none());
     }
 
     #[test]
