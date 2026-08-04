@@ -592,6 +592,14 @@ fn print_record_human(ts_ms: u64, record: &PitDiagFrame) {
                 f64::from(p.filtered_ma) / 1000.0,
             );
         }
+        PitDiagFrame::Soc(s) => {
+            // "unknown" rather than a number: 0xFF is the AMS saying it has
+            // no trustworthy estimate, and printing 255 % would be a lie.
+            match s.percent() {
+                Some(pct) => println!("{prefix} soc   {pct}%"),
+                None => println!("{prefix} soc   unknown (no trustworthy estimate)"),
+            }
+        }
         PitDiagFrame::Health(h) => {
             println!(
                 "{prefix} health heap={}/{} tasks[main={} rx={} tx={} hk={}] reset={:?} \
@@ -734,6 +742,14 @@ fn print_record_json(ts_ms: u64, record: &PitDiagFrame) {
                 r#"{{"tsMs":{ts_ms},"kind":"pack","packVoltageMv":{},"filteredMa":{}}}"#,
                 p.pack_voltage_mv, p.filtered_ma,
             );
+        }
+        PitDiagFrame::Soc(s) => {
+            // `null`, not 255 — a consumer plotting this must get a gap, not
+            // a spike, when the estimate is untrustworthy.
+            match s.percent() {
+                Some(pct) => println!(r#"{{"tsMs":{ts_ms},"kind":"soc","socPercent":{pct}}}"#),
+                None => println!(r#"{{"tsMs":{ts_ms},"kind":"soc","socPercent":null}}"#),
+            }
         }
         // Field names match `ecuHealth` (taskControl/…/taskDiag) so the same
         // consumer parser handles both boards' health uniformly.
