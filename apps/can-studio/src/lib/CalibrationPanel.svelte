@@ -181,6 +181,68 @@
         ),
     );
 
+    // ---- Command pacing ----
+    //
+    // The ECU takes calibration commands through a ONE-DEEP mailbox that
+    // DROPS a new command while one is still pending (can_rx_task.cpp:84),
+    // drained by ControlTask on its 10 ms tick. `pitCalCommand` resolves as
+    // soon as the frame is queued to the reader, not when the ECU answers —
+    // so two commands sent back to back land in the same 10 ms window and
+    // the second is silently discarded.
+    //
+    // That is not theoretical: it is why a calibration could be committed
+    // on the car and the operator would never see the values read back. The
+    // COMMIT was processed and the follow-up READ_STORED went in the bin,
+    // with nothing anywhere reporting a problem.
+    //
+    // So every chained command waits for the ECU to echo the previous one in
+    // `0x7E3` last_cmd before the next goes out. That echo is the only
+    // acknowledgement the protocol offers.
+    const CMD_BYTE: Record<string, number> = {
+        poll: 0,
+        enter: 1,
+        capture: 2,
+        readStored: 3,
+        readStaged: 4,
+        commit: 5,
+        abort: 6,
+        resetDefaults: 7,
+    };
+    /** Generous: the ECU answers within one 10 ms tick, so this only ever
+     *  expires when the board is absent, unarmed, or running firmware with
+     *  no calibration support. */
+    const CMD_ACK_TIMEOUT_MS = 1500;
+
+    let awaitingCmd: {
+        want: number;
+        settle: (ok: boolean) => void;
+        timer: ReturnType<typeof setTimeout>;
+    } | null = null;
+
+    /** Send a command and wait for the ECU to acknowledge it. */
+    async function sendAwaiting(
+        command: Parameters<typeof pitCalCommand>[0],
+        point?: CalPoint,
+        stagedSet?: CalStagedSet,
+    ): Promise<void> {
+        const want = CMD_BYTE[command];
+        const acked = new Promise<boolean>((resolve) => {
+            const timer = setTimeout(() => {
+                awaitingCmd = null;
+                resolve(false);
+            }, CMD_ACK_TIMEOUT_MS);
+            awaitingCmd = { want, settle: (ok) => { clearTimeout(timer); resolve(ok); }, timer };
+        });
+        await pitCalCommand(command, point, stagedSet);
+        if (!(await acked)) {
+            throw new Error(
+                `The ECU did not acknowledge "${command}" within ${CMD_ACK_TIMEOUT_MS} ms. ` +
+                    'Check the ECU is powered, the telemetry stream is armed, and its firmware ' +
+                    'has calibration support — the command may have been dropped.',
+            );
+        }
+    }
+
     // ---- View state ----
 
     type Mode = 'idle' | 'measure' | 'session';
@@ -221,6 +283,13 @@
         // sits alongside the parent's without interfering.
         unlistenFrame = await onPitDiagFrame((event) => {
             if (event.kind === 'calStatus') {
+                // The ECU echoes the command it just processed; that is the
+                // acknowledgement `sendAwaiting` is blocked on.
+                if (awaitingCmd !== null && event.lastCmd === awaitingCmd.want) {
+                    const w = awaitingCmd;
+                    awaitingCmd = null;
+                    w.settle(true);
+                }
                 status = {
                     sessionState: event.sessionState,
                     result: event.result,
@@ -272,17 +341,17 @@
             committedAt = null;
             staged = {};
             stored = {};
-            await pitCalCommand('enter');
+            await sendAwaiting('enter');
             // Show the operator what is in force before they change it.
-            await pitCalCommand('readStored');
+            await sendAwaiting('readStored');
             mode = 'session';
         });
 
     const capture = (p: CalPoint) =>
         run(async () => {
-            await pitCalCommand('capture', p);
+            await sendAwaiting('capture', p);
             if (stepIdx < CAL_POINTS.length - 1) stepIdx += 1;
-            else await pitCalCommand('readStaged');
+            else await sendAwaiting('readStaged');
         });
 
     const abort = () =>
@@ -297,15 +366,15 @@
             // The values passed here are exactly the ones rendered in the
             // review table. The ECU CRCs them, so a mismatch between what
             // was shown and what is sent is rejected rather than applied.
-            await pitCalCommand('commit', undefined, staged as CalStagedSet);
+            await sendAwaiting('commit', undefined, staged as CalStagedSet);
             // #534 requires an automatic read-back after every commit.
-            await pitCalCommand('readStored');
+            await sendAwaiting('readStored');
         });
 
     const resetDefaults = () =>
         run(async () => {
-            await pitCalCommand('resetDefaults');
-            await pitCalCommand('readStored');
+            await sendAwaiting('resetDefaults');
+            await sendAwaiting('readStored');
             showResetConfirm = false;
         });
 
