@@ -458,6 +458,10 @@ pub enum PitDiagEvent {
         pack_voltage_mv: u32,
         filtered_ma: i32,
     },
+    /// `0x130` — always-on pack state of charge (#559). `soc_percent` is
+    /// `null` when the AMS has no trustworthy estimate; the frontend must
+    /// render that as unknown, never as a number.
+    Soc { soc_percent: Option<u8> },
 
     // ---- ECU profile (0x700..=0x705) ----
     /// ECU `0x700` — FSM / inverter state, cockpit flags, torque, min cell-V.
@@ -830,6 +834,11 @@ impl PitDiagEvent {
             }) => Self::Pack {
                 pack_voltage_mv,
                 filtered_ma,
+            },
+            // `Option<u8>` rather than a magic number: serde emits `null`,
+            // so the sentinel cannot reach the UI as 255.
+            PitDiagFrame::Soc(s) => Self::Soc {
+                soc_percent: s.percent(),
             },
             // Reuses the ECU reset-cause names (same enum table) + the
             // ecuHealth-style task field names, so the frontend health
