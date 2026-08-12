@@ -2,7 +2,7 @@
 
 > One-button **build + flash + diagnose** of STM32 firmware over CAN, from inside VS Code.
 
-Wraps the [`can-flasher`](https://github.com/isc-fs/can-flasher) Rust CLI in a VS Code
+Wraps the [`can-flasher`](https://github.com/isc-fs/MingoCAN) Rust CLI in a VS Code
 surface: a single command builds your firmware project, flashes it through whichever CAN
 adapter you have plugged in, and surfaces live telemetry and fault codes in panels next
 to your code. Built for the [ISC Racing Team](https://iscracingteam.com)'s Formula
@@ -13,7 +13,7 @@ listed on the VS Code Marketplace.
 
 The team distributes the extension as a `.vsix` attached to each GitHub Release. The latest release is always at:
 
-<https://github.com/isc-fs/can-flasher/releases/latest>
+<https://github.com/isc-fs/MingoCAN/releases/latest>
 
 Then, in VS Code:
 
@@ -63,14 +63,14 @@ Every action shells out to `can-flasher --json` — the wire protocol lives in o
 ## Requirements
 
 - **VS Code 1.85** or later.
-- **[`can-flasher`](https://github.com/isc-fs/can-flasher) CLI v1.2.0+** on your `PATH`
+- **[`can-flasher`](https://github.com/isc-fs/MingoCAN) CLI v1.2.0+** on your `PATH`
   (or point `iscFs.canFlasherPath` at the binary).
   - Install from prebuilt binary: see the
-    [`can-flasher` releases page](https://github.com/isc-fs/can-flasher/releases).
-  - Or from source: `cargo install --git https://github.com/isc-fs/can-flasher.git`.
+    [`can-flasher` releases page](https://github.com/isc-fs/MingoCAN/releases).
+  - Or from source: `cargo install --git https://github.com/isc-fs/MingoCAN.git`.
 - A CAN adapter — CANable / CANtact (SLCAN), PEAK PCAN, Vector VN1610, or any kernel
   CAN interface on Linux. See
-  [adapter setup](https://github.com/isc-fs/can-flasher/blob/main/docs/INSTALL.md) in
+  [adapter setup](https://github.com/isc-fs/MingoCAN/blob/main/docs/INSTALL.md) in
   the CLI repo.
 
 ## First-run setup
@@ -137,20 +137,20 @@ when something misbehaves at a bench: deterministic record of exactly what was r
 
 ## Repository
 
-The extension lives inside the [`can-flasher`](https://github.com/isc-fs/can-flasher)
-monorepo under [`editor/vscode/`](https://github.com/isc-fs/can-flasher/tree/main/editor/vscode).
+The extension lives inside the [`can-flasher`](https://github.com/isc-fs/MingoCAN)
+monorepo under [`editor/vscode/`](https://github.com/isc-fs/MingoCAN/tree/main/editor/vscode).
 Contributor / development notes:
-[CONTRIBUTING.md](https://github.com/isc-fs/can-flasher/blob/main/docs/CONTRIBUTING.md).
+[CONTRIBUTING.md](https://github.com/isc-fs/MingoCAN/blob/main/docs/CONTRIBUTING.md).
 
 - Bugs and feature requests:
-  [github.com/isc-fs/can-flasher/issues](https://github.com/isc-fs/can-flasher/issues)
+  [github.com/isc-fs/MingoCAN/issues](https://github.com/isc-fs/MingoCAN/issues)
 - Discussion:
-  [github.com/isc-fs/can-flasher/discussions](https://github.com/isc-fs/can-flasher/discussions)
+  [github.com/isc-fs/MingoCAN/discussions](https://github.com/isc-fs/MingoCAN/discussions)
 
 ## Release notes
 
-See [CHANGELOG.md](https://github.com/isc-fs/can-flasher/blob/main/editor/vscode/CHANGELOG.md).
+See [CHANGELOG.md](https://github.com/isc-fs/MingoCAN/blob/main/editor/vscode/CHANGELOG.md).
 
 ## Licence
 
-MIT — see [LICENSE](https://github.com/isc-fs/can-flasher/blob/main/editor/vscode/LICENSE).
+MIT — see [LICENSE](https://github.com/isc-fs/MingoCAN/blob/main/editor/vscode/LICENSE).
