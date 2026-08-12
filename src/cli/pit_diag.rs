@@ -3,10 +3,10 @@
 //! Four subcommands:
 //!
 //! ```text
-//! cf pit-diag enable                 # arm the stream
-//! cf pit-diag disable                # disarm the stream
-//! cf pit-diag stream [--json]        # arm + stream + disarm-on-exit
-//! cf pit-diag listen [--json]        # passive: decode ungated frames, never arm
+//! can-flasher pit-diag enable                 # arm the stream
+//! can-flasher pit-diag disable                # disarm the stream
+//! can-flasher pit-diag stream [--json]        # arm + stream + disarm-on-exit
+//! can-flasher pit-diag listen [--json]        # passive: decode ungated frames, never arm
 //! ```
 //!
 //! Wraps the `pit_diag` library module (handshake + decoders) with a

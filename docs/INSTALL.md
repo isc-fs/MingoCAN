@@ -15,6 +15,27 @@ What follows is for people who cloned the repo.
 
 ---
 
+## Just want the app?
+
+The desktop app is the primary surface, and it does not need any of
+this. Download the installer for your platform from the
+[latest release](https://github.com/isc-fs/can-flasher/releases/latest):
+
+| Platform | Asset |
+|---|---|
+| macOS | `.dmg` |
+| Windows | `.msi` |
+| Linux | `.AppImage` / `.deb` |
+
+The app bundles the flashing engine — there is no separate CLI to
+install alongside it. It updates itself; see [UPDATES.md](UPDATES.md).
+
+You still need the **per-OS adapter setup below** — the SDK for PCAN
+and Vector is loaded at runtime and is not something the app can ship.
+See [DESKTOP.md](DESKTOP.md) for what to do once it opens.
+
+---
+
 ## Install from a clone
 
 ```bash
@@ -226,6 +247,8 @@ are in
 
 ## Next steps
 
+- [DESKTOP.md](DESKTOP.md) — the desktop app, view by view.
 - [USAGE.md](USAGE.md) — what every subcommand does, common flags, examples.
+- [SAFETY.md](SAFETY.md) — which operations write to a board.
 - [../REQUIREMENTS.md](../REQUIREMENTS.md) — authoritative CLI spec, opcode table, exit codes.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — developing the tool itself.

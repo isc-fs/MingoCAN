@@ -6,7 +6,7 @@
 //! operator has to remember those numbers and run:
 //!
 //! ```text
-//! cf --node-id 0xF config nvm write node-id 0x02 --reset
+//! can-flasher --node-id 0xF config nvm write node-id 0x02 --reset
 //! ```
 //!
 //! …which is fine when you remember "AMS = 2" but exactly the kind
@@ -15,9 +15,9 @@
 //! role name or the firmware path and the host fills in the rest:
 //!
 //! ```text
-//! cf provision ams                   # explicit role
-//! cf provision build/ams.elf         # role inferred from filename
-//! cf provision ecu --no-reset        # write only, don't reboot
+//! can-flasher provision ams                   # explicit role
+//! can-flasher provision build/ams.elf         # role inferred from filename
+//! can-flasher provision ecu --no-reset        # write only, don't reboot
 //! ```
 //!
 //! Filename inference matches the artifact-naming convention the

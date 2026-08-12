@@ -243,7 +243,7 @@ Studio bundles side-by-side.
 we don't cut `release/v*` branches at any point. Flow: land
 everything on `dev`, fast-forward `dev → main`, tag on `main`.
 
-When cutting `vX.Y.Z`, bump **all five** source-of-truth files
+When cutting `vX.Y.Z`, bump **all six** source-of-truth files
 in the same commit on `dev`:
 
 | File | Field |
@@ -262,11 +262,11 @@ Then:
 3. Tag `main` with `git tag -a vX.Y.Z -m "…"` and push.
 4. The consolidated [`release.yml`](../.github/workflows/release.yml)
    triggers. Its `verify-version` gate compares the tag's
-   `X.Y.Z` against all five source files. Any mismatch fails the
+   `X.Y.Z` against all six source files. Any mismatch fails the
    gate by file name, and all build legs skip — retag after
    bumping.
 
-The five-way gate is the descendant of v1.1.0's version-skew
+The six-way gate is the descendant of v1.1.0's version-skew
 lesson (v1.1.0 binaries reported `can-flasher 0.1.0`; v1.1.1
 added the original single-file guard). The current gate catches
 the same class of mistake across all three surfaces in lockstep.
