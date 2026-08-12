@@ -31,14 +31,14 @@ live, DBC + Signals view) and
 
 | Phase | Title | Branches | Milestone tag |
 |:---:|---|---|---|
-| 1 | Spec + scaffolding | 🔜 planned `feat/1-requirements-v1` · 🔜 planned `feat/2-cargo-skeleton` | `v0.1.0-spec` |
-| 2 | Protocol + transport | 🔜 planned `feat/3-protocol-core` · 🔜 planned `feat/4-virtual-backend` · 🔜 planned `feat/5-slcan-backend` · 🔜 planned `feat/6-socketcan-backend` · 🔜 planned `feat/7-pcan-backend` | `v0.2.0-transport` |
-| 3 | Session + adapters subcommand | 🔜 planned `feat/8-adapter-detect` · 🔜 planned `feat/9-session-lifecycle` | `v0.3.0-session` |
-| 4 | Remaining subcommands | 🔜 planned `feat/10-discover-subcommand` · 🔜 planned `feat/11-diagnose-subcommand` · 🔜 planned `feat/12-verify-subcommand` · 🔜 planned `feat/13-config-subcommand` · 🔜 planned `feat/14-replay-subcommand` | `v0.4.0-subcommands` |
-| 5 | Flash pipeline | 🔜 planned `feat/15-firmware-loader` · 🔜 planned `feat/16-flash-manager` · 🔜 planned `feat/17-flash-subcommand` | `v1.0.0` |
-| 6 | Post-v1 adapter coverage | 🔜 planned `feat/18-vector-backend` | `v1.2.0` |
-| — | Plantilla sync _(sidequest)_ | 🔜 planned `feat/1-autoclose-on-dev-merge` · 🔜 planned `fix/1-workflow-titled-branches` | — |
-| — | Release tooling _(sidequest)_ | 🔜 planned `fix/2-release-sync-dev` · 🔜 planned `fix/3-docs-revamp-vector` | — |
+| 1 | Spec + scaffolding | ✅ done `feat/1-requirements-v1` · ✅ done `feat/2-cargo-skeleton` | `v0.1.0-spec` |
+| 2 | Protocol + transport | ✅ done `feat/3-protocol-core` · ✅ done `feat/4-virtual-backend` · ✅ done `feat/5-slcan-backend` · ✅ done `feat/6-socketcan-backend` · ✅ done `feat/7-pcan-backend` | `v0.2.0-transport` |
+| 3 | Session + adapters subcommand | ✅ done `feat/8-adapter-detect` · ✅ done `feat/9-session-lifecycle` | `v0.3.0-session` |
+| 4 | Remaining subcommands | ✅ done `feat/10-discover-subcommand` · ✅ done `feat/11-diagnose-subcommand` · ✅ done `feat/12-verify-subcommand` · ✅ done `feat/13-config-subcommand` · ✅ done `feat/14-replay-subcommand` | `v0.4.0-subcommands` |
+| 5 | Flash pipeline | ✅ done `feat/15-firmware-loader` · ✅ done `feat/16-flash-manager` · ✅ done `feat/17-flash-subcommand` | `v1.0.0` |
+| 6 | Post-v1 adapter coverage | ✅ done `feat/18-vector-backend` | `v1.2.0` |
+| — | Plantilla sync _(sidequest)_ | ✅ done `feat/1-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` | — |
+| — | Release tooling _(sidequest)_ | ✅ done `fix/2-release-sync-dev` · ✅ done `fix/3-docs-revamp-vector` | — |
 
 ## Branch diagram
 
@@ -52,11 +52,11 @@ gitGraph
 
     %% Phase 1 — Spec + scaffolding
     branch feat/1-requirements-v1
-    commit id: "○ Canonical REQUIREMENTS.md aligned with bootloader v1.0.0"
+    commit id: "✔ Canonical REQUIREMENTS.md aligned with bootloader v1.0.0"
     checkout dev
     merge feat/1-requirements-v1
     branch feat/2-cargo-skeleton
-    commit id: "○ Cargo manifest + seven clap subcommand stubs + CI matrix"
+    commit id: "✔ Cargo manifest + seven clap subcommand stubs + CI matrix"
     checkout dev
     merge feat/2-cargo-skeleton
     checkout main
@@ -65,23 +65,23 @@ gitGraph
 
     %% Phase 2 — Protocol + transport
     branch feat/3-protocol-core
-    commit id: "○ ids / opcodes / ISO-TP / records / commands / responses"
+    commit id: "✔ ids / opcodes / ISO-TP / records / commands / responses"
     checkout dev
     merge feat/3-protocol-core
     branch feat/4-virtual-backend
-    commit id: "○ CanBackend trait + VirtualBus + StubDevice + integration test"
+    commit id: "✔ CanBackend trait + VirtualBus + StubDevice + integration test"
     checkout dev
     merge feat/4-virtual-backend
     branch feat/5-slcan-backend
-    commit id: "○ CANable over serialport (all OSes)"
+    commit id: "✔ CANable over serialport (all OSes)"
     checkout dev
     merge feat/5-slcan-backend
     branch feat/6-socketcan-backend
-    commit id: "○ Linux SocketCAN; PCAN-on-Linux routes through same path"
+    commit id: "✔ Linux SocketCAN; PCAN-on-Linux routes through same path"
     checkout dev
     merge feat/6-socketcan-backend
     branch feat/7-pcan-backend
-    commit id: "○ PCAN-Basic via libloading (Windows + macOS)"
+    commit id: "✔ PCAN-Basic via libloading (Windows + macOS)"
     checkout dev
     merge feat/7-pcan-backend
     checkout main
@@ -90,11 +90,11 @@ gitGraph
 
     %% Phase 3 — Session + adapters subcommand
     branch feat/8-adapter-detect
-    commit id: "○ adapters subcommand + --interface virtual CLI wiring"
+    commit id: "✔ adapters subcommand + --interface virtual CLI wiring"
     checkout dev
     merge feat/8-adapter-detect
     branch feat/9-session-lifecycle
-    commit id: "○ Session type (CONNECT + keepalive + reconnect + notifications)"
+    commit id: "✔ Session type (CONNECT + keepalive + reconnect + notifications)"
     checkout dev
     merge feat/9-session-lifecycle
     checkout main
@@ -103,23 +103,23 @@ gitGraph
 
     %% Phase 4 — Remaining subcommands
     branch feat/10-discover-subcommand
-    commit id: "○ CMD_DISCOVER + GET_FW_INFO / GET_HEALTH follow-up table"
+    commit id: "✔ CMD_DISCOVER + GET_FW_INFO / GET_HEALTH follow-up table"
     checkout dev
     merge feat/10-discover-subcommand
     branch feat/11-diagnose-subcommand
-    commit id: "○ read-dtc / clear-dtc / log / live-data / health / reset"
+    commit id: "✔ read-dtc / clear-dtc / log / live-data / health / reset"
     checkout dev
     merge feat/11-diagnose-subcommand
     branch feat/12-verify-subcommand
-    commit id: "○ CMD_FLASH_VERIFY against a binary; exit 0/2 for CI"
+    commit id: "✔ CMD_FLASH_VERIFY against a binary; exit 0/2 for CI"
     checkout dev
     merge feat/12-verify-subcommand
     branch feat/13-config-subcommand
-    commit id: "○ ob read / ob apply-wrp / nvm read / nvm write / nvm erase"
+    commit id: "✔ ob read / ob apply-wrp / nvm read / nvm write / nvm erase"
     checkout dev
     merge feat/13-config-subcommand
     branch feat/14-replay-subcommand
-    commit id: "○ record / run against VirtualBackend (candump format)"
+    commit id: "✔ record / run against VirtualBackend (candump format)"
     checkout dev
     merge feat/14-replay-subcommand
     checkout main
@@ -128,15 +128,15 @@ gitGraph
 
     %% Phase 5 — Flash pipeline
     branch feat/15-firmware-loader
-    commit id: "○ ELF / Intel HEX / raw .bin parsing + address validation"
+    commit id: "✔ ELF / Intel HEX / raw .bin parsing + address validation"
     checkout dev
     merge feat/15-firmware-loader
     branch feat/16-flash-manager
-    commit id: "○ sector-aware erase + diff flash + per-sector CRC verify"
+    commit id: "✔ sector-aware erase + diff flash + per-sector CRC verify"
     checkout dev
     merge feat/16-flash-manager
     branch feat/17-flash-subcommand
-    commit id: "○ end-to-end `flash` wiring + FLASH_VERIFY commit + JUMP"
+    commit id: "✔ end-to-end `flash` wiring + FLASH_VERIFY commit + JUMP"
     checkout dev
     merge feat/17-flash-subcommand
     checkout main
@@ -145,7 +145,7 @@ gitGraph
 
     %% Phase 6 — Post-v1 adapter coverage
     branch feat/18-vector-backend
-    commit id: "○ Vector XL Driver Library (VN1610 / VN16xx, Windows)"
+    commit id: "✔ Vector XL Driver Library (VN1610 / VN16xx, Windows)"
     checkout dev
     merge feat/18-vector-backend
     checkout main
