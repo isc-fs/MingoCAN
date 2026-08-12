@@ -1,4 +1,4 @@
-//! `cf provision <role>` — assign a bootloader's node-id by role name
+//! `can-flasher provision <role>` — assign a bootloader's node-id by role name
 //! or firmware-artifact path.
 //!
 //! The team's three boards on a shared CAN bus each get a known
@@ -76,7 +76,7 @@ pub async fn run(args: ProvisionArgs, global: &GlobalFlags) -> Result<()> {
 
     if !global.json {
         // Tell the operator what the host inferred — surprises here
-        // (e.g. they typed `cf provision build/ams.elf` and we
+        // (e.g. they typed `can-flasher provision build/ams.elf` and we
         // picked up the wrong role from a parent directory name)
         // are easier to catch when we say it out loud.
         match source {
@@ -98,7 +98,7 @@ pub async fn run(args: ProvisionArgs, global: &GlobalFlags) -> Result<()> {
     // FMEA #271 G17: provisioning can mis-target silently. The
     // session reaches whatever board sits at the *target* node-id
     // (default 0x3 when --node-id is omitted), which is NOT the role
-    // we're assigning — so `cf provision ams` with no --node-id would
+    // we're assigning — so `can-flasher provision ams` with no --node-id would
     // reprovision + reset a co-resident uDV at 0x3 into an id
     // collision. Echo the target we'll reach + the reset intent, then
     // gate the write behind a confirmation (mirrors `apply-wrp` /
@@ -128,7 +128,7 @@ pub async fn run(args: ProvisionArgs, global: &GlobalFlags) -> Result<()> {
     }
 
     // Reuse run_nvm_write so the wire-protocol path is shared with
-    // `cf config nvm write` — same connect → write → (optional)
+    // `can-flasher config nvm write` — same connect → write → (optional)
     // reset → disconnect dance, same error mapping, same JSON
     // output shape. Round-tripping the byte as a `"0x.."` string
     // costs one parse but keeps the call site honest.
@@ -159,14 +159,14 @@ const FIRMWARE_EXTENSIONS: &[&str] = &["elf", "hex", "bin"];
 /// Where the resolved role came from, surfaced to the operator
 /// so a misleading filename can't quietly provision the wrong id.
 enum RoleSource {
-    /// Operator typed the role name directly (e.g. `cf provision ams`).
+    /// Operator typed the role name directly (e.g. `can-flasher provision ams`).
     Explicit,
     /// Role was inferred from a firmware path's basename stem; the
     /// inner string is the canonical role name we matched.
     FromPath(&'static str),
 }
 
-/// Resolve a `cf provision <role>` argument to a node-id.
+/// Resolve a `can-flasher provision <role>` argument to a node-id.
 ///
 /// Two shapes accepted:
 ///

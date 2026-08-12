@@ -1,4 +1,4 @@
-//! `cf pit-diag` — terminal-side pit-diag observer (AMS / ECU / uDV).
+//! `can-flasher pit-diag` — terminal-side pit-diag observer (AMS / ECU / uDV).
 //!
 //! Four subcommands:
 //!
@@ -63,7 +63,7 @@ fn parse_profile(profile: &str) -> Result<Profile> {
 
 /// How long to wait for the AMS to ACK an arm / disarm command. The
 /// firmware ACKs within ~10ms in the happy case; 2s leaves room for
-/// a noisy bus + slow USB adapter without making `cf pit-diag enable`
+/// a noisy bus + slow USB adapter without making `can-flasher pit-diag enable`
 /// feel unresponsive.
 const ACK_TIMEOUT: Duration = Duration::from_millis(2_000);
 

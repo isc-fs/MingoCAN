@@ -243,6 +243,23 @@
         }
     }
 
+    /** Wait until a READ_STAGED read-back has actually populated `staged`.
+     *  `sendAwaiting` resolves on the `0x7E3` echo, which the ECU sends
+     *  BEFORE the 0x7E4/0x7E5 value pair — so an automated chain that
+     *  commits straight after the ack would CRC an empty set. */
+    async function waitForStagedValues(): Promise<void> {
+        const deadline = Date.now() + CMD_ACK_TIMEOUT_MS;
+        while (!stagedComplete) {
+            if (Date.now() > deadline) {
+                throw new Error(
+                    'The ECU acknowledged the read but never sent the values. ' +
+                        'Nothing has been committed.',
+                );
+            }
+            await new Promise((r) => setTimeout(r, 25));
+        }
+    }
+
     // ---- View state ----
 
     type Mode = 'idle' | 'measure' | 'session';
@@ -373,7 +390,17 @@
 
     const resetDefaults = () =>
         run(async () => {
+            // RESET_DEFAULTS only STAGES the compile-time defaults — the
+            // firmware is explicit that "the operator still has to COMMIT",
+            // deliberately, so restoring is not silent. Sending it and then
+            // reading STORED (as this did) read back the unchanged values
+            // and wrote nothing, while leaving a session open until the
+            // 30 s timeout: a no-op that looked like it worked.
             await sendAwaiting('resetDefaults');
+            // Learn what was staged, so the COMMIT can carry its CRC.
+            await sendAwaiting('readStaged');
+            await waitForStagedValues();
+            await sendAwaiting('commit', undefined, staged as CalStagedSet);
             await sendAwaiting('readStored');
             showResetConfirm = false;
         });

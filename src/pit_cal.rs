@@ -304,8 +304,11 @@ impl CalResult {
                  committing."
             }
             Self::ValidationFailed => {
-                "The captured calibration failed the ECU's safety checks and was not \
-                 written. Nothing has changed on the car."
+                "The ECU rejected the calibration and wrote nothing — the car is \
+                 unchanged. Either a safety check failed (the flags say which), or \
+                 the consistency CRC did not match, meaning this tool and the ECU \
+                 disagree about what was captured. An empty flag set points at the \
+                 CRC: abort and capture again rather than retrying the commit."
             }
             Self::NvmWriteFailed => {
                 "The ECU could not write the calibration to flash, or wrote it and failed \
@@ -604,7 +607,10 @@ pub fn cal_crc32(apps: &CalAppsFrame, brake: &CalBrakeFrame) -> u32 {
 ///   [`CAL_GUARD_MAGIC`], so a stray frame cannot open a session or wipe a
 ///   calibration.
 /// - [`CalCommand::Commit`] carries [`cal_crc32`] of the staged set
-///   instead. Guard and consistency check are the same field.
+///   instead. Guard and consistency check are the same field. Note a
+///   mismatch answers [`CalResult::ValidationFailed`] with **empty**
+///   `validation_flags`, not `BadGuard` — the firmware reuses the
+///   validation path for it.
 /// - Everything else ignores it; this sends zero.
 ///
 /// `staged` is required for `Commit` and ignored otherwise. Passing `None`

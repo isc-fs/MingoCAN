@@ -285,8 +285,8 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
             // recovers), but spell that out so "cleanly" isn't misread
             // as "nothing was written".
             eprintln!(
-                "cf: NOTE — if the flash had started, the app region may be partially \
-                 written; the device will not boot the app until you re-run `cf flash` \
+                "can-flasher: NOTE — if the flash had started, the app region may be partially \
+                 written; the device will not boot the app until you re-run `can-flasher flash` \
                  (diff mode re-flashes only what changed)."
             );
             Err(exit_err(
@@ -549,7 +549,7 @@ async fn fire_jump(session: &Session) -> Result<()> {
 //
 // **Plain mode** (non-TTY: CI logs, piped to `tee`, captured by a test
 // harness) — indicatif silently suppresses EVERY draw call including
-// `MultiProgress::println`. A user ran `cf flash 2>&1 | tee` and saw
+// `MultiProgress::println`. A user ran `can-flasher flash 2>&1 | tee` and saw
 // zero output for 52 s — indistinguishable from a hang. We emit plain
 // `eprintln!` lines for state transitions, and throttled percent-
 // complete pings during long writes, so the user always has a live
