@@ -200,62 +200,6 @@ export type PitDiagEvent =
           packVoltageMv: number;
           filteredMa: number;
       }
-    // ---- Calibration session (0x7E3..=0x7E5), #534 ----
-    | {
-          /** 0x7E3 — calibration session status. Every operator-facing
-           *  string is pre-rendered backend-side: #534 forbids surfacing a
-           *  result code or a flag bitmask as a number, and the reliable
-           *  way to guarantee that is to give this layer no numbers to
-           *  render. `validationFlags` / `capturedMask` are carried only
-           *  for debugging and must not be shown raw. */
-          kind: 'calStatus';
-          /** "Idle" | "Active" | "Validated" | "Committing" | "Committed"
-           *  | "Error" | "Unknown(n)". */
-          sessionState: string;
-          /** Raw echo of the command byte the ECU last processed. */
-          lastCmd: number;
-          /** "Ok" | "BadGuard" | "VehicleNotSafe" | … */
-          result: string;
-          /** A full sentence the operator can act on. Show this, not `result`. */
-          resultMessage: string;
-          resultIsError: boolean;
-          capturedMask: number;
-          /** Capture points still outstanding, e.g. ["AppsMid"]. */
-          missingPoints: string[];
-          allPointsCaptured: boolean;
-          validationFlags: number;
-          /** One sentence per failed validation rule; empty when none failed. */
-          validationMessages: string[];
-          /** "Defaults" | "Loaded" | "InvalidFellBack" | "BadVersionFellBack". */
-          calLoad: string;
-          /** true unless a STORED calibration is actually in force. */
-          calLoadIsFallback: boolean;
-          /** "Stored" | "Staged" when the calApps/calBrake pair that
-           *  follows answers a read, else null. The ONLY discriminator —
-           *  both value frames are full and cannot say which they are. */
-          pendingRead: string | null;
-      }
-    | {
-          /** 0x7E4 — APPS endpoints. Attribute to stored vs staged via the
-           *  `pendingRead` of the calStatus that preceded it. */
-          kind: 'calApps';
-          apps1Min: number;
-          apps1Max: number;
-          apps2Min: number;
-          apps2Max: number;
-      }
-    | {
-          /** 0x7E5 — brake rest point plus the three thresholds. Only
-           *  `brakeRest` and `brakePressed` are captured; `brakeArm` and
-           *  `brakeDvHard` are DERIVED by the ECU. Display what a read-back
-           *  returns — never recompute them here, or this copy drifts from
-           *  the firmware's (the #528 failure mode). */
-          kind: 'calBrake';
-          brakeRest: number;
-          brakeArm: number;
-          brakeDvHard: number;
-          brakePressed: number;
-      }
     | {
           /** 0x130 — pack state of charge, whole percent (#559).
            *
@@ -587,57 +531,6 @@ export function pitDiagDisable(request: PitDiagRequest): Promise<void> {
  *  valid while a uDV pit-diag session is armed. */
 export function pitDiagUdvCalibrate(start: boolean): Promise<void> {
     return invoke<void>('pit_diag_udv_calibrate', { start });
-}
-
-/** Capture points, in the order the wizard walks the operator through. */
-export const CAL_POINTS = [
-    'appsRest',
-    'appsFull',
-    'appsMid',
-    'brakeRest',
-    'brakePressed',
-] as const;
-export type CalPoint = (typeof CAL_POINTS)[number];
-
-/** The staged set a COMMIT must carry — exactly the values the operator
- *  reviewed. The ECU CRCs these, so re-reading them from anywhere else
- *  would defeat the check. */
-export interface CalStagedSet {
-    apps1Min: number;
-    apps1Max: number;
-    apps2Min: number;
-    apps2Max: number;
-    brakeRest: number;
-    brakeArm: number;
-    brakeDvHard: number;
-    brakePressed: number;
-}
-
-/**
- * Send a calibration command on 0x7E2 (#534).
- *
- * Requires an ARMED ECU pit-diag session — the command routes through the
- * reader task that owns the adapter, and the wizard needs 0x701 live to
- * know when a reading has settled. The backend rejects it otherwise with a
- * message saying so.
- */
-export function pitCalCommand(
-    command: 'poll' | 'enter' | 'capture' | 'readStored' | 'readStaged' | 'commit' | 'abort' | 'resetDefaults',
-    point?: CalPoint,
-    staged?: CalStagedSet,
-): Promise<void> {
-    return invoke<void>('pit_cal_command', {
-        command,
-        point: point ?? null,
-        commitApps1Min: staged?.apps1Min ?? null,
-        commitApps1Max: staged?.apps1Max ?? null,
-        commitApps2Min: staged?.apps2Min ?? null,
-        commitApps2Max: staged?.apps2Max ?? null,
-        commitBrakeRest: staged?.brakeRest ?? null,
-        commitBrakeArm: staged?.brakeArm ?? null,
-        commitBrakeDvHard: staged?.brakeDvHard ?? null,
-        commitBrakePressed: staged?.brakePressed ?? null,
-    });
 }
 
 export function onPitDiagFrame(

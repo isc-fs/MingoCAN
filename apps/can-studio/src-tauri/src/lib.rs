@@ -80,7 +80,6 @@ pub fn run() {
             pit_diag::pit_diag_enable,
             pit_diag::pit_diag_disable,
             pit_diag::pit_diag_udv_calibrate,
-            pit_diag::pit_cal_command,
             logs::logs_list,
             logs::logs_pull,
             logs::logs_cancel,
