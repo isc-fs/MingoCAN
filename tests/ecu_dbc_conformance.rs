@@ -98,17 +98,17 @@ const KNOWN_PIT_DIAG_MESSAGES: &[(&str, u16)] = &[
 /// Adding an entry here is a deliberate act: anything in it is a frame the
 /// tool silently drops on the floor.
 const DEFERRED_PIT_DIAG_MESSAGES: &[(&str, &str)] = &[
-    ("PitDiag_cell", "#565 - per-cell OCV/compensation detail"),
-    ("PitDiag_pack_temp", "#565 - pack thermal derate detail"),
+    ("PitDiag_cell", "#566 - per-cell OCV/compensation detail"),
+    ("PitDiag_pack_temp", "#566 - pack thermal derate detail"),
     (
         "PitDiag_inv_foc",
-        "#565 - inverter FOC currents + control mode",
+        "#566 - inverter FOC currents + control mode",
     ),
     (
         "PitDiag_inv_torque",
-        "#565 - inverter torque request/estimate",
+        "#566 - inverter torque request/estimate",
     ),
-    ("PitDiag_power", "#565 - shaft/AC power + DC bus"),
+    ("PitDiag_power", "#566 - shaft/AC power + DC bus"),
 ];
 
 // ---- Message set + IDs -------------------------------------------
