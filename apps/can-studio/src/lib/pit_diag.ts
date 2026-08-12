@@ -283,8 +283,10 @@ export type PitDiagEvent =
            *  that only standby/ready were named and every fault state
            *  rendered as unknown. */
           invState: string;
-          /** APPS plausibility (EV 2.3) OK. */
-          ev23: boolean;
+          /** The EV 2.2.1 power envelope is limiting torque this tick.
+           *  (Replaced `ev23` — EV.2.3 was deleted from FS-Rules 2024 and
+           *  the cut removed with it, so that bit is now reserved.) */
+          powerCapped: boolean;
           /** Brake/throttle plausibility (T11.8/9) OK. */
           t1189: boolean;
           /** Ready-to-drive sound active. */
@@ -347,6 +349,17 @@ export type PitDiagEvent =
           pwrstgDegc: number;
           motor1Degc: number;
           motor2Degc: number;
+          /** The motor temperature the ECU actually derates from — not
+           *  necessarily either sensor; check the validity bits. */
+          motorTempUsedDegc: number;
+          /** Thermal capability remaining, %. Below 100 = derating. */
+          thermalCapPct: number;
+          tempS1Valid: boolean;
+          tempS2Valid: boolean;
+          /** Neither motor sensor is trusted — the used value is a
+           *  fallback, not a measurement. */
+          tempUnknown: boolean;
+          thermalCapped: boolean;
       }
     | {
           /** ECU 0x703 — firmware identity. */
@@ -385,6 +398,9 @@ export type PitDiagEvent =
           stubNoInverter: boolean;
           stubStart: boolean;
           stubBrake: boolean;
+          /** TorqueCap below 100 % — torque clamped for on-stands testing.
+           *  Firmware tags it "MUST be 100 for any flight / drive build". */
+          stubTorqueCap: boolean;
       }
     | {
           /** ECU 0x708 — the inverter's two lower fault layers (#168).
@@ -409,6 +425,9 @@ export type PitDiagEvent =
           /** Increments per 0x461; the delta between consecutive frames is
            *  the arrival count per 100 ms (10 => 10 ms period, 1 => 100 ms). */
           invStateSeq: number;
+          /** Times the ECU re-drove the inverter command because it was not
+           *  taken. A climbing count means the handshake is being fought. */
+          invRedriveCount: number;
       }
     | {
           /** ECU 0x707 — DV (driverless) integration view (#109). The

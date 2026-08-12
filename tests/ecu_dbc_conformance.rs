@@ -85,6 +85,32 @@ const KNOWN_PIT_DIAG_MESSAGES: &[(&str, u16)] = &[
     ("PitDiag_inv_faults", ECU_INV_FAULTS_ID),
 ];
 
+/// `PitDiag_*` frames present upstream that this decoder does NOT yet
+/// handle, with the issue tracking each.
+///
+/// This list exists so [`pit_diag_message_set_matches_the_decoder`] keeps
+/// its teeth. Without it the choice is between failing forever on known
+/// debt (which trains people to ignore the test) or widening the assertion
+/// to "any message is fine" (which removes the guard entirely). Naming the
+/// gaps keeps a genuinely NEW frame failing loudly while the known ones
+/// stay greppable and attributable.
+///
+/// Adding an entry here is a deliberate act: anything in it is a frame the
+/// tool silently drops on the floor.
+const DEFERRED_PIT_DIAG_MESSAGES: &[(&str, &str)] = &[
+    ("PitDiag_cell", "#565 - per-cell OCV/compensation detail"),
+    ("PitDiag_pack_temp", "#565 - pack thermal derate detail"),
+    (
+        "PitDiag_inv_foc",
+        "#565 - inverter FOC currents + control mode",
+    ),
+    (
+        "PitDiag_inv_torque",
+        "#565 - inverter torque request/estimate",
+    ),
+    ("PitDiag_power", "#565 - shaft/AC power + DC bus"),
+];
+
 // ---- Message set + IDs -------------------------------------------
 
 #[test]
@@ -102,6 +128,11 @@ fn pit_diag_message_set_matches_the_decoder() {
     let mut known: Vec<String> = KNOWN_PIT_DIAG_MESSAGES
         .iter()
         .map(|(n, _)| (*n).to_string())
+        .chain(
+            DEFERRED_PIT_DIAG_MESSAGES
+                .iter()
+                .map(|(n, _)| (*n).to_string()),
+        )
         .collect();
     known.sort();
 
@@ -156,9 +187,9 @@ fn message_lengths_match_the_decoder_minimums() {
         ("PitDiag_fwinfo", 7),
         ("PitDiag_health", 8),
         ("PitDiag_brake", 3),
-        ("PitDiag_inverter_temps", 4),
+        ("PitDiag_inverter_temps", 7),
         ("PitDiag_dv", 8),
-        ("PitDiag_inv_faults", 6),
+        ("PitDiag_inv_faults", 7),
     ];
     for (name, dlc) in expected {
         assert_eq!(
@@ -218,13 +249,13 @@ fn signal_layouts_match_the_decoder() {
         expect(&[
             ("fsm_state", 0, 8, false, false),
             ("inv_state", 8, 8, false, false),
-            ("ev_2_3", 16, 1, false, false),
             ("t11_8_9", 17, 1, false, false),
             ("rtds_active", 18, 1, false, false),
             ("ok_precharge", 19, 1, false, false),
             ("start_button", 20, 1, false, false),
             ("dv_mode", 21, 1, false, false),
             ("tx_dropped", 22, 1, false, false),
+            ("power_capped", 23, 1, false, false),
             ("torque_pct", 24, 8, false, false),
             ("v_cell_min_mV", 39, 16, true, false),
             ("torque_cmd", 55, 16, true, true),
@@ -287,6 +318,7 @@ fn signal_layouts_match_the_decoder() {
             ("reset_cause", 40, 3, false, false),
             ("stub_brake", 43, 1, false, false),
             ("cal_status", 44, 2, false, false),
+            ("stub_torque_cap", 46, 1, false, false),
             ("uptime_s", 48, 8, false, false),
             ("last_fault", 56, 8, false, false),
         ]),
@@ -309,6 +341,12 @@ fn signal_layouts_match_the_decoder() {
             ("temp_pwrstg_degC", 8, 8, false, false),
             ("temp_motor1_degC", 16, 8, false, false),
             ("temp_motor2_degC", 24, 8, false, false),
+            ("motor_temp_used_degC", 32, 8, false, false),
+            ("thermal_cap_pct", 40, 8, false, false),
+            ("temp_s1_valid", 48, 1, false, false),
+            ("temp_s2_valid", 49, 1, false, false),
+            ("temp_unknown", 50, 1, false, false),
+            ("thermal_capped", 51, 1, false, false),
         ]),
         "0x706 layout drifted"
     );
@@ -356,6 +394,7 @@ fn signal_layouts_match_the_decoder() {
             ("cmd_flt_clear", 26, 1, false, false),
             ("inv_state_age_ms", 32, 8, false, false),
             ("inv_state_seq", 40, 8, false, false),
+            ("inv_redrive_count", 48, 8, false, false),
         ]),
         "0x708 layout drifted"
     );
