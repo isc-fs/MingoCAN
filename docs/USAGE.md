@@ -587,7 +587,6 @@ depending on the subcommand). Schemas live in
   and more — see [DESKTOP.md](DESKTOP.md).
 - Watching a live car: [TELEMETRY.md](TELEMETRY.md).
 - Pulling logs: [DATA_LOGS.md](DATA_LOGS.md).
-- Calibrating pedals: [PEDAL_CALIBRATION.md](PEDAL_CALIBRATION.md).
 - Which operations write to a board, and what guards them:
   [SAFETY.md](SAFETY.md).
 - Programming the bootloader protocol yourself? See

@@ -20,7 +20,7 @@ single tag.
 
 | You want to… | Go to |
 |---|---|
-| Flash a board, watch telemetry, pull logs, calibrate pedals | **[docs/DESKTOP.md](docs/DESKTOP.md)** — the desktop app is the primary surface |
+| Flash a board, watch telemetry, pull logs | **[docs/DESKTOP.md](docs/DESKTOP.md)** — the desktop app is the primary surface |
 | Script it, or work at the bench | [docs/USAGE.md](docs/USAGE.md) — the CLI |
 | Understand what can write to a car | [docs/SAFETY.md](docs/SAFETY.md) |
 | Work on the tool itself | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) |
@@ -61,7 +61,6 @@ single tag.
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Developing the tool itself — toolchain, tests, CI, branch conventions |
 | [docs/DESKTOP.md](docs/DESKTOP.md) | The desktop app: adapters, the eight views, settings |
 | [docs/TELEMETRY.md](docs/TELEMETRY.md) | Watching a live car safely — which modes transmit and which do not |
-| [docs/PEDAL_CALIBRATION.md](docs/PEDAL_CALIBRATION.md) | Calibrating APPS + brake over CAN — safety-critical runbook |
 | [docs/DATA_LOGS.md](docs/DATA_LOGS.md) | Pulling microSD logs off a board |
 | [docs/SAFETY.md](docs/SAFETY.md) | Every operation that writes to a board, and what guards it |
 | [docs/UPDATES.md](docs/UPDATES.md) | The desktop app's auto-updater |

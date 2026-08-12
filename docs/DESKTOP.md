@@ -1,7 +1,7 @@
 # MingoCAN desktop app
 
 The desktop app is the main way to use this tool. If you are flashing a board,
-watching telemetry, pulling logs, or calibrating pedals, you want the app — the
+watching telemetry, or pulling logs, you want the app — the
 [CLI](USAGE.md) exists for scripting and bench automation.
 
 Install it from the [latest release](https://github.com/isc-fs/can-flasher/releases/latest):
@@ -100,10 +100,6 @@ DBC picked for the powertrain bus does not follow you to a different adapter.
 Live telemetry from the AMS, ECU and uDV, with a tab per board and an **All**
 cockpit that shows the three side by side. See [TELEMETRY.md](TELEMETRY.md).
 
-**Pedal calibration lives inside this view**, on the dedicated ECU tab — it is
-the one thing here that writes to the car. It has its own runbook:
-[PEDAL_CALIBRATION.md](PEDAL_CALIBRATION.md).
-
 ### Data logs
 
 Pulls microSD logs off a board over CAN. See [DATA_LOGS.md](DATA_LOGS.md) —
@@ -130,7 +126,6 @@ the **signals** tab.
 
 ## See also
 
-- [PEDAL_CALIBRATION.md](PEDAL_CALIBRATION.md) — the safety-critical one
 - [TELEMETRY.md](TELEMETRY.md) — watching a live car
 - [DATA_LOGS.md](DATA_LOGS.md) — pulling logs
 - [USAGE.md](USAGE.md) — the CLI

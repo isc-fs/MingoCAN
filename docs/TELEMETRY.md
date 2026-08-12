@@ -47,10 +47,8 @@ board also clears the flag on reboot.
 ## In the app
 
 **Telemetry** has a tab per board plus an **All** cockpit showing the three side
-by side. The dedicated tabs show more than the cockpit does — firmware health,
-the inverter fault layers, and (on the ECU tab) pedal calibration, which is the
-one thing in this view that writes. See
-[PEDAL_CALIBRATION.md](PEDAL_CALIBRATION.md).
+by side. The dedicated tabs show more than the cockpit does — firmware health and the
+inverter fault layers. Everything in this view is read-only.
 
 **Board health** shows DTCs and session health.
 
@@ -59,10 +57,13 @@ load a `.dbc`. The DBC is remembered per adapter, keyed on interface + channel.
 
 ## Things worth knowing when reading the ECU tab
 
-- **`pedal cal`** on the Firmware health card says whether a *stored* pedal
-  calibration is in force. `loaded` is the only value that means yes;
-  `defaults`, `invalidFellBack` and `badVersionFellBack` all mean the ECU is
-  running compile-time values.
+- **`pedal cal`** on the Firmware health card reports whether the ECU is
+  running a *stored* pedal calibration or fell back to compile-time values.
+  `loaded` is the only value that means a stored one is in force; `defaults`,
+  `invalidFellBack` and `badVersionFellBack` all mean compile-time values.
+  This is read-only telemetry — the tool no longer writes calibrations, so
+  treat it as a fact about the firmware on the board, not about anything you
+  did here.
 - **The stubs row** only appears on a bench build. Any of `no-AMS`,
   `no-inverter`, `start`, `brake` or `torque-cap` means the ECU is faking an
   input or clamping torque. You should never see it on the car.
