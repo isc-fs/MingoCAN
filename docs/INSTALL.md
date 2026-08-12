@@ -23,15 +23,25 @@ this. Download the installer for your platform from the
 
 | Platform | Asset |
 |---|---|
-| macOS | `.dmg` |
-| Windows | `.msi` |
-| Linux | `.AppImage` / `.deb` |
+| macOS (Apple Silicon) | `ISC.MingoCAN_<version>_aarch64.dmg` |
+| Windows | `ISC.MingoCAN_<version>_x64-setup.exe` |
+| Linux | `ISC.MingoCAN_<version>_amd64.AppImage`, `_amd64.deb`, or `-1.x86_64.rpm` |
 
-The app bundles the flashing engine — there is no separate CLI to
-install alongside it. It updates itself; see [UPDATES.md](UPDATES.md).
+The same release also carries the standalone CLI as
+`can-flasher-<version>-<target>.tar.gz` / `.zip`, and the VS Code
+extension as `vscode-stm32-can-<version>.vsix`.
 
-You still need the **per-OS adapter setup below** — the SDK for PCAN
-and Vector is loaded at runtime and is not something the app can ship.
+The app bundles the flashing engine — you do not need to install the
+CLI alongside it. It updates itself; see [UPDATES.md](UPDATES.md).
+
+> **The builds are not code-signed.** macOS will say the app is from an
+> unidentified developer: right-click → **Open** the first time, or
+> `xattr -dr com.apple.quarantine` the bundle. Windows SmartScreen shows
+> **More info → Run anyway**. This recurs after an auto-update on macOS
+> — see [UPDATES.md](UPDATES.md).
+
+You still need the **per-OS adapter setup below** — the PCAN and Vector
+SDKs are loaded at runtime and are not something the app can ship.
 See [DESKTOP.md](DESKTOP.md) for what to do once it opens.
 
 ---

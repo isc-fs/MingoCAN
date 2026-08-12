@@ -5,9 +5,9 @@ watching telemetry, pulling logs, or calibrating pedals, you want the app — th
 [CLI](USAGE.md) exists for scripting and bench automation.
 
 Install it from the [latest release](https://github.com/isc-fs/can-flasher/releases/latest):
-grab the `.dmg` (Mac), `-setup.exe` (Windows) or `.deb` / `.rpm` (Linux). Full
-per-platform steps, including the one-time "unidentified developer" prompt, are
-in [INSTALL.md](INSTALL.md).
+grab the `.dmg` (macOS, Apple Silicon), `-setup.exe` (Windows) or the
+`.AppImage` / `.deb` / `.rpm` (Linux). Full per-platform steps, including the
+one-time "unidentified developer" prompt, are in [INSTALL.md](INSTALL.md).
 
 ---
 
