@@ -19,7 +19,7 @@ What follows is for people who cloned the repo.
 
 The desktop app is the primary surface, and it does not need any of
 this. Download the installer for your platform from the
-[latest release](https://github.com/isc-fs/can-flasher/releases/latest):
+[latest release](https://github.com/isc-fs/MingoCAN/releases/latest):
 
 | Platform | Asset |
 |---|---|
@@ -56,8 +56,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 sudo apt-get install libudev-dev pkg-config
 
 # Clone and pick one of the two options below.
-git clone https://github.com/isc-fs/can-flasher.git
-cd can-flasher
+git clone https://github.com/isc-fs/MingoCAN.git
+cd MingoCAN
 ```
 
 **Option A — Install `can-flasher` on your PATH:**

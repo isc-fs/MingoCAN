@@ -12,7 +12,7 @@ macOS), Vector XL Driver Library (VN1610 and the rest of the
 series on Windows), plus a `virtual` backend for hardware-less
 CI + integration tests.
 
-**[Latest release](https://github.com/isc-fs/can-flasher/releases/latest)** —
+**[Latest release](https://github.com/isc-fs/MingoCAN/releases/latest)** —
 the desktop app, the CLI and the VS Code extension all ship together from a
 single tag.
 
@@ -87,7 +87,7 @@ Then install `can-flasher` to your PATH, straight from GitHub — no
 clone, no build directory to manage:
 
 ```bash
-cargo install --git https://github.com/isc-fs/can-flasher.git
+cargo install --git https://github.com/isc-fs/MingoCAN.git
 ```
 
 After this, `can-flasher --help` works from anywhere. Docs refer
@@ -106,8 +106,8 @@ Full per-OS adapter setup (CANable, SocketCAN, PCAN):
 ### Build from source (contributors only)
 
 ```bash
-git clone https://github.com/isc-fs/can-flasher.git
-cd can-flasher
+git clone https://github.com/isc-fs/MingoCAN.git
+cd MingoCAN
 cargo build --release
 ./target/release/can-flasher --help
 ```

@@ -283,7 +283,7 @@ function maybeNotifyMissingCli(command: string): void {
     if (enoentNotified) return;
     enoentNotified = true;
 
-    const releaseUrl = 'https://github.com/isc-fs/can-flasher/releases/latest';
+    const releaseUrl = 'https://github.com/isc-fs/MingoCAN/releases/latest';
     const message =
         `Couldn't run \`${command}\` — the can-flasher CLI isn't on the PATH ` +
         `VS Code sees. Download the latest release for your platform, or ` +

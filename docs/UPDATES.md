@@ -13,7 +13,7 @@ install it in place, then relaunch. It uses the official
 
    ```
    https://raw.githubusercontent.com/isc-fs/iskapps/main/mingocan/latest.json
-   https://github.com/isc-fs/can-flasher/releases/latest/download/latest.json
+   https://github.com/isc-fs/MingoCAN/releases/latest/download/latest.json
    ```
 
    The first is the **iskApps** "pit garage" ([isc-fs/iskapps](https://github.com/isc-fs/iskapps)) —
@@ -84,8 +84,8 @@ never be committed.
 2. **Set two GitHub Actions repo secrets:**
 
    ```sh
-   gh secret set TAURI_SIGNING_PRIVATE_KEY --repo isc-fs/can-flasher < ~/.tauri/mingocan-updater.key
-   printf '' | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo isc-fs/can-flasher   # empty password
+   gh secret set TAURI_SIGNING_PRIVATE_KEY --repo isc-fs/MingoCAN < ~/.tauri/mingocan-updater.key
+   printf '' | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo isc-fs/MingoCAN   # empty password
    ```
 
 3. **Put the public key** (`cat ~/.tauri/mingocan-updater.key.pub`)

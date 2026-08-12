@@ -37,7 +37,7 @@ import * as vscode from 'vscode';
 
 import { getOutputChannel } from './output';
 
-const REPO = 'isc-fs/can-flasher';
+const REPO = 'isc-fs/MingoCAN';
 
 /**
  * Map the host to the release target triple + archive extension.
