@@ -517,13 +517,13 @@ pub(crate) async fn run_nvm_write(
             // next boot. `Bootloader` mode sets the boot-request
             // magic so the chip comes back up in the BL rather
             // than auto-jumping to the app — operator stays in a
-            // known state for the verifying `cf discover` /
-            // `cf config nvm read`.
+            // known state for the verifying `can-flasher discover` /
+            // `can-flasher config nvm read`.
             //
             // Real hardware reboots before sending the ACK we'd
             // otherwise wait for, so any error from the send call
             // is expected; trace-log it and move on. The real
-            // verification is the operator's next `cf discover`.
+            // verification is the operator's next `can-flasher discover`.
             if reset {
                 let reset_send = session
                     .send_command(&cmd_reset(ResetMode::Bootloader))
@@ -686,7 +686,7 @@ fn parse_nvm_value(raw: &str) -> Result<Vec<u8>> {
 /// Parse an NVM key argument. Accepts either a hex/decimal literal
 /// (the existing surface) or a friendly name from [`NVM_KEY_ALIASES`].
 ///
-/// Bench-friendly: `cf config nvm write node-id 0x02` is the
+/// Bench-friendly: `can-flasher config nvm write node-id 0x02` is the
 /// motivating use case from
 /// [gh #231](https://github.com/isc-fs/can-flasher/issues/231) task 2.
 /// The registry is intentionally tiny — one entry today (`node-id`

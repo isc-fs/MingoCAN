@@ -15,6 +15,37 @@ What follows is for people who cloned the repo.
 
 ---
 
+## Just want the app?
+
+The desktop app is the primary surface, and it does not need any of
+this. Download the installer for your platform from the
+[latest release](https://github.com/isc-fs/can-flasher/releases/latest):
+
+| Platform | Asset |
+|---|---|
+| macOS (Apple Silicon) | `ISC.MingoCAN_<version>_aarch64.dmg` |
+| Windows | `ISC.MingoCAN_<version>_x64-setup.exe` |
+| Linux | `ISC.MingoCAN_<version>_amd64.AppImage`, `_amd64.deb`, or `-1.x86_64.rpm` |
+
+The same release also carries the standalone CLI as
+`can-flasher-<version>-<target>.tar.gz` / `.zip`, and the VS Code
+extension as `vscode-stm32-can-<version>.vsix`.
+
+The app bundles the flashing engine — you do not need to install the
+CLI alongside it. It updates itself; see [UPDATES.md](UPDATES.md).
+
+> **The builds are not code-signed.** macOS will say the app is from an
+> unidentified developer: right-click → **Open** the first time, or
+> `xattr -dr com.apple.quarantine` the bundle. Windows SmartScreen shows
+> **More info → Run anyway**. This recurs after an auto-update on macOS
+> — see [UPDATES.md](UPDATES.md).
+
+You still need the **per-OS adapter setup below** — the PCAN and Vector
+SDKs are loaded at runtime and are not something the app can ship.
+See [DESKTOP.md](DESKTOP.md) for what to do once it opens.
+
+---
+
 ## Install from a clone
 
 ```bash
@@ -226,6 +257,8 @@ are in
 
 ## Next steps
 
+- [DESKTOP.md](DESKTOP.md) — the desktop app, view by view.
 - [USAGE.md](USAGE.md) — what every subcommand does, common flags, examples.
+- [SAFETY.md](SAFETY.md) — which operations write to a board.
 - [../REQUIREMENTS.md](../REQUIREMENTS.md) — authoritative CLI spec, opcode table, exit codes.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — developing the tool itself.

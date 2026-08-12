@@ -28,7 +28,7 @@
 //!
 //! ### Example
 //! ```shell
-//! cf --interface slcan --channel /dev/cu.usbmodem1201 \
+//! can-flasher --interface slcan --channel /dev/cu.usbmodem1201 \
 //!    send-raw 0x010 01
 //! ```
 //! (sends one classic-CAN frame with ID `0x010` and 1 byte of

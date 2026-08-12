@@ -94,7 +94,7 @@ pub struct SwdFlashArgs {
 
     /// After the SWD burn, assign the board's CAN node-id by role,
     /// over CAN — the second commissioning step that otherwise needs
-    /// a separate `cf provision <role>`. Accepts a role name (`ecu`,
+    /// a separate `can-flasher provision <role>`. Accepts a role name (`ecu`,
     /// `ams`, `udv`) or a firmware path whose basename matches
     /// (e.g. `build/ams.elf`). Requires the global CAN flags
     /// (`--interface`, `--channel`) since the provision step talks to
@@ -206,7 +206,7 @@ pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
             no_reset: false,
             // `swd-flash --provision <role>` is itself the explicit
             // opt-in, so don't double-prompt (FMEA #271 G17's confirm
-            // is for the standalone `cf provision` mis-target case).
+            // is for the standalone `can-flasher provision` mis-target case).
             yes: true,
         };
         super::provision::run(prov, global).await?;
