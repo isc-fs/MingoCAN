@@ -1,4 +1,4 @@
-//! `cf logs` — list and pull the microSD data logs off a node over CAN.
+//! `can-flasher logs` — list and pull the microSD data logs off a node over CAN.
 //!
 //! Implements the host side of the LOGFS service (IFS08-CE-AMS#406 /
 //! #506) on top of the existing CONNECT session + ISO-TP transport.
@@ -349,11 +349,11 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
         let selected: Vec<&LogEntry> = match args.index {
             Some(i) => match entries.iter().find(|e| e.index == i) {
                 Some(e) => vec![e],
-                None => bail!("no log with index {i} on the card (try `cf logs list`)"),
+                None => bail!("no log with index {i} on the card (try `can-flasher logs list`)"),
             },
             None if args.all => entries.iter().collect(),
             None => bail!(
-                "pick a file with --index N (see `cf logs list`), or pass --all.\n\
+                "pick a file with --index N (see `can-flasher logs list`), or pass --all.\n\
                  Transfers run at ~10-20 kB/s, so a full card can take 20-35 minutes — \
                  targeted pulls are the intended workflow."
             ),

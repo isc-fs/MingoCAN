@@ -13,7 +13,7 @@
 //!   re-CONNECT and re-OPEN — the node released our handle when the session
 //!   died — and resume the ranged read from the last acked offset.
 //!
-//! Both `cf logs pull` and the Studio Data logs view call [`pull_file`] so
+//! Both `can-flasher logs pull` and the Studio Data logs view call [`pull_file`] so
 //! this logic lives and is tested in exactly one place.
 
 use std::time::Duration;
