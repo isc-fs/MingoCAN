@@ -24,7 +24,8 @@ Commands:
   replay      Record or replay a CAN session (testing)
   send-raw    Send one raw CAN frame (app-level reboot-to-BL, bench probes)
   provision   Assign a board's node-id by role name (ecu / ams / udv)
-  pit-diag    AMS pit-diag observer — arm / disarm / stream the diag stream
+  pit-diag    Telemetry observer — listen / arm / disarm / stream (AMS, ECU, uDV)
+  logs        List, seal and pull microSD car-data logs off a board
   adapters    List detected CAN adapters on this machine
 
 Global Options:
@@ -40,6 +41,22 @@ Global Options:
 
 Every subcommand has its own `--help` with the full flag list —
 treat the snippets below as the 80 % path.
+
+### How `--node-id` resolves
+
+`--node-id` is global, but each subcommand treats an omitted value
+differently. There is no single default.
+
+| Subcommand | If you omit `--node-id` |
+|---|---|
+| `flash` | **error** — the target is never guessed |
+| `logs` | **error** — but the message is generic and the exit code is the catch-all **99**, not a targeted hint |
+| `verify`, `diagnose`, `config` | defaults to `0x3` |
+| `provision` | target defaults to `0x3`; the *value written* comes from the role argument |
+| `discover`, `pit-diag`, `replay`, `adapters` | not used — these are broadcast or passive |
+
+Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`. A board that has not been
+provisioned yet answers on the unprovisioned address `0xF`.
 
 ---
 
@@ -273,31 +290,54 @@ node-id.
 
 ---
 
-## `pit-diag` — AMS observer mode
+## `pit-diag` — telemetry observer
 
-The AMS firmware can be flipped into a 1 Hz diagnostic stream by
-the host. When armed it broadcasts 58 frames per scan (every cell
-voltage, every NTC temperature, FSM state, V-poll timing, cell
-balancing, boot diagnostics, crash post-mortem, firmware ID, and
-per-IC PEC counts) to whoever's listening. `pit-diag` is the
-terminal-side driver — it sends the arm command, waits for the
-ACK, and decodes the stream.
+Boards can be flipped into a diagnostic stream by the host. When armed
+they broadcast a much larger set of frames — every cell voltage, every
+NTC temperature, FSM state, inverter fault layers, and so on — to
+whoever is listening. `pit-diag` is the terminal-side driver: it sends
+the arm command, waits for the ACK, and decodes the stream.
 
-The MingoCAN app has the same observer rendered as a live
-cell-V grid + temp heatmap; this subcommand is the headless
-equivalent for bench scripts, CI smoke checks, and `jq`-piping.
+Three boards are supported: `--profile ams` (arm `0x7F0`, ACK `0x7F1`,
+stream `0x680`–`0x6CA`), `ecu` (`0x7E0` / `0x7E1`, stream
+`0x700`–`0x708`) and `udv` (`0x7DE` / `0x7DF`, stream `0x7A0`–`0x7A9`).
+
+The MingoCAN desktop app renders the same observers as live cell-V
+grids and temp heatmaps; this subcommand is the headless equivalent for
+bench scripts, CI smoke checks, and `jq`-piping. See
+[TELEMETRY.md](TELEMETRY.md) for the operator-facing guide.
+
+### `listen` — passive, never transmits
 
 ```bash
-# Arm the stream — the AMS starts emitting 58 frames/sec.
-can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag enable
+can-flasher -i pcan -c PCAN_USBBUS1 pit-diag listen
+```
+
+`listen` decodes the frames boards broadcast *without* being asked —
+the ECU health frame `0x704` and the AMS health frame `0x6CA` — so it
+answers "is this board's app alive?" the moment the board powers up.
+
+It never sends a frame. **This is the only pit-diag mode that is safe
+to point at a live car.**
+
+| Flag | Meaning |
+|---|---|
+| `--profile all\|ams\|ecu\|udv` | which board's frames to decode (default `all`) |
+| `--duration-ms <MS>` | stop after N ms; omit to run until Ctrl-C |
+
+### `enable` / `disable` / `stream` — these transmit
+
+```bash
+# Arm the stream — the board starts emitting its full frame set.
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag enable --profile ams
 # ✓ ams pit-diag armed
 
 # Disarm — stops the stream.
-can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag disable
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag disable --profile ams
 # ✓ ams pit-diag disarmed
 
 # Arm + stream + auto-disarm-on-exit. Ctrl-C cleanly disarms.
-can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag stream
+can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag stream --profile ams
 # [+  0.143s] cell  frame= 0 cells[ 0.. 4] = 3400 3408 3413 3424 mV
 # [+  0.156s] cell  frame= 1 cells[ 4.. 8] = 3402 3411 3399 3407 mV
 # [+  0.842s] fsm   state=Run mode=Car tsms=1 dash=1 ams_ok=1 pec=0
@@ -305,21 +345,66 @@ can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag stream
 #  ...
 
 # Bounded run — stream for 10 seconds, then disarm + exit.
-can-flasher -i slcan -c /dev/cu.usbmodem… pit-diag stream --duration 10
+can-flasher -i slcan -c … pit-diag stream --profile ams --duration 10
 
-# NDJSON output for scripting. One JSON object per line; pipe
-# through jq for grepping specific fields.
-can-flasher -i slcan -c … --json pit-diag stream --duration 5 \
+# NDJSON output for scripting. One JSON object per line.
+can-flasher -i slcan -c … --json pit-diag stream --profile ams --duration 5 \
     | jq -c 'select(.kind == "cellVoltage" and .firstCell == 0)'
 
-# CI smoke check — fails non-zero if any 1Hz window has wildly
-# wrong frame count (catches firmware drift before bench time).
-can-flasher -i slcan -c … pit-diag stream --duration 5 --strict-scan
+# CI smoke check — fails non-zero if a 1 Hz window has the wrong frame
+# count (catches firmware drift before bench time). Expected totals are
+# per-profile: 58 AMS, 7 ECU, 4 uDV.
+can-flasher -i slcan -c … pit-diag stream --profile ams --duration 5 --strict-scan
 ```
 
-Profile flag (`--profile ams`) is hardcoded to AMS today. The
-plugin layer for VCU / UDV streams lands in the slice 5 work on
-[#252](https://github.com/isc-fs/can-flasher/issues/252).
+> `stream` takes `--duration` in **seconds**; `listen` takes
+> `--duration-ms` in **milliseconds**. They are not the same flag.
+
+The arm payload is `DE AD BE EF`; disarm is all zeros. An ACK whose
+first byte is anything other than `0x01` — including an empty payload
+— means **disabled**. `stream` disarms on exit including on Ctrl-C, and
+a board clears the flag on reboot if the tool dies without disarming.
+
+---
+
+## `logs` — pull microSD car-data logs
+
+Boards write car data to a microSD card. LOGFS pulls those files off
+over CAN, so you do not have to open anything up to get at them. It is
+**read-only** — there is no delete.
+
+LOGFS is served by the **application** firmware, not the bootloader. A
+board sitting in its bootloader has nothing listening for these
+commands.
+
+```bash
+# Seal the log currently being written — an unsealed log does not
+# appear in a listing. Do this first, every time.
+can-flasher -i pcan -c PCAN_USBBUS1 --node-id 0x02 logs finalize
+
+can-flasher … --node-id 0x02 logs list
+can-flasher … --node-id 0x02 logs pull --index 3 --out ./logs/
+can-flasher … --node-id 0x02 logs pull --all --out ./logs/
+```
+
+| Flag | Meaning |
+|---|---|
+| `--index N` | pull one file by its index from `list` |
+| `--all` | pull every file — opt-in on purpose, see below |
+| `--out DIR` | where to write |
+| `--no-verify` | skip the closing CRC check (not recommended) |
+
+**`--node-id` is mandatory here** and there is no default; omitting it
+fails with the generic exit code **99**.
+
+Throughput is roughly **10–20 kB/s**, so a 4 MiB file takes about
+**3.5 to 7 minutes** and `--all` on a full card is a 20–35 minute
+transfer. Commands retry up to three times, and the internal timeout
+floor is 2000 ms — a `--timeout` smaller than that is raised to it
+rather than honoured, because a shorter deadline cannot outlast a
+FatFs read on a shared bus.
+
+Full guide: [DATA_LOGS.md](DATA_LOGS.md).
 
 ---
 
@@ -498,6 +583,12 @@ depending on the subcommand). Schemas live in
 
 ## Where next
 
+- Would rather click than type? The desktop app does everything here
+  and more — see [DESKTOP.md](DESKTOP.md).
+- Watching a live car: [TELEMETRY.md](TELEMETRY.md).
+- Pulling logs: [DATA_LOGS.md](DATA_LOGS.md).
+- Which operations write to a board, and what guards them:
+  [SAFETY.md](SAFETY.md).
 - Programming the bootloader protocol yourself? See
   [../REQUIREMENTS.md](../REQUIREMENTS.md) for the opcode table and
   frame-format details.

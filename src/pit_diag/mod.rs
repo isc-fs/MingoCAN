@@ -631,7 +631,7 @@ pub struct PackFrame {
 
 /// `0x6CA` — ungated 1 Hz firmware-health frame (IFS08-CE-AMS #411). Emitted
 /// from AcuCanTask regardless of the pit-diag arm state, so a passive listener
-/// (`cf pit-diag listen`) reads AMS liveness the instant the board powers up —
+/// (`can-flasher pit-diag listen`) reads AMS liveness the instant the board powers up —
 /// the AMS parity of the ECU's `0x704`. Byte layout mirrors it exactly.
 pub const AMS_FW_HEALTH_ID: u16 = 0x6CA;
 
@@ -737,7 +737,7 @@ pub fn decode_frame(frame: &CanFrame) -> Option<PitDiagFrame> {
     }
 
     // Ungated firmware-health frame (#411) — always-on, no arm required, so
-    // `cf pit-diag listen` sees it passively. Mirrors the ECU 0x704 layout.
+    // `can-flasher pit-diag listen` sees it passively. Mirrors the ECU 0x704 layout.
     if id == AMS_FW_HEALTH_ID {
         if payload.len() < 8 {
             return None;

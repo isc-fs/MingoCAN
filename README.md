@@ -12,10 +12,18 @@ macOS), Vector XL Driver Library (VN1610 and the rest of the
 series on Windows), plus a `virtual` backend for hardware-less
 CI + integration tests.
 
-**Current release: [v1.2.0](https://github.com/isc-fs/can-flasher/releases/tag/v1.2.0)** —
-flash pipeline feature-complete against the v1.0.0 bootloader
-contract; subsequent releases add adapter coverage, flash-speed
-improvements, and tooling.
+**[Latest release](https://github.com/isc-fs/can-flasher/releases/latest)** —
+the desktop app, the CLI and the VS Code extension all ship together from a
+single tag.
+
+### Start here
+
+| You want to… | Go to |
+|---|---|
+| Flash a board, watch telemetry, pull logs | **[docs/DESKTOP.md](docs/DESKTOP.md)** — the desktop app is the primary surface |
+| Script it, or work at the bench | [docs/USAGE.md](docs/USAGE.md) — the CLI |
+| Understand what can write to a car | [docs/SAFETY.md](docs/SAFETY.md) |
+| Work on the tool itself | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) |
 
 | Subcommand | Purpose |
 |---|---|
@@ -27,6 +35,9 @@ improvements, and tooling.
 | `replay` | Record / replay CAN sessions for testing |
 | `flash` | Program firmware end-to-end |
 | `send-raw` | Send one raw CAN frame (app-level reboot-to-BL, bench probes) |
+| `logs` | Pull microSD car-data logs off a board over CAN |
+| `pit-diag` | Observe AMS / ECU / uDV telemetry — `listen` is send-silent and safe on a live car |
+| `provision` | Write a board's node ID into bootloader NVM |
 | `swd-flash` *(opt-in: `--features swd`)* | First-boot a bare STM32 via ST-LINK — covers the chicken-and-egg case where the CAN bootloader isn't on the chip yet |
 
 ## Supported adapters
@@ -48,6 +59,12 @@ improvements, and tooling.
 | [docs/INSTALL.md](docs/INSTALL.md) | Building the binary + per-OS adapter setup |
 | [docs/USAGE.md](docs/USAGE.md) | Day-to-day subcommand reference + examples + exit codes |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Developing the tool itself — toolchain, tests, CI, branch conventions |
+| [docs/DESKTOP.md](docs/DESKTOP.md) | The desktop app: adapters, the eight views, settings |
+| [docs/TELEMETRY.md](docs/TELEMETRY.md) | Watching a live car safely — which modes transmit and which do not |
+| [docs/DATA_LOGS.md](docs/DATA_LOGS.md) | Pulling microSD logs off a board |
+| [docs/SAFETY.md](docs/SAFETY.md) | Every operation that writes to a board, and what guards it |
+| [docs/UPDATES.md](docs/UPDATES.md) | The desktop app's auto-updater |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Flash-throughput measurements (historical, v1.2.0-era) |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Authoritative CLI spec, opcode table, frame format, JSON schemas |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Code layout, module tree, design rationale |
 | [ROADMAP.md](ROADMAP.md) | Phase-by-phase delivery history (auto-generated from `.github/roadmap.yaml`) |
