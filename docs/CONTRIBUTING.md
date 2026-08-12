@@ -243,13 +243,14 @@ Studio bundles side-by-side.
 we don't cut `release/v*` branches at any point. Flow: land
 everything on `dev`, fast-forward `dev → main`, tag on `main`.
 
-When cutting `vX.Y.Z`, bump **all six** source-of-truth files
-in the same commit on `dev`:
+When cutting `vX.Y.Z`, bump **all six** version files in the same
+commit on `dev`. Five of them are checked by CI; `Cargo.lock` is not,
+so it is the one that silently drifts:
 
 | File | Field |
 |---|---|
 | `Cargo.toml` (root) | `version = "X.Y.Z"` |
-| `Cargo.lock` | `can-flasher` package entry's `version = "X.Y.Z"` |
+| `Cargo.lock` | `can-flasher` package entry's `version = "X.Y.Z"` — **not gated**, bump it by hand or let `cargo build` do it |
 | `editor/vscode/package.json` | `"version": "X.Y.Z"` |
 | `apps/can-studio/src-tauri/Cargo.toml` | `version = "X.Y.Z"` |
 | `apps/can-studio/package.json` | `"version": "X.Y.Z"` |
@@ -262,11 +263,11 @@ Then:
 3. Tag `main` with `git tag -a vX.Y.Z -m "…"` and push.
 4. The consolidated [`release.yml`](../.github/workflows/release.yml)
    triggers. Its `verify-version` gate compares the tag's
-   `X.Y.Z` against all six source files. Any mismatch fails the
+   `X.Y.Z` against the five gated files. Any mismatch fails the
    gate by file name, and all build legs skip — retag after
    bumping.
 
-The six-way gate is the descendant of v1.1.0's version-skew
+The five-way gate is the descendant of v1.1.0's version-skew
 lesson (v1.1.0 binaries reported `can-flasher 0.1.0`; v1.1.1
 added the original single-file guard). The current gate catches
 the same class of mistake across all three surfaces in lockstep.
@@ -276,8 +277,10 @@ the same class of mistake across all three surfaces in lockstep.
    - `cli-build` matrix → 4 binary archives (Linux x86_64 /
      aarch64, macOS aarch64, Windows x86_64)
    - `editor-build` → one `.vsix`
-   - `studio-build` matrix → 7 native bundles (`.dmg`,
-     `.app.tar.gz`, `.deb`, `.AppImage`, `.rpm`, `.msi`, `.exe`)
+   - `studio-build` matrix → native bundles from the six targets
+     configured in `tauri.conf.json` (`dmg`, `app`, `deb`,
+     `appimage`, `rpm`, `nsis` — the Windows installer is the NSIS
+     `-setup.exe`, not an `.msi`), plus their updater `.sig` files
 
    All twelve assets land on **one** GitHub Release page, named
    after the tag.
