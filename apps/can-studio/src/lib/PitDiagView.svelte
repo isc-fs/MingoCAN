@@ -161,7 +161,7 @@
     interface EcuStatusSnapshot {
         fsmState: string;
         invState: string;
-        ev23: boolean;
+        powerCapped: boolean;
         t1189: boolean;
         rtdsActive: boolean;
         okPrecharge: boolean;
@@ -203,6 +203,12 @@
         pwrstgDegc: number;
         motor1Degc: number;
         motor2Degc: number;
+        motorTempUsedDegc: number;
+        thermalCapPct: number;
+        tempS1Valid: boolean;
+        tempS2Valid: boolean;
+        tempUnknown: boolean;
+        thermalCapped: boolean;
     }
     interface EcuInvFaultsSnapshot {
         l1Anomalies: string[];
@@ -212,6 +218,7 @@
         cmdFltClear: boolean;
         invStateAgeMs: number;
         invStateSeq: number;
+        invRedriveCount: number;
     }
     interface EcuHealthSnapshot {
         freeHeap: number;
@@ -230,6 +237,7 @@
         stubNoInverter: boolean;
         stubStart: boolean;
         stubBrake: boolean;
+        stubTorqueCap: boolean;
     }
     interface EcuDvSnapshot {
         dvR2dReq: boolean;
@@ -879,7 +887,7 @@
                 ecuStatus = {
                     fsmState: event.fsmState,
                     invState: event.invState,
-                    ev23: event.ev23,
+                    powerCapped: event.powerCapped,
                     t1189: event.t1189,
                     rtdsActive: event.rtdsActive,
                     okPrecharge: event.okPrecharge,
@@ -923,6 +931,12 @@
                     pwrstgDegc: event.pwrstgDegc,
                     motor1Degc: event.motor1Degc,
                     motor2Degc: event.motor2Degc,
+                    motorTempUsedDegc: event.motorTempUsedDegc,
+                    thermalCapPct: event.thermalCapPct,
+                    tempS1Valid: event.tempS1Valid,
+                    tempS2Valid: event.tempS2Valid,
+                    tempUnknown: event.tempUnknown,
+                    thermalCapped: event.thermalCapped,
                 };
                 framesThisScan += 1;
             } else if (event.kind === 'ecuFwInfo') {
@@ -951,6 +965,7 @@
                     stubNoInverter: event.stubNoInverter,
                     stubStart: event.stubStart,
                     stubBrake: event.stubBrake,
+                    stubTorqueCap: event.stubTorqueCap,
                 };
                 // 0x704 is 1 Hz, not part of the 100 ms cyclic scan —
                 // don't count it toward frames/scan.
@@ -963,6 +978,7 @@
                     cmdFltClear: event.cmdFltClear,
                     invStateAgeMs: event.invStateAgeMs,
                     invStateSeq: event.invStateSeq,
+                    invRedriveCount: event.invRedriveCount,
                 };
                 framesThisScan += 1;
             } else if (event.kind === 'ecuDv') {
@@ -1889,7 +1905,11 @@
                             {/if}
                         </div>
                         <div class="flags">
-                            <span class="flag" class:on={ecuStatus.ev23}>EV 2.3</span>
+                            <span
+                                class="flag"
+                                class:on={ecuStatus.powerCapped}
+                                title="The EV 2.2.1 power envelope is limiting torque this tick. Replaced the old EV 2.3 flag — that rule was deleted in FS-Rules 2024."
+                            >Power cap</span>
                             <span class="flag" class:on={ecuStatus.t1189}>T11.8/9</span>
                             <span class="flag" class:on={ecuStatus.rtdsActive}>RTDS</span>
                             <span class="flag" class:on={ecuStatus.okPrecharge}>
@@ -2154,7 +2174,7 @@
                             </div>
                             <!-- Bench stubs (#528). Hidden entirely on a flight
                                  build, where every announce bit is clear. -->
-                            {#if ecuHealth.stubNoAms || ecuHealth.stubNoInverter || ecuHealth.stubStart || ecuHealth.stubBrake}
+                            {#if ecuHealth.stubNoAms || ecuHealth.stubNoInverter || ecuHealth.stubStart || ecuHealth.stubBrake || ecuHealth.stubTorqueCap}
                                 <div class="badge-row">
                                     <span
                                         class="pill pill-warning"
@@ -2166,6 +2186,7 @@
                                             ecuHealth.stubNoInverter ? 'no-inverter' : null,
                                             ecuHealth.stubStart ? 'start' : null,
                                             ecuHealth.stubBrake ? 'brake' : null,
+                                            ecuHealth.stubTorqueCap ? 'torque-cap' : null,
                                         ]
                                             .filter((s) => s !== null)
                                             .join(', ')}

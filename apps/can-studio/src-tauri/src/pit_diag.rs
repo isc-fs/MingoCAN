@@ -468,7 +468,7 @@ pub enum PitDiagEvent {
     EcuStatus {
         fsm_state: String,
         inv_state: String,
-        ev_2_3: bool,
+        power_capped: bool,
         t11_8_9: bool,
         rtds_active: bool,
         ok_precharge: bool,
@@ -511,6 +511,12 @@ pub enum PitDiagEvent {
         pwrstg_degc: i16,
         motor1_degc: i16,
         motor2_degc: i16,
+        motor_temp_used_degc: i16,
+        thermal_cap_pct: u8,
+        temp_s1_valid: bool,
+        temp_s2_valid: bool,
+        temp_unknown: bool,
+        thermal_capped: bool,
     },
     /// ECU `0x703` — firmware semver + git-hash prefix.
     EcuFwInfo {
@@ -538,6 +544,7 @@ pub enum PitDiagEvent {
         stub_no_inverter: bool,
         stub_start: bool,
         stub_brake: bool,
+        stub_torque_cap: bool,
     },
     /// ECU `0x708` — the inverter's L1 (power stage) / L2 (machine control)
     /// fault layers (#168). Anomaly lists arrive pre-named and health-bit
@@ -552,6 +559,7 @@ pub enum PitDiagEvent {
         cmd_flt_clear: bool,
         inv_state_age_ms: u8,
         inv_state_seq: u8,
+        inv_redrive_count: u8,
     },
     /// ECU `0x707` — DV (driverless) integration view (#109). The `dv_mode`
     /// latch itself rides `EcuStatus`; this carries the handshake around it.
@@ -876,7 +884,7 @@ impl PitDiagEvent {
             EcuPitDiagFrame::Status(EcuStatusFrame {
                 fsm_state,
                 inv_state,
-                ev_2_3,
+                power_capped,
                 t11_8_9,
                 rtds_active,
                 ok_precharge,
@@ -889,7 +897,7 @@ impl PitDiagEvent {
             }) => Self::EcuStatus {
                 fsm_state: ecu_fsm_state_name(fsm_state),
                 inv_state: ecu_inv_state_name(inv_state),
-                ev_2_3,
+                power_capped,
                 t11_8_9,
                 rtds_active,
                 ok_precharge,
@@ -940,11 +948,23 @@ impl PitDiagEvent {
                 pwrstg_degc,
                 motor1_degc,
                 motor2_degc,
+                motor_temp_used_degc,
+                thermal_cap_pct,
+                temp_s1_valid,
+                temp_s2_valid,
+                temp_unknown,
+                thermal_capped,
             }) => Self::EcuInverterTemps {
                 board_degc,
                 pwrstg_degc,
                 motor1_degc,
                 motor2_degc,
+                motor_temp_used_degc,
+                thermal_cap_pct,
+                temp_s1_valid,
+                temp_s2_valid,
+                temp_unknown,
+                thermal_capped,
             },
             EcuPitDiagFrame::FwInfo(EcuFwInfoFrame {
                 fw_major,
@@ -973,6 +993,7 @@ impl PitDiagEvent {
                 stub_no_inverter,
                 stub_start,
                 stub_brake,
+                stub_torque_cap,
             }) => Self::EcuHealth {
                 free_heap,
                 min_free_heap,
@@ -990,6 +1011,7 @@ impl PitDiagEvent {
                 stub_no_inverter,
                 stub_start,
                 stub_brake,
+                stub_torque_cap,
             },
             EcuPitDiagFrame::InvFaults(f) => Self::EcuInvFaults {
                 l1_anomalies: f.l1_anomalies().iter().map(|s| (*s).to_string()).collect(),
@@ -999,6 +1021,7 @@ impl PitDiagEvent {
                 cmd_flt_clear: f.cmd_flt_clear,
                 inv_state_age_ms: f.inv_state_age_ms,
                 inv_state_seq: f.inv_state_seq,
+                inv_redrive_count: f.inv_redrive_count,
             },
             EcuPitDiagFrame::Dv(EcuDvFrame {
                 dv_r2d_req,

@@ -356,8 +356,9 @@ pub struct EcuStatusFrame {
     pub fsm_state: EcuFsmState,
     /// Inverter application state.
     pub inv_state: EcuInvState,
-    /// Byte 2 bit 0 — EV 2.3 plausibility OK.
-    pub ev_2_3: bool,
+    /// Byte 2 bit 6 — the EV 2.2.1 power envelope is limiting torque this
+    /// tick (IFS08-CE-ECU #177).
+    pub power_capped: bool,
     /// Byte 2 bit 1 — T11.8/9 plausibility OK.
     pub t11_8_9: bool,
     /// Byte 2 bit 2 — ready-to-drive sound active.
@@ -456,6 +457,22 @@ pub struct EcuInverterTempsFrame {
     pub motor1_degc: i16,
     /// Motor temperature sensor 2, °C.
     pub motor2_degc: i16,
+    /// The motor temperature the ECU is actually deriving thermal derate
+    /// from, °C. Not necessarily either sensor: see the validity bits.
+    pub motor_temp_used_degc: i16,
+    /// Thermal capability remaining, percent. Below 100 the ECU is
+    /// derating torque for temperature.
+    pub thermal_cap_pct: u8,
+    /// Motor sensor 1 reading is trusted.
+    pub temp_s1_valid: bool,
+    /// Motor sensor 2 reading is trusted.
+    pub temp_s2_valid: bool,
+    /// Neither motor sensor is trusted — the ECU has no usable motor
+    /// temperature, so `motor_temp_used_degc` is a fallback, not a
+    /// measurement.
+    pub temp_unknown: bool,
+    /// Thermal derate is actively limiting torque this tick.
+    pub thermal_capped: bool,
 }
 
 /// `0x704` — firmware-health telemetry (parity with the AMS health diag).
@@ -493,6 +510,10 @@ pub struct EcuHealthFrame {
     /// its own, but a live `brake_raw` on a car nobody is braking is worth
     /// seeing on the health card.
     pub stub_brake: bool,
+    /// Bench stub — `TorqueCap` is below 100 %, so torque is clamped for
+    /// on-stands testing (byte 5 bit 6). The fifth stub announce; the
+    /// firmware tags it "MUST be 100 for any flight / drive build".
+    pub stub_torque_cap: bool,
     /// Pedal-calibration provenance (byte 5 bits 4-5, #169) — stored and
     /// applied, or fell back to compile-time defaults.
     pub cal_status: EcuCalStatus,
@@ -605,6 +626,10 @@ pub struct EcuInvFaultsFrame {
     /// climb/fault ladder is driven by `inv_state`, which comes from `0x461`;
     /// anything near 255 means far too stale to steer a state machine with.
     pub inv_state_age_ms: u8,
+    /// How many times the ECU has re-driven the inverter command because
+    /// the inverter did not take the first one. A climbing count means the
+    /// handshake is being fought rather than accepted.
+    pub inv_redrive_count: u8,
     /// Increments once per `0x461` received, wrapping. Since `0x708` is
     /// emitted every 100 ms, **the delta between consecutive frames is the
     /// arrival count per 100 ms** — 10 means a 10 ms period, 1 means 100 ms,
@@ -741,7 +766,11 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
             Some(EcuPitDiagFrame::Status(EcuStatusFrame {
                 fsm_state: EcuFsmState::from_byte(p[0]),
                 inv_state: EcuInvState::from_byte(p[1]),
-                ev_2_3: (flags & 0x01) != 0,
+                // Bit 0 is RESERVED: it carried ev_2_3 until EV.2.3 was
+                // deleted from FS-Rules 2024 and the cut removed with it.
+                // Decoding it would show a flag for a rule that no longer
+                // exists.
+                power_capped: (flags & 0x80) != 0,
                 t11_8_9: (flags & 0x02) != 0,
                 rtds_active: (flags & 0x04) != 0,
                 ok_precharge: (flags & 0x08) != 0,
@@ -801,16 +830,24 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
             }))
         }
         ECU_INVERTER_TEMPS_ID => {
-            if p.len() < 4 {
+            // Grew from DLC 4 to 7 when the thermal-derate fields landed.
+            if p.len() < 7 {
                 return None;
             }
-            // Each byte: °C = raw − 50.
+            // Each temperature byte: °C = raw − 50.
             let degc = |raw: u8| i16::from(raw) - 50;
+            let flags = p[6];
             Some(EcuPitDiagFrame::InverterTemps(EcuInverterTempsFrame {
                 board_degc: degc(p[0]),
                 pwrstg_degc: degc(p[1]),
                 motor1_degc: degc(p[2]),
                 motor2_degc: degc(p[3]),
+                motor_temp_used_degc: degc(p[4]),
+                thermal_cap_pct: p[5],
+                temp_s1_valid: (flags & 0x01) != 0,
+                temp_s2_valid: (flags & 0x02) != 0,
+                temp_unknown: (flags & 0x04) != 0,
+                thermal_capped: (flags & 0x08) != 0,
             }))
         }
         ECU_HEALTH_ID => {
@@ -831,6 +868,7 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 stub_no_inverter: (live & 0x40) != 0,
                 stub_start: (live & 0x80) != 0,
                 stub_brake: (cause & 0x08) != 0,
+                stub_torque_cap: (cause & 0x40) != 0,
                 // Byte 5 is packed: reset_cause b0-b2, stub_brake b3,
                 // cal_status b4-b5. b6-b7 remain free.
                 cal_status: EcuCalStatus::from_bits(cause >> 4),
@@ -855,7 +893,8 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
             }))
         }
         ECU_INV_FAULTS_ID => {
-            if p.len() < 6 {
+            // Grew from DLC 6 to 7 when inv_redrive_count landed.
+            if p.len() < 7 {
                 return None;
             }
             // L1 is bits 0-8: all of byte 0 plus bit 0 of byte 1. L2 is
@@ -887,6 +926,7 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 cmd_flt_clear: (cmd & 0x04) != 0,
                 inv_state_age_ms: p[4],
                 inv_state_seq: p[5],
+                inv_redrive_count: p[6],
             }))
         }
         _ => None,
@@ -922,9 +962,10 @@ mod tests {
 
     #[test]
     fn status_decodes() {
-        // fsm=5 (Active), inv=4 (Ready), flags=0b10101 (ev_2_3 +
-        // rtds_active + start_button), torque=42%, v_cell_min=3500mV,
-        // torque_cmd=-300.
+        // fsm=5 (Active), inv=4 (Ready), flags=0b0001_0101 — bit 0 is
+        // RESERVED (was ev_2_3, deleted with the rule), so only
+        // rtds_active + start_button are set. torque=42%,
+        // v_cell_min=3500mV, torque_cmd=-300.
         let p = [
             0x05,
             0x04,
@@ -940,7 +981,8 @@ mod tests {
             EcuPitDiagFrame::Status(s) => {
                 assert_eq!(s.fsm_state, EcuFsmState::Active);
                 assert_eq!(s.inv_state, EcuInvState::Ready);
-                assert!(s.ev_2_3 && s.rtds_active && s.start_button);
+                assert!(s.rtds_active && s.start_button);
+                assert!(!s.power_capped, "bit 7 clear in this payload");
                 assert!(!s.t11_8_9 && !s.ok_precharge);
                 assert_eq!(s.torque_pct, 42);
                 assert_eq!(s.v_cell_min_mv, 3500);
@@ -1103,13 +1145,19 @@ mod tests {
     fn inverter_temps_decode_offset_and_sentinel() {
         // board=25 (raw 75), pwrstg=60 (raw 110), motor1=-10 (raw 40),
         // motor2=disconnected (raw 0xFF => 205).
-        let frame = CanFrame::new(ECU_INVERTER_TEMPS_ID, &[75, 110, 40, 0xFF]).unwrap();
+        // + used=60 (raw 110), thermal_cap=100 %, flags: s1+s2 valid.
+        let frame =
+            CanFrame::new(ECU_INVERTER_TEMPS_ID, &[75, 110, 40, 0xFF, 110, 100, 0x03]).unwrap();
         match decode_frame(&frame).unwrap() {
             EcuPitDiagFrame::InverterTemps(t) => {
                 assert_eq!(t.board_degc, 25);
                 assert_eq!(t.pwrstg_degc, 60);
                 assert_eq!(t.motor1_degc, -10);
                 assert_eq!(t.motor2_degc, ECU_INV_TEMP_DISCONNECTED_C);
+                assert_eq!(t.motor_temp_used_degc, 60);
+                assert_eq!(t.thermal_cap_pct, 100);
+                assert!(t.temp_s1_valid && t.temp_s2_valid);
+                assert!(!t.temp_unknown && !t.thermal_capped);
             }
             other => panic!("expected InverterTemps, got {other:?}"),
         }
@@ -1298,7 +1346,7 @@ mod tests {
         // enable) => 0x23. byte1 bit 0 = OVP_Th2, the ninth L1 bit.
         // byte2 = init_ok + PwrStgFault (the cascade marker) => 0x11.
         // byte3 = follow_n 2 + Flt_Clear => 0b110 = 0x06.
-        let p = [0x23, 0x01, 0x11, 0x06, 40, 7];
+        let p = [0x23, 0x01, 0x11, 0x06, 40, 7, 3];
         match decode_frame(&CanFrame::new(ECU_INV_FAULTS_ID, &p).unwrap()).unwrap() {
             EcuPitDiagFrame::InvFaults(f) => {
                 assert!(f.pwrstg_alive && f.pwrstg_enable);
@@ -1310,6 +1358,7 @@ mod tests {
                 assert!(f.cmd_flt_clear);
                 assert_eq!(f.inv_state_age_ms, 40);
                 assert_eq!(f.inv_state_seq, 7);
+                assert_eq!(f.inv_redrive_count, 3);
 
                 // Health bits set => not anomalies; the fault bits are.
                 assert_eq!(f.l1_anomalies(), vec!["HVIL_Open", "OVP_Th2"]);
@@ -1325,7 +1374,7 @@ mod tests {
         // All-zero payload: every fault bit clear, but alive / enable /
         // init_ok are HEALTH bits, so clear is the anomaly. Reading them
         // the same way as the fault bits would call this frame clean.
-        let p = [0, 0, 0, 0, 0, 0];
+        let p = [0, 0, 0, 0, 0, 0, 0];
         match decode_frame(&CanFrame::new(ECU_INV_FAULTS_ID, &p).unwrap()).unwrap() {
             EcuPitDiagFrame::InvFaults(f) => {
                 assert_eq!(
@@ -1339,7 +1388,7 @@ mod tests {
         }
 
         // A genuinely clean power stage: health bits set, nothing else.
-        let clean = [0x03, 0x00, 0x01, 0x00, 5, 200];
+        let clean = [0x03, 0x00, 0x01, 0x00, 5, 200, 0];
         match decode_frame(&CanFrame::new(ECU_INV_FAULTS_ID, &clean).unwrap()).unwrap() {
             EcuPitDiagFrame::InvFaults(f) => {
                 assert!(f.l1_anomalies().is_empty());
@@ -1355,10 +1404,10 @@ mod tests {
 
     #[test]
     fn inv_faults_rejects_a_short_frame() {
-        // DLC 6 is the contract; the draft that briefly carried DLC 4 had
-        // no age/seq bytes and never shipped, so a short frame is corrupt
-        // rather than old-firmware.
-        let short = [0x03, 0x00, 0x01, 0x00];
+        // DLC 7 is the contract: it grew from 6 when inv_redrive_count
+        // landed. A short frame is corrupt or stale firmware, and decoding
+        // it would read a redrive count out of nothing.
+        let short = [0x03, 0x00, 0x01, 0x00, 5, 200];
         assert!(decode_frame(&CanFrame::new(ECU_INV_FAULTS_ID, &short).unwrap()).is_none());
     }
 

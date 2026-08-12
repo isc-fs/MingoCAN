@@ -800,6 +800,7 @@ fn ecu_stub_text(h: &ecu::EcuHealthFrame) -> String {
         (h.stub_no_inverter, "no_inverter"),
         (h.stub_start, "start"),
         (h.stub_brake, "brake"),
+        (h.stub_torque_cap, "torque_cap"),
     ]
     .into_iter()
     .filter_map(|(on, name)| on.then_some(name))
@@ -818,18 +819,18 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
         F::Ack { enabled } => eprintln!("{prefix} ack enabled={enabled}"),
         F::Status(s) => println!(
             "{prefix} status fsm={:?} inv={:?} torque={}% vcell_min={}mV tcmd={} \
-             [ev23={} t11={} rtds={} preok={} start={} dv={}]{}",
+             [t11={} rtds={} preok={} start={} dv={} pwrcap={}]{}",
             s.fsm_state,
             s.inv_state,
             s.torque_pct,
             s.v_cell_min_mv,
             s.torque_cmd,
-            s.ev_2_3 as u8,
             s.t11_8_9 as u8,
             s.rtds_active as u8,
             s.ok_precharge as u8,
             s.start_button as u8,
             s.dv_mode as u8,
+            s.power_capped as u8,
             if s.tx_dropped { " TX-DROPPED" } else { "" },
         ),
         F::Pedals(p) => println!(
@@ -850,8 +851,14 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             ecu_inv_mode_text(i.inv_mode_cmd),
         ),
         F::InverterTemps(t) => println!(
-            "{prefix} temps board={}°C pwrstg={}°C motor1={}°C motor2={}°C",
-            t.board_degc, t.pwrstg_degc, t.motor1_degc, t.motor2_degc,
+            "{prefix} temps board={}°C pwrstg={}°C motor1={}°C motor2={}°C used={}°C cap={}%{}",
+            t.board_degc,
+            t.pwrstg_degc,
+            t.motor1_degc,
+            t.motor2_degc,
+            t.motor_temp_used_degc,
+            t.thermal_cap_pct,
+            if t.temp_unknown { " NO-MOTOR-TEMP" } else { "" },
         ),
         F::FwInfo(f) => println!(
             "{prefix} fw    v{}.{}.{} git={:02X}{:02X}{:02X}{:02X}",
@@ -890,13 +897,14 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
                 }
             };
             println!(
-                "{prefix} invflt L1[{}] L2[{}] cmd[follow={} flt_clear={}] 0x461_age={}ms seq={}{}",
+                "{prefix} invflt L1[{}] L2[{}] cmd[follow={} flt_clear={}] 0x461_age={}ms seq={} redrive={}{}",
                 fmt(&l1),
                 fmt(&l2),
                 f.cmd_follow_n,
                 f.cmd_flt_clear as u8,
                 f.inv_state_age_ms,
                 f.inv_state_seq,
+                f.inv_redrive_count,
                 if f.l1_blocks_dem_clear() {
                     "  <- L1 LIVE: no CAN command will clear the DEM"
                 } else {
@@ -928,15 +936,15 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             println!(r#"{{"tsMs":{ts_ms},"kind":"ack","enabled":{enabled}}}"#);
         }
         F::Status(s) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuStatus","fsmState":"{:?}","invState":"{:?}","ev23":{},"t11_8_9":{},"rtdsActive":{},"okPrecharge":{},"startButton":{},"dvMode":{},"txDropped":{},"torquePct":{},"vCellMinMv":{},"torqueCmd":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuStatus","fsmState":"{:?}","invState":"{:?}","t11_8_9":{},"rtdsActive":{},"okPrecharge":{},"startButton":{},"dvMode":{},"powerCapped":{},"txDropped":{},"torquePct":{},"vCellMinMv":{},"torqueCmd":{}}}"#,
             s.fsm_state,
             s.inv_state,
-            s.ev_2_3,
             s.t11_8_9,
             s.rtds_active,
             s.ok_precharge,
             s.start_button,
             s.dv_mode,
+            s.power_capped,
             s.tx_dropped,
             s.torque_pct,
             s.v_cell_min_mv,
@@ -961,8 +969,17 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             ecu::inv_mode_cmd_name(i.inv_mode_cmd),
         ),
         F::InverterTemps(t) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuInverterTemps","boardDegc":{},"pwrstgDegc":{},"motor1Degc":{},"motor2Degc":{}}}"#,
-            t.board_degc, t.pwrstg_degc, t.motor1_degc, t.motor2_degc,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuInverterTemps","boardDegc":{},"pwrstgDegc":{},"motor1Degc":{},"motor2Degc":{},"motorTempUsedDegc":{},"thermalCapPct":{},"tempS1Valid":{},"tempS2Valid":{},"tempUnknown":{},"thermalCapped":{}}}"#,
+            t.board_degc,
+            t.pwrstg_degc,
+            t.motor1_degc,
+            t.motor2_degc,
+            t.motor_temp_used_degc,
+            t.thermal_cap_pct,
+            t.temp_s1_valid,
+            t.temp_s2_valid,
+            t.temp_unknown,
+            t.thermal_capped,
         ),
         F::FwInfo(f) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"ecuFwInfo","fwMajor":{},"fwMinor":{},"fwPatch":{},"gitHash":[{},{},{},{}]}}"#,
@@ -975,7 +992,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             f.git_hash[3],
         ),
         F::Health(h) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskTelemetry":{},"taskDiag":{},"resetCause":"{:?}","calStatus":"{:?}","uptimeS":{},"lastFault":{},"stubNoAms":{},"stubNoInverter":{},"stubStart":{},"stubBrake":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskTelemetry":{},"taskDiag":{},"resetCause":"{:?}","calStatus":"{:?}","uptimeS":{},"lastFault":{},"stubNoAms":{},"stubNoInverter":{},"stubStart":{},"stubBrake":{},"stubTorqueCap":{}}}"#,
             h.free_heap,
             h.min_free_heap,
             h.task_control,
@@ -991,9 +1008,10 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.stub_no_inverter,
             h.stub_start,
             h.stub_brake,
+            h.stub_torque_cap,
         ),
         F::InvFaults(f) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuInvFaults","l1Anomalies":[{}],"l2Anomalies":[{}],"l1BlocksDemClear":{},"cmdFollowN":{},"cmdFltClear":{},"invStateAgeMs":{},"invStateSeq":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuInvFaults","l1Anomalies":[{}],"l2Anomalies":[{}],"l1BlocksDemClear":{},"cmdFollowN":{},"cmdFltClear":{},"invStateAgeMs":{},"invStateSeq":{},"invRedriveCount":{}}}"#,
             f.l1_anomalies()
                 .iter()
                 .map(|s| format!("\"{s}\""))
@@ -1009,6 +1027,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             f.cmd_flt_clear,
             f.inv_state_age_ms,
             f.inv_state_seq,
+            f.inv_redrive_count,
         ),
         F::Dv(d) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"ecuDv","dvR2dReq":{},"dvCmdFresh":{},"tsActive":{},"brakeOverLimit":{},"r2dConfirm":{},"dvTorquePct":{},"motorRpmMech":{}}}"#,
@@ -1292,6 +1311,7 @@ mod tests {
             stub_no_inverter: false,
             stub_start: false,
             stub_brake: false,
+            stub_torque_cap: false,
             cal_status: ecu::EcuCalStatus::Loaded,
             reset_cause: ecu::EcuResetCause::PowerOn,
             uptime_s: 15,
