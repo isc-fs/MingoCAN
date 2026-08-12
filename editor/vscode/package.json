@@ -36,14 +36,14 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/isc-fs/can-flasher.git",
+    "url": "https://github.com/isc-fs/MingoCAN.git",
     "directory": "editor/vscode"
   },
-  "homepage": "https://github.com/isc-fs/can-flasher/tree/main/editor/vscode#readme",
+  "homepage": "https://github.com/isc-fs/MingoCAN/tree/main/editor/vscode#readme",
   "bugs": {
-    "url": "https://github.com/isc-fs/can-flasher/issues"
+    "url": "https://github.com/isc-fs/MingoCAN/issues"
   },
-  "qna": "https://github.com/isc-fs/can-flasher/discussions",
+  "qna": "https://github.com/isc-fs/MingoCAN/discussions",
   "galleryBanner": {
     "color": "#1F1F1F",
     "theme": "dark"

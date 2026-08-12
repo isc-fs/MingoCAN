@@ -4,7 +4,7 @@ The desktop app is the main way to use this tool. If you are flashing a board,
 watching telemetry, or pulling logs, you want the app — the
 [CLI](USAGE.md) exists for scripting and bench automation.
 
-Install it from the [latest release](https://github.com/isc-fs/can-flasher/releases/latest):
+Install it from the [latest release](https://github.com/isc-fs/MingoCAN/releases/latest):
 grab the `.dmg` (macOS, Apple Silicon), `-setup.exe` (Windows) or the
 `.AppImage` / `.deb` / `.rpm` (Linux). Full per-platform steps, including the
 one-time "unidentified developer" prompt, are in [INSTALL.md](INSTALL.md).

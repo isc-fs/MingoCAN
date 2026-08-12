@@ -688,7 +688,7 @@ fn parse_nvm_value(raw: &str) -> Result<Vec<u8>> {
 ///
 /// Bench-friendly: `can-flasher config nvm write node-id 0x02` is the
 /// motivating use case from
-/// [gh #231](https://github.com/isc-fs/can-flasher/issues/231) task 2.
+/// [gh #231](https://github.com/isc-fs/MingoCAN/issues/231) task 2.
 /// The registry is intentionally tiny — one entry today (`node-id`
 /// → `BL_NVM_KEY_NODE_ID = 0x0001`); grows only when the BL adds
 /// more well-known keys and the team agrees on the rendered name.
