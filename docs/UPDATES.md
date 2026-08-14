@@ -1,4 +1,4 @@
-# MingoCAN auto-update
+# Updating MingoCAN
 
 ISC MingoCAN checks for a newer release on launch and can download +
 install it in place, then relaunch. It uses the official
@@ -19,8 +19,10 @@ install it in place, then relaunch. It uses the official
    The first is the **iskApps** "pit garage" ([isc-fs/iskapps](https://github.com/isc-fs/iskapps)) —
    the team's public download + auto-update channel shared with the
    other desktop apps (Wario Charger etc.). The second is the
-   can-flasher release, kept during the transition so installs built
-   before the iskApps endpoint existed keep updating.
+   MingoCAN GitHub release itself, kept as a fallback so installs built
+   before the iskApps endpoint existed keep updating. (It still names
+   the pre-rename `can-flasher` URL in builds shipped before v2.12.0;
+   GitHub redirects it.)
 
 2. `latest.json` (published per release by CI) lists the latest version
    plus a per-platform signed bundle URL. If it's newer than the running
