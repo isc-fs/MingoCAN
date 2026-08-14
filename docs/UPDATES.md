@@ -1,4 +1,4 @@
-# MingoCAN auto-update
+# Updating MingoCAN
 
 ISC MingoCAN checks for a newer release on launch and can download +
 install it in place, then relaunch. It uses the official
@@ -13,14 +13,16 @@ install it in place, then relaunch. It uses the official
 
    ```
    https://raw.githubusercontent.com/isc-fs/iskapps/main/mingocan/latest.json
-   https://github.com/isc-fs/can-flasher/releases/latest/download/latest.json
+   https://github.com/isc-fs/MingoCAN/releases/latest/download/latest.json
    ```
 
    The first is the **iskApps** "pit garage" ([isc-fs/iskapps](https://github.com/isc-fs/iskapps)) —
    the team's public download + auto-update channel shared with the
    other desktop apps (Wario Charger etc.). The second is the
-   can-flasher release, kept during the transition so installs built
-   before the iskApps endpoint existed keep updating.
+   MingoCAN GitHub release itself, kept as a fallback so installs built
+   before the iskApps endpoint existed keep updating. (It still names
+   the pre-rename `can-flasher` URL in builds shipped before v2.12.0;
+   GitHub redirects it.)
 
 2. `latest.json` (published per release by CI) lists the latest version
    plus a per-platform signed bundle URL. If it's newer than the running
@@ -84,8 +86,8 @@ never be committed.
 2. **Set two GitHub Actions repo secrets:**
 
    ```sh
-   gh secret set TAURI_SIGNING_PRIVATE_KEY --repo isc-fs/can-flasher < ~/.tauri/mingocan-updater.key
-   printf '' | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo isc-fs/can-flasher   # empty password
+   gh secret set TAURI_SIGNING_PRIVATE_KEY --repo isc-fs/MingoCAN < ~/.tauri/mingocan-updater.key
+   printf '' | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo isc-fs/MingoCAN   # empty password
    ```
 
 3. **Put the public key** (`cat ~/.tauri/mingocan-updater.key.pub`)

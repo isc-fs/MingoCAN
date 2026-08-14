@@ -354,7 +354,7 @@ function warnSkew(expected: string, actual: string, pinned: boolean): void {
             } else if (choice === 'How to update') {
                 void vscode.env.openExternal(
                     vscode.Uri.parse(
-                        `https://github.com/isc-fs/can-flasher/releases/tag/v${expected}`,
+                        `https://github.com/isc-fs/MingoCAN/releases/tag/v${expected}`,
                     ),
                 );
             }

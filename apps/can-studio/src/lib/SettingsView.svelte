@@ -452,8 +452,8 @@
 
             <dt>Repository</dt>
             <dd>
-                <a href="https://github.com/isc-fs/can-flasher" target="_blank" rel="noreferrer">
-                    isc-fs/can-flasher
+                <a href="https://github.com/isc-fs/MingoCAN" target="_blank" rel="noreferrer">
+                    isc-fs/MingoCAN
                 </a>
             </dd>
 

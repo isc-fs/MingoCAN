@@ -1093,7 +1093,7 @@ reserved for v2 / Phase-5 reactivation and never emitted by v1.0.0.
 ### Exit codes
 
 Canonical table lives in
-[docs/USAGE.md § Exit codes](docs/USAGE.md#exit-codes) — the
+[docs/CLI.md § Exit codes](docs/CLI.md#exit-codes) — the
 operator-facing doc owns it so pit-wall users find the table in
 the first doc they'd reach for. Codes `5` (signature failed) and
 `6` (replay rejection) remain reserved for Phase-5 reactivation.
@@ -1232,7 +1232,7 @@ mindmap
       ROADMAP.md · auto-generated from YAML
     docs/
       INSTALL.md · toolchain + per-OS adapter setup
-      USAGE.md · subcommand reference + examples
+      CLI.md · subcommand reference + examples
       CONTRIBUTING.md · contributor guide
       PERFORMANCE.md · flash-speed baseline + --profile
     src/

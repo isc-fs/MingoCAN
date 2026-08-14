@@ -1,28 +1,38 @@
 # Pulling logs off a board
 
-Boards write car data to a microSD card. LOGFS pulls those files off over CAN,
-so you do not have to open anything up to get at them.
+Boards write car data to a microSD card. MingoCAN pulls those files off over
+CAN, so you do not have to open anything up or pull the card.
 
-It is **read-only**: there is no delete. Files come off the card; nothing goes
-onto it and nothing is removed.
+It is **read-only**: files come off, nothing goes on, and nothing is deleted.
 
-## Seal the current log first
+---
 
-The log a board is writing right now does not appear in a listing until it is
-sealed. Finalize first, then list:
+## Two things that catch everyone
 
-```bash
-can-flasher --interface pcan --channel PCAN_USBBUS1 --node-id 0x02 logs finalize
-```
+**1. Seal the current log first.** The log a board is writing *right now* does
+not appear in a listing until it is sealed. Finalize, then list. If a listing
+comes back empty or missing today's run, this is why.
+
+**2. It takes minutes, not seconds.** Throughput is roughly **10–20 kB/s**, so a
+4 MiB file is **3.5 to 7 minutes**, and pulling a full card is a 20–35 minute
+job. Plan for it rather than assuming the tool has hung.
 
 ## In the app
 
-**Data logs** in the sidebar. Pick the board, list, choose a file, pull. Progress
-and cancellation are handled for you.
+**Observe → Data logs.**
 
-## On the CLI
+1. **Finalize** to seal the log currently being written.
+2. **List** the files on the card.
+3. Pick one and pull it, or pull them all.
+
+Progress and cancellation are handled for you. The transfer survives a busy bus:
+if the session drops, it re-establishes and resumes from the last acknowledged
+offset, with a final CRC gating the result.
+
+## From the CLI
 
 ```bash
+can-flasher --interface pcan --channel PCAN_USBBUS1 --node-id 0x02 logs finalize
 can-flasher … --node-id 0x02 logs list
 can-flasher … --node-id 0x02 logs pull --index 3 --out ./logs/
 can-flasher … --node-id 0x02 logs pull --all --out ./logs/
@@ -30,44 +40,39 @@ can-flasher … --node-id 0x02 logs pull --all --out ./logs/
 
 | Flag | Meaning |
 |---|---|
-| `--index N` | pull one file by its index from `list` |
-| `--all` | pull every file |
-| `--out DIR` | where to write |
-| `--no-verify` | skip the CRC check at the end (not recommended) |
+| `--index N` | Pull one file by its index from `list` |
+| `--all` | Pull every file — opt-in on purpose, given the timings above |
+| `--out DIR` | Where to write |
+| `--no-verify` | Skip the closing CRC check (not recommended) |
 
-> **`--node-id` is required for `logs`.** Unlike most subcommands it does not
-> default to `0x3`, and omitting it fails without a specific exit-code hint —
-> you get the generic **99**, not a targeted code. If a `logs` command exits 99
-> and the message looks odd, check you passed a node ID.
+> **`--node-id` is mandatory for `logs`** and has no default. Omitting it fails
+> with the generic exit code **99** rather than a targeted hint — so if a `logs`
+> command exits 99 with a message that reads oddly, check the node ID first.
 
 Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`.
 
-## How long it takes
+Commands retry up to three times, and the internal timeout floor is 2000 ms — a
+`--timeout` smaller than that is raised to it rather than honoured, because a
+shorter deadline cannot outlast a FatFs read on a shared bus.
 
-Throughput is roughly **10–20 kB/s**, so a 4 MiB file takes about **3.5 to 7
-minutes**. `--all` on a full card is a coffee break, not a pause in
-conversation. Plan accordingly rather than assuming it has hung.
-
-Transfers retry up to three times, and the internal timeout floor is 2000 ms —
-passing a `--timeout` smaller than that is raised to it rather than honoured,
-because a shorter deadline cannot complete a read.
-
-A pull that is interrupted by a busy bus recovers: the session is re-established
-and the read resumes from the last acknowledged offset, with the final CRC still
-gating the result.
+---
 
 ## Troubleshooting
 
-**Nothing lists.** Run `logs finalize` first — an unsealed log is invisible.
+**Nothing lists.** Finalize first. An unsealed log is invisible.
 
 **It exits 99 with a confusing message.** Check `--node-id` is present.
 
-**Nothing works while a board is in its bootloader.** LOGFS is served by the
-*application* firmware, not the bootloader. A board sitting in its bootloader has
-nothing listening for these commands.
+**Nothing works at all.** LOGFS is served by the **application** firmware, not
+the bootloader. A board sitting in its bootloader has nothing listening for
+these commands — which also means you cannot pull logs from a board you just
+flashed with *Start the app after flashing* turned off.
+
+**A pull died partway.** Just start it again. Transfers resume from the last
+acknowledged offset and the closing CRC still gates the result.
 
 ---
 
 ## See also
 
-- [DESKTOP.md](DESKTOP.md) · [USAGE.md](USAGE.md)
+- [DESKTOP.md](DESKTOP.md) · [TELEMETRY.md](TELEMETRY.md) · [CLI.md](CLI.md)

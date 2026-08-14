@@ -34,10 +34,10 @@ documentation at all. Four new guides:
 
 | Guide | For |
 |---|---|
-| [DESKTOP.md](https://github.com/isc-fs/can-flasher/blob/main/docs/DESKTOP.md) | The app, view by view |
-| [TELEMETRY.md](https://github.com/isc-fs/can-flasher/blob/main/docs/TELEMETRY.md) | Watching a live car — which modes transmit and which do not |
-| [DATA_LOGS.md](https://github.com/isc-fs/can-flasher/blob/main/docs/DATA_LOGS.md) | Pulling microSD logs |
-| [SAFETY.md](https://github.com/isc-fs/can-flasher/blob/main/docs/SAFETY.md) | Every operation that writes to a board, and what guards it |
+| [DESKTOP.md](https://github.com/isc-fs/MingoCAN/blob/main/docs/DESKTOP.md) | The app, view by view |
+| [TELEMETRY.md](https://github.com/isc-fs/MingoCAN/blob/main/docs/TELEMETRY.md) | Watching a live car — which modes transmit and which do not |
+| [DATA_LOGS.md](https://github.com/isc-fs/MingoCAN/blob/main/docs/DATA_LOGS.md) | Pulling microSD logs |
+| [SAFETY.md](https://github.com/isc-fs/MingoCAN/blob/main/docs/SAFETY.md) | Every operation that writes to a board, and what guards it |
 
 The existing reference docs had drifted. Corrected:
 
@@ -61,9 +61,9 @@ The existing reference docs had drifted. Corrected:
 
 ## Also in this cycle
 
-[#558](https://github.com/isc-fs/can-flasher/issues/558) — the ECU DBC snapshot
+[#558](https://github.com/isc-fs/MingoCAN/issues/558) — the ECU DBC snapshot
 was behind upstream and the decoder with it: `0x700` lost `ev_2_3` (EV.2.3 was
 deleted in FS-Rules 2024) and gained `power_capped`; `0x704` gained
 `stub_torque_cap`; `0x706` grew from DLC 4 to 7; `0x708` from 6 to 7.
 
-**Full changelog**: https://github.com/isc-fs/can-flasher/compare/v2.11.0...v2.12.0
+**Full changelog**: https://github.com/isc-fs/MingoCAN/compare/v2.11.0...v2.12.0

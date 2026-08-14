@@ -1,137 +1,123 @@
 ![ISC Logo](http://iscracingteam.com/wp-content/uploads/2022/03/Picture5.jpg)
 
-# IFS08 · can-flasher
+# ISC MingoCAN
 
-Host-side CAN flasher for the [isc-fs/stm32-can-bootloader](https://github.com/isc-fs/stm32-can-bootloader).
-Single static Rust binary that runs on Linux, macOS and Windows;
-speaks the bootloader's classic-CAN protocol through four hardware
-adapter families plus an in-process virtual loopback: SLCAN
-(CANable, all OSes), SocketCAN (Linux), PCAN-Basic (Windows /
-macOS), Vector XL Driver Library (VN1610 and the rest of the
-[VN16xx](https://www.vector.com/int/en/products/products-a-z/hardware/network-interfaces/vn16xx/)
-series on Windows), plus a `virtual` backend for hardware-less
-CI + integration tests.
+**The pit-lane tool for the IFS08.** One window that flashes firmware over CAN,
+watches the car's boards live, pulls the data logs off them, and tells you why a
+board is unhappy — for the ISC Racing Team's Formula Student ECUs.
 
-**[Latest release](https://github.com/isc-fs/can-flasher/releases/latest)** —
-the desktop app, the CLI and the VS Code extension all ship together from a
-single tag.
+It talks to the [isc-fs/stm32-can-bootloader](https://github.com/isc-fs/stm32-can-bootloader)
+over classic CAN through five adapter families, and runs natively on macOS,
+Windows and Linux.
 
-### Start here
+**[⬇ Download the latest release](https://github.com/isc-fs/MingoCAN/releases/latest)**
+· [Install guide](docs/INSTALL.md) · [App guide](docs/DESKTOP.md)
+
+---
+
+## Start here
 
 | You want to… | Go to |
 |---|---|
-| Flash a board, watch telemetry, pull logs | **[docs/DESKTOP.md](docs/DESKTOP.md)** — the desktop app is the primary surface |
-| Script it, or work at the bench | [docs/USAGE.md](docs/USAGE.md) — the CLI |
-| Understand what can write to a car | [docs/SAFETY.md](docs/SAFETY.md) |
-| Work on the tool itself | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) |
+| **Install it and flash your first board** | [docs/INSTALL.md](docs/INSTALL.md) → [docs/FLASHING.md](docs/FLASHING.md) |
+| Learn the app, view by view | [docs/DESKTOP.md](docs/DESKTOP.md) |
+| Watch a live car without touching it | [docs/TELEMETRY.md](docs/TELEMETRY.md) |
+| Get the logs off a board | [docs/DATA_LOGS.md](docs/DATA_LOGS.md) |
+| Know what can write to a car, and what stops it | [docs/SAFETY.md](docs/SAFETY.md) |
+| Script it, or work headless at the bench | [docs/CLI.md](docs/CLI.md) |
+| Work on MingoCAN itself | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) |
 
-| Subcommand | Purpose |
-|---|---|
-| `adapters` | List detected CAN adapters |
-| `discover` | Scan the bus, table every bootloader-mode device |
-| `diagnose` | DTC / log / live-data / health / reset |
-| `config` | NVM read/write + option bytes + WRP apply |
-| `verify` | Compare installed image against a binary |
-| `replay` | Record / replay CAN sessions for testing |
-| `flash` | Program firmware end-to-end |
-| `send-raw` | Send one raw CAN frame (app-level reboot-to-BL, bench probes) |
-| `logs` | Pull microSD car-data logs off a board over CAN |
-| `pit-diag` | Observe AMS / ECU / uDV telemetry — `listen` is send-silent and safe on a live car |
-| `provision` | Write a board's node ID into bootloader NVM |
-| `swd-flash` *(opt-in: `--features swd`)* | First-boot a bare STM32 via ST-LINK — covers the chicken-and-egg case where the CAN bootloader isn't on the chip yet |
+## What's in the app
+
+The sidebar splits in two, and the split is the point: **Program** writes to a
+board, **Observe** only reads. Anything in Observe is safe to open on a live car.
+
+```
+Adapters              ← pinned top; nothing else works until you pick one
+
+PROGRAM   (writes to the car)
+  Flash                 Build & flash firmware over CAN
+  Burn bootloader       First-boot bootloader via SWD
+
+OBSERVE   (read-only)
+  Board health          DTCs & session health
+  Bus monitor           Live CAN frames & DBC-decoded signals
+  Telemetry             Live AMS / ECU / uDV telemetry
+  Data logs             Pull microSD car-data logs over CAN
+
+Settings              ← pinned bottom
+```
+
+## Three surfaces, one release
+
+Every tagged release ships all three together, at the same version:
+
+| Surface | What it's for | Docs |
+|---|---|---|
+| **MingoCAN** (desktop app) | The primary tool. Everything below, with a UI. | [DESKTOP.md](docs/DESKTOP.md) |
+| **`can-flasher`** (CLI) | Scripting, CI, bench automation, headless boxes. | [CLI.md](docs/CLI.md) |
+| **VS Code extension** | Flash from the editor while developing firmware. | [editor/vscode](editor/vscode/README.md) |
+
+> The executable is still called `can-flasher`. Renaming it would break every
+> script and CI job that invokes the tool, so the product name and the binary
+> name are deliberately allowed to differ.
 
 ## Supported adapters
 
 | Family | Platforms | Channel example | Notes |
 |---|---|---|---|
 | **SLCAN** | Linux / macOS / Windows | `/dev/ttyACM0`, `COM3` | CANable, CANtact, any SLCAN-compatible USB adapter |
-| **SocketCAN** | Linux | `can0`, `vcan0` | Native kernel sockets; also handles PCAN on Linux via the `peak_usb` module |
-| **PCAN-Basic** | Windows / macOS | `PCAN_USBBUS1` | PEAK adapters via `libloading` — SDK loaded at runtime |
-| **Vector XL** | Windows | `0`, `1` (XL channel index) | VN1610 / VN16xx via `vxlapi64.dll` — SDK loaded at runtime |
-| **Virtual** | all | (ignored) | In-process bus for testing without hardware |
+| **SocketCAN** | Linux | `can0`, `vcan0` | Native kernel sockets; also serves PEAK hardware via `peak_usb` |
+| **PCAN-Basic** | Windows / macOS | `PCAN_USBBUS1` | PEAK adapters; SDK loaded at runtime |
+| **Vector XL** | Windows | `0`, `1` (XL channel index) | VN1610 / [VN16xx](https://www.vector.com/int/en/products/products-a-z/hardware/network-interfaces/vn16xx/); SDK loaded at runtime |
+| **Virtual** | all | (ignored) | In-process loopback for testing without hardware |
 
----
+The PCAN and Vector SDKs are loaded at runtime and cannot be bundled — see
+[INSTALL.md § Per-OS adapter setup](docs/INSTALL.md#per-os-adapter-setup).
+
+## The boards
+
+| Role | Node ID | What it is |
+|---|---|---|
+| ECU | `0x01` | Vehicle control unit |
+| AMS | `0x02` | Accumulator management system |
+| uDV | `0x03` | Driverless supervisor |
+
+A board that has never been commissioned answers on `0xF` until you
+[provision](docs/CLI.md#provision--assign-a-node-id-by-role) it.
 
 ## Documentation
 
 | Doc | Read when |
 |---|---|
-| [docs/INSTALL.md](docs/INSTALL.md) | Building the binary + per-OS adapter setup |
-| [docs/USAGE.md](docs/USAGE.md) | Day-to-day subcommand reference + examples + exit codes |
-| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Developing the tool itself — toolchain, tests, CI, branch conventions |
-| [docs/DESKTOP.md](docs/DESKTOP.md) | The desktop app: adapters, the eight views, settings |
-| [docs/TELEMETRY.md](docs/TELEMETRY.md) | Watching a live car safely — which modes transmit and which do not |
+| [docs/INSTALL.md](docs/INSTALL.md) | Installing the app or the CLI, and per-OS adapter setup |
+| [docs/DESKTOP.md](docs/DESKTOP.md) | Learning the app — every view, every setting |
+| [docs/FLASHING.md](docs/FLASHING.md) | Flashing firmware, and what to do when it fails |
+| [docs/TELEMETRY.md](docs/TELEMETRY.md) | Watching a live car — which modes transmit and which don't |
 | [docs/DATA_LOGS.md](docs/DATA_LOGS.md) | Pulling microSD logs off a board |
 | [docs/SAFETY.md](docs/SAFETY.md) | Every operation that writes to a board, and what guards it |
-| [docs/UPDATES.md](docs/UPDATES.md) | The desktop app's auto-updater |
+| [docs/CLI.md](docs/CLI.md) | The `can-flasher` CLI — subcommands, flags, exit codes |
+| [docs/UPDATES.md](docs/UPDATES.md) | How the app updates itself |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Developing MingoCAN — toolchain, tests, CI, release flow |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Flash-throughput measurements (historical, v1.2.0-era) |
-| [REQUIREMENTS.md](REQUIREMENTS.md) | Authoritative CLI spec, opcode table, frame format, JSON schemas |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Code layout, module tree, design rationale |
-| [ROADMAP.md](ROADMAP.md) | Phase-by-phase delivery history (auto-generated from `.github/roadmap.yaml`) |
+| [REQUIREMENTS.md](REQUIREMENTS.md) | The authoritative spec — protocol, opcodes, every flag |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How the code is laid out |
+| [ROADMAP.md](ROADMAP.md) | What's next (auto-generated) |
+
+## Building from source
+
+```bash
+git clone https://github.com/isc-fs/MingoCAN.git
+cd MingoCAN
+cargo build --release          # the CLI
+cd apps/can-studio && npm install && npm run tauri build   # the app
+```
+
+Full details, including the Linux system packages the app needs, are in
+[INSTALL.md](docs/INSTALL.md#build-from-source).
 
 ---
 
-## Install
-
-Need Rust once (any OS):
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-Linux also needs:
-```bash
-sudo apt-get install libudev-dev pkg-config
-```
-
-Then install `can-flasher` to your PATH, straight from GitHub — no
-clone, no build directory to manage:
-
-```bash
-cargo install --git https://github.com/isc-fs/can-flasher.git
-```
-
-After this, `can-flasher --help` works from anywhere. Docs refer
-to it as `cf` for brevity; `alias cf=can-flasher` in your shell
-rc file if you like.
-
-Sanity check — should list your CAN adapter if one is plugged in,
-or print an empty list if not:
-```bash
-can-flasher adapters
-```
-
-Full per-OS adapter setup (CANable, SocketCAN, PCAN):
-[docs/INSTALL.md](docs/INSTALL.md).
-
-### Build from source (contributors only)
-
-```bash
-git clone https://github.com/isc-fs/can-flasher.git
-cd can-flasher
-cargo build --release
-./target/release/can-flasher --help
-```
-
-See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for toolchain
-details, test suite, and branch conventions.
-
----
-
-## Editor + desktop integrations
-
-| Path | Status | What it does |
-|---|---|---|
-| [editor/vscode/](editor/vscode/) | ✅ live | VS Code extension that wraps `cmake --build` + `can-flasher flash` into one command, plus device discovery, adapter picker, live-data + DTC panels. Shells out to `can-flasher --json` — never speaks the protocol directly. Distributed as a `.vsix` attached to each `v*` release; internal ISC consumption. |
-| [apps/can-studio/](apps/can-studio/) | ✅ live — Tier 2 | Tauri 2 desktop app for flashing + diagnostics + generic CAN bus monitor + DBC-decoded Signals view. Reuses the `can-flasher` crate by path — same Rust on both sides of the IPC bridge. macOS / Linux / Windows native bundles attached to each `v*` release. |
-
-Both surfaces ship in lockstep with the CLI from a single `v*` tag — see [docs/CONTRIBUTING.md § Cutting a release](docs/CONTRIBUTING.md#cutting-a-release).
-
----
-
-## Licence
-
-MIT, see [`Cargo.toml`](Cargo.toml).
-
----
-
-*ISC Racing Team*
+<sub>Built by the [ISC Racing Team](http://iscracingteam.com). MingoCAN is the
+desktop companion to the `can-flasher` engine — same code, same release, one
+window.</sub>
