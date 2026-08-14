@@ -26,8 +26,8 @@
         <p class="muted small">
             The scaffold is in place; the real implementation lands in the
             <strong>{tier}</strong> PR. Track progress in
-            <a href="https://github.com/isc-fs/can-flasher" target="_blank" rel="noreferrer">
-                isc-fs/can-flasher
+            <a href="https://github.com/isc-fs/MingoCAN" target="_blank" rel="noreferrer">
+                isc-fs/MingoCAN
             </a>.
         </p>
     </div>

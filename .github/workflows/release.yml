@@ -133,7 +133,7 @@ jobs:
 
             > ℹ️ **Why the warning?** The app isn't code-signed yet, so Windows and macOS show a one-time *"unidentified developer"* prompt. It's expected and safe — the steps above clear it. You only do this the first time you open the app.
 
-            📖 First time setting up a CAN adapter (SLCAN / SocketCAN / PCAN / Vector)? See the **[setup guide](https://github.com/isc-fs/can-flasher/blob/${{ github.ref_name }}/docs/INSTALL.md)**.
+            📖 First time setting up a CAN adapter (SLCAN / SocketCAN / PCAN / Vector)? See the **[setup guide](https://github.com/isc-fs/MingoCAN/blob/${{ github.ref_name }}/docs/INSTALL.md)**.
 
             ## 🧩 VS Code extension (optional)
 
@@ -146,12 +146,12 @@ jobs:
 
             `can-flasher` is the scriptable CLI. Install it from source at this version:
             ```bash
-            cargo install --git https://github.com/isc-fs/can-flasher.git --tag ${{ github.ref_name }}
+            cargo install --git https://github.com/isc-fs/MingoCAN.git --tag ${{ github.ref_name }}
             ```
 
             ---
 
-            <sub>Everything here ships together from one release. Full list of changes: [commit log for ${{ github.ref_name }}](https://github.com/isc-fs/can-flasher/commits/${{ github.ref_name }}).</sub>
+            <sub>Everything here ships together from one release. Full list of changes: [commit log for ${{ github.ref_name }}](https://github.com/isc-fs/MingoCAN/commits/${{ github.ref_name }}).</sub>
 
   # ---- CLI binaries -------------------------------------------
   #
@@ -434,7 +434,7 @@ jobs:
           #    just attached to the can-flasher release.
           mkdir -p dist && cd dist
           GH_TOKEN="${CF_TOKEN}" gh release download "${TAG}" \
-            --repo isc-fs/can-flasher \
+            --repo isc-fs/MingoCAN \
             --pattern 'ISC*' --pattern 'latest.json'
           ls -la
 

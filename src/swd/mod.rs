@@ -89,7 +89,7 @@ pub struct SwdFlashRequest {
     /// probe-rs's own verify pass (during download) AND a
     /// host-side readback of chip flash that re-CRCs the bytes
     /// independently. The host-side pass is the authoritative
-    /// one for [#247](https://github.com/isc-fs/can-flasher/issues/247)
+    /// one for [#247](https://github.com/isc-fs/MingoCAN/issues/247)
     /// — probe-rs's verify trusted bytes the flash algorithm had
     /// just written, which hid silent corruption on H7. The
     /// host-side readback talks to flash via the Cortex-M AHB so

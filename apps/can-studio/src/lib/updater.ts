@@ -93,5 +93,5 @@ export async function downloadInstallAndRelaunch(
 
 /** GitHub release page for a given version tag (for "release notes"). */
 export function releaseNotesUrl(version: string): string {
-    return `https://github.com/isc-fs/can-flasher/releases/tag/v${version}`;
+    return `https://github.com/isc-fs/MingoCAN/releases/tag/v${version}`;
 }

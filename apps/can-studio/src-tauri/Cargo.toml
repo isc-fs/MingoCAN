@@ -1,11 +1,11 @@
 [package]
 name        = "can-studio"
-version     = "2.12.0"
+version     = "2.13.0"
 edition     = "2021"
 rust-version = "1.95"
 description = "ISC CAN Studio — desktop application for flashing, monitoring, and debugging CAN messages."
 license     = "MIT"
-repository  = "https://github.com/isc-fs/can-flasher"
+repository  = "https://github.com/isc-fs/MingoCAN"
 publish     = false
 
 # We're a binary (Tauri's runtime is the entry point). `tauri-build`
