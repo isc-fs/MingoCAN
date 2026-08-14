@@ -151,8 +151,9 @@ pub enum Command {
     /// List / pull the microSD data logs off a node over CAN
     Logs(logs::LogsArgs),
 
-    /// AMS pit-diag observer — arm / disarm the diagnostic stream,
-    /// or stream + decode it to stdout.
+    /// Telemetry observer (AMS / ECU / uDV) — `listen` passively, or
+    /// arm / disarm / stream the diagnostic stream. Only `listen` is
+    /// send-silent and therefore safe on a live car.
     PitDiag(pit_diag::PitDiagArgs),
 
     /// List detected CAN adapters on this machine

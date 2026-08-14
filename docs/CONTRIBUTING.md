@@ -1,12 +1,18 @@
-# Contributing to can-flasher
+# Contributing to MingoCAN
 
 How the project is developed day-to-day: toolchain, test layout, CI,
 branch conventions, how tracking issues and the roadmap stay in
 sync. Read this before opening your first PR; the conventions aren't
 obvious from looking at `git log` alone.
 
-If you just want to *use* the flasher, see
-[INSTALL.md](INSTALL.md) + [USAGE.md](USAGE.md).
+The repo holds three shipped surfaces at one version — the **MingoCAN**
+desktop app (`apps/can-studio`), the **`can-flasher`** CLI (the root
+crate), and the **VS Code extension** (`editor/vscode`). The crate and
+binary keep the `can-flasher` name deliberately: renaming them would
+break every script and CI job that invokes the tool.
+
+If you just want to *use* it, see [INSTALL.md](INSTALL.md) and
+[DESKTOP.md](DESKTOP.md).
 
 ---
 
