@@ -33,10 +33,18 @@ const RETRY_ATTEMPTS: u32 = 3;
 /// Linear backoff base — attempt N waits `N * this`.
 const RETRY_BACKOFF_MS: u64 = 60;
 
-/// How many times a single pull may re-establish a dropped session before
-/// giving up. Each resync is one re-CONNECT + re-OPEN; more than a few in
-/// one transfer means the bus is too contended to make progress.
-const MAX_RESYNCS: u32 = 5;
+/// How many times a pull may re-establish a dropped session **without the
+/// transfer advancing** before giving up. The counter resets on every byte
+/// of progress, so a pull that keeps moving may reconnect as many times as
+/// it needs — a large file naturally drops the session more often than a
+/// small one. Only a genuinely stuck pull (this many reconnects in a row,
+/// no new bytes) fails.
+///
+/// A total cap was wrong: it failed a 525 KB transfer that was recovering
+/// and advancing (0 → 26% → 41%) simply because it needed more than five
+/// reconnects across its length, while a 293 KB file fit inside five and
+/// completed (IFS08_HIL#94).
+const MAX_STALLED_RESYNCS: u32 = 5;
 
 /// Outcome of a completed pull.
 pub struct PullResult {
@@ -177,7 +185,9 @@ where
     let mut open = open_file(session, index).await?;
     let mut data: Vec<u8> = Vec::with_capacity(open.size as usize);
     let mut offset = 0u32;
-    let mut resyncs = 0u32;
+    // Consecutive reconnects since the last byte of progress. Reset to 0
+    // whenever the transfer advances, so only a stuck pull trips the cap.
+    let mut stalled_resyncs = 0u32;
 
     loop {
         if is_cancelled() {
@@ -194,6 +204,11 @@ where
         {
             Sent::Ack(body) => {
                 let out: ReadOutcome = logfs::parse_read(MAX_READ_LEN, &body);
+                if !out.data.is_empty() {
+                    // Forward progress — the reconnect budget is about being
+                    // *stuck*, not about the total count, so clear it.
+                    stalled_resyncs = 0;
+                }
                 data.extend_from_slice(&out.data);
                 offset = offset.saturating_add(out.data.len() as u32);
                 on_progress(offset, open.size);
@@ -207,14 +222,15 @@ where
                 }
             }
             Sent::SessionLost => {
-                if resyncs >= MAX_RESYNCS {
+                if stalled_resyncs >= MAX_STALLED_RESYNCS {
                     return Err(failed(format!(
-                        "session dropped mid-pull and did not hold after {MAX_RESYNCS} \
-                         reconnect(s) (at {offset}/{} B) — the bus is too busy to finish",
+                        "session dropped mid-pull and did not hold after {MAX_STALLED_RESYNCS} \
+                         reconnect(s) with no progress (stuck at {offset}/{} B) — the bus is \
+                         too busy to finish",
                         open.size
                     )));
                 }
-                resyncs += 1;
+                stalled_resyncs += 1;
                 // Re-open resets the handle; the loop retries the SAME
                 // offset with it, so no bytes are re-fetched or skipped.
                 open = resync(session, index).await?;

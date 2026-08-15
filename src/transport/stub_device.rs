@@ -150,6 +150,12 @@ pub struct LogfsWire {
     /// mid-pull. Exercises the host's re-CONNECT + re-OPEN + resume-from-
     /// offset recovery (IFS08_HIL#94). `0` = never.
     pub drop_session_after_reads: u8,
+    /// Drop the diag session **every** this many served reads, repeatedly —
+    /// a bus that keeps timing the session out however far the transfer has
+    /// got. Exercises the progress-aware reconnect budget: total drops can
+    /// far exceed the reconnect cap, yet the pull must still finish because
+    /// each drop is separated by progress. `0` = never.
+    pub drop_session_every_reads: u8,
 }
 
 impl LogfsWire {
@@ -166,6 +172,7 @@ impl LogfsWire {
         app_ctrl_only: true,
         drop_first_reads: 0,
         drop_session_after_reads: 0,
+        drop_session_every_reads: 0,
     };
 
     /// The pre-#452 shape, kept so one test can prove the host *rejects*
@@ -179,6 +186,7 @@ impl LogfsWire {
         app_ctrl_only: true,
         drop_first_reads: 0,
         drop_session_after_reads: 0,
+        drop_session_every_reads: 0,
     };
 }
 
@@ -251,6 +259,7 @@ struct LogfsState {
     reads_dropped: u8,
     reads_served: u32,
     session_dropped_once: bool,
+    last_drop_at_reads: u32,
     /// The log still being written. FINALIZE seals it into `files`;
     /// until then it is not listable, which is the whole reason the
     /// opcode exists.
@@ -295,6 +304,7 @@ impl StubDevice {
             reads_dropped: 0,
             reads_served: 0,
             session_dropped_once: false,
+            last_drop_at_reads: 0,
             active: None,
         });
         self
@@ -1399,11 +1409,22 @@ impl StubDevice {
         // the firmware does when a session ends.
         let drop_session = {
             let l = self.logfs.as_mut().expect("logfs enabled");
-            if l.wire.drop_session_after_reads > 0
+            // One-shot: drop once after N served reads.
+            let one_shot = l.wire.drop_session_after_reads > 0
                 && !l.session_dropped_once
-                && l.reads_served >= u32::from(l.wire.drop_session_after_reads)
-            {
+                && l.reads_served >= u32::from(l.wire.drop_session_after_reads);
+            // Periodic: drop every N served reads, repeatedly, but never
+            // twice at the same read count (else the retried read would be
+            // dropped forever). Models a bus that keeps timing the session
+            // out no matter how far the transfer has got — the case the
+            // progress-aware reconnect budget has to survive.
+            let periodic = l.wire.drop_session_every_reads > 0
+                && l.reads_served > 0
+                && l.reads_served % u32::from(l.wire.drop_session_every_reads) == 0
+                && l.reads_served != l.last_drop_at_reads;
+            if one_shot || periodic {
                 l.session_dropped_once = true;
+                l.last_drop_at_reads = l.reads_served;
                 l.open = None;
                 true
             } else {
