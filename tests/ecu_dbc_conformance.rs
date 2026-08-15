@@ -319,6 +319,7 @@ fn signal_layouts_match_the_decoder() {
             ("stub_brake", 43, 1, false, false),
             ("cal_status", 44, 2, false, false),
             ("stub_torque_cap", 46, 1, false, false),
+            ("boot_refused", 47, 1, false, false),
             ("uptime_s", 48, 8, false, false),
             ("last_fault", 56, 8, false, false),
         ]),
@@ -361,8 +362,12 @@ fn signal_layouts_match_the_decoder() {
             ("ts_active", 2, 1, false, false),
             ("brake_over_limit", 3, 1, false, false),
             ("r2d_confirm", 4, 1, false, false),
+            ("as_emergency", 5, 1, false, false),
+            ("as_from_stale", 6, 1, false, false),
+            ("as_fresh", 7, 1, false, false),
             ("dv_torque_pct", 8, 8, false, false),
             ("motor_rpm_mech", 16, 16, false, true),
+            ("as_status", 32, 8, false, false),
         ]),
         "0x707 layout drifted"
     );

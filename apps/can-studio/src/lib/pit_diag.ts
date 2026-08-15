@@ -345,6 +345,10 @@ export type PitDiagEvent =
           /** TorqueCap below 100 % — torque clamped for on-stands testing.
            *  Firmware tags it "MUST be 100 for any flight / drive build". */
           stubTorqueCap: boolean;
+          /** A 0x002 reboot-to-bootloader trigger was refused because the car
+           *  was in the drive ladder (#228) — a touch-free CAN reflash was
+           *  declined for safety. Power-cycle or leave drive to retry. */
+          bootRefused: boolean;
       }
     | {
           /** ECU 0x708 — the inverter's two lower fault layers (#168).
@@ -388,10 +392,21 @@ export type PitDiagEvent =
           brakeOverLimit: boolean;
           /** ECU TX 0x511 — R2D confirmed (== DV drive latched). */
           r2dConfirm: boolean;
+          /** uDV signalled an AS emergency stop (distinct from the ECU's own
+           *  `brakeOverLimit` verdict). */
+          asEmergency: boolean;
+          /** The mirrored `asStatus` came from a stale uDV frame — last-known,
+           *  not live. */
+          asFromStale: boolean;
+          /** The uDV `asStatus` source is fresh; `asStatus` is meaningful. */
+          asFresh: boolean;
           /** Conditioned autonomous torque actually applied, 0..100 %. */
           dvTorquePct: number;
           /** Mechanical rpm streamed to the uDV on 0x506 (signed). */
           motorRpmMech: number;
+          /** AS state mirrored from the uDV: "off" | "emergency" | "ready" |
+           *  "driving" | "finished" | "unknown". Meaningful when asFresh. */
+          asStatus: string;
       }
     | {
           /** uDV 0x7A0 — AS state + 10-bit signal mask + mission + EBS-init
