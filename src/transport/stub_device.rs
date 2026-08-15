@@ -1420,7 +1420,8 @@ impl StubDevice {
             // progress-aware reconnect budget has to survive.
             let periodic = l.wire.drop_session_every_reads > 0
                 && l.reads_served > 0
-                && l.reads_served.is_multiple_of(u32::from(l.wire.drop_session_every_reads))
+                && l.reads_served
+                    .is_multiple_of(u32::from(l.wire.drop_session_every_reads))
                 && l.reads_served != l.last_drop_at_reads;
             if one_shot || periodic {
                 l.session_dropped_once = true;
