@@ -237,6 +237,7 @@
         stubStart: boolean;
         stubBrake: boolean;
         stubTorqueCap: boolean;
+        bootRefused: boolean;
     }
     interface EcuDvSnapshot {
         dvR2dReq: boolean;
@@ -244,8 +245,12 @@
         tsActive: boolean;
         brakeOverLimit: boolean;
         r2dConfirm: boolean;
+        asEmergency: boolean;
+        asFromStale: boolean;
+        asFresh: boolean;
         dvTorquePct: number;
         motorRpmMech: number;
+        asStatus: string;
     }
 
     let ecuStatus = $state<EcuStatusSnapshot | null>(null);
@@ -965,6 +970,7 @@
                     stubStart: event.stubStart,
                     stubBrake: event.stubBrake,
                     stubTorqueCap: event.stubTorqueCap,
+                    bootRefused: event.bootRefused,
                 };
                 // 0x704 is 1 Hz, not part of the 100 ms cyclic scan —
                 // don't count it toward frames/scan.
@@ -987,8 +993,12 @@
                     tsActive: event.tsActive,
                     brakeOverLimit: event.brakeOverLimit,
                     r2dConfirm: event.r2dConfirm,
+                    asEmergency: event.asEmergency,
+                    asFromStale: event.asFromStale,
+                    asFresh: event.asFresh,
                     dvTorquePct: event.dvTorquePct,
                     motorRpmMech: event.motorRpmMech,
+                    asStatus: event.asStatus,
                 };
                 framesThisScan += 1;
                 // ---- uDV profile frames (0x7A0..=0x7A4) ----
@@ -2179,6 +2189,19 @@
                                     </span>
                                 </div>
                             {/if}
+                            <!-- Reboot-to-BL refused in the drive ladder (#228).
+                                 Sticky hint that a touch-free CAN reflash was
+                                 declined for safety — not an error. -->
+                            {#if ecuHealth.bootRefused}
+                                <div class="badge-row">
+                                    <span
+                                        class="pill pill-warning"
+                                        title="The ECU refused a 0x002 reboot-to-bootloader trigger because the car was in the drive ladder (#228). Power-cycle or leave drive before retrying a CAN reflash."
+                                    >
+                                        reboot-to-BL refused (in drive)
+                                    </span>
+                                </div>
+                            {/if}
                             <div class="reads">
                                 <span class="stat">
                                     <span>free heap</span>
@@ -2240,8 +2263,32 @@
                                 EBS brake
                             </span>
                             <span class="flag" class:on={ecuDv.r2dConfirm}>R2D ✓</span>
+                            <span class="flag" class:on={ecuDv.asFresh}>AS fresh</span>
                         </div>
+                        <!-- AS emergency mirrored from the uDV (#228 DBC). A
+                             stop request from the autonomous side — flag it
+                             loudly, distinct from the ECU's own EBS verdict. -->
+                        {#if ecuDv.asEmergency}
+                            <div class="badge-row">
+                                <span
+                                    class="pill pill-danger"
+                                    title="The uDV signalled an AS emergency stop (0x707 as_emergency)."
+                                >
+                                    AS emergency
+                                </span>
+                            </div>
+                        {/if}
                         <div class="reads">
+                            <span class="stat">
+                                <!-- as_status is only meaningful when the uDV
+                                     source is fresh; a stale mirror is shown as
+                                     last-known so a dropped uDV isn't read as a
+                                     live state change. -->
+                                <span>AS state</span>
+                                <strong class:bad={ecuDv.asEmergency}>
+                                    {ecuDv.asStatus}{ecuDv.asFromStale ? ' (stale)' : ''}
+                                </strong>
+                            </span>
                             <span class="stat">
                                 <span>DV torque</span>
                                 <strong>{ecuDv.dvTorquePct}%</strong>

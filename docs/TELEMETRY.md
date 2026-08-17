@@ -65,6 +65,19 @@ A handful of fields that mean more than they appear to:
   from a full transmit queue. The heartbeat the AMS watchdogs to keep the AIRs
   closed rides that same queue, so it is worth taking seriously.
 
+- **`reboot-to-BL refused (in drive)`** means the ECU declined a
+  reboot-to-bootloader trigger because the car was in the drive ladder. It is
+  sticky since boot. If a flash failed to connect and you see this, the tool did
+  its job and the ECU said no — leave drive or power-cycle before retrying,
+  rather than reaching for `--enter-bootloader always`. See
+  [FLASHING.md](FLASHING.md#getting-a-running-board-into-the-bootloader).
+
+- **The `as` row** is the autonomous-system state, which the ECU **mirrors from
+  the uDV** rather than owning. That makes the freshness flags load-bearing:
+  `fresh` clear, or a `(stale)` marker, means you are reading the last value the
+  ECU heard, not the current one. `emergency` is the uDV signalling an emergency
+  stop — distinct from the ECU's own `brk_lim` verdict.
+
 ## The other Observe views
 
 **Board health** shows the bootloader's session health and stored DTCs. Reading
