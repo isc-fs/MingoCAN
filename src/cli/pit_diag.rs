@@ -872,7 +872,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
         ),
         F::Health(h) => println!(
             "{prefix} health heap={}/{} tasks[ctrl={} rx={} tx={} tlm={} diag={}] reset={:?} \
-             uptime={}s last_fault=0x{:02X} cal={:?}{}",
+             uptime={}s last_fault=0x{:02X} cal={:?}{}{}",
             h.free_heap,
             h.min_free_heap,
             h.task_control as u8,
@@ -885,6 +885,7 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.last_fault,
             h.cal_status,
             ecu_stub_text(h),
+            if h.boot_refused { " boot_refused" } else { "" },
         ),
         F::InvFaults(f) => {
             let l1 = f.l1_anomalies();
@@ -913,7 +914,8 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             );
         }
         F::Dv(d) => println!(
-            "{prefix} dv    mode_torque={}% rpm={} [r2d_req={} cmd_fresh={} ts={} brk_lim={} r2d_ok={}]",
+            "{prefix} dv    mode_torque={}% rpm={} [r2d_req={} cmd_fresh={} ts={} brk_lim={} r2d_ok={}] \
+             as[{} emg={} fresh={} stale={}]",
             d.dv_torque_pct,
             d.motor_rpm_mech,
             d.dv_r2d_req as u8,
@@ -921,6 +923,10 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             d.ts_active as u8,
             d.brake_over_limit as u8,
             d.r2d_confirm as u8,
+            d.as_status.as_str(),
+            d.as_emergency as u8,
+            d.as_fresh as u8,
+            d.as_from_stale as u8,
         ),
     }
 }
@@ -992,7 +998,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             f.git_hash[3],
         ),
         F::Health(h) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskTelemetry":{},"taskDiag":{},"resetCause":"{:?}","calStatus":"{:?}","uptimeS":{},"lastFault":{},"stubNoAms":{},"stubNoInverter":{},"stubStart":{},"stubBrake":{},"stubTorqueCap":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuHealth","freeHeap":{},"minFreeHeap":{},"taskControl":{},"taskCanRx":{},"taskCanTx":{},"taskTelemetry":{},"taskDiag":{},"resetCause":"{:?}","calStatus":"{:?}","uptimeS":{},"lastFault":{},"stubNoAms":{},"stubNoInverter":{},"stubStart":{},"stubBrake":{},"stubTorqueCap":{},"bootRefused":{}}}"#,
             h.free_heap,
             h.min_free_heap,
             h.task_control,
@@ -1009,6 +1015,7 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             h.stub_start,
             h.stub_brake,
             h.stub_torque_cap,
+            h.boot_refused,
         ),
         F::InvFaults(f) => println!(
             r#"{{"tsMs":{ts_ms},"kind":"ecuInvFaults","l1Anomalies":[{}],"l2Anomalies":[{}],"l1BlocksDemClear":{},"cmdFollowN":{},"cmdFltClear":{},"invStateAgeMs":{},"invStateSeq":{},"invRedriveCount":{}}}"#,
@@ -1030,14 +1037,18 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             f.inv_redrive_count,
         ),
         F::Dv(d) => println!(
-            r#"{{"tsMs":{ts_ms},"kind":"ecuDv","dvR2dReq":{},"dvCmdFresh":{},"tsActive":{},"brakeOverLimit":{},"r2dConfirm":{},"dvTorquePct":{},"motorRpmMech":{}}}"#,
+            r#"{{"tsMs":{ts_ms},"kind":"ecuDv","dvR2dReq":{},"dvCmdFresh":{},"tsActive":{},"brakeOverLimit":{},"r2dConfirm":{},"asEmergency":{},"asFromStale":{},"asFresh":{},"dvTorquePct":{},"motorRpmMech":{},"asStatus":"{}"}}"#,
             d.dv_r2d_req,
             d.dv_cmd_fresh,
             d.ts_active,
             d.brake_over_limit,
             d.r2d_confirm,
+            d.as_emergency,
+            d.as_from_stale,
+            d.as_fresh,
             d.dv_torque_pct,
             d.motor_rpm_mech,
+            d.as_status.as_str(),
         ),
     }
 }
@@ -1312,6 +1323,7 @@ mod tests {
             stub_start: false,
             stub_brake: false,
             stub_torque_cap: false,
+            boot_refused: false,
             cal_status: ecu::EcuCalStatus::Loaded,
             reset_cause: ecu::EcuResetCause::PowerOn,
             uptime_s: 15,

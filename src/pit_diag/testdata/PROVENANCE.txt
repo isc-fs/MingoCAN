@@ -31,8 +31,8 @@ kept current by that repo's dbcinator bot, which regenerates and
 force-pushes it on every PR. Used by tests/ecu_dbc_conformance.rs.
 
 Vendored from branch: dev
-Commit:  f588f309d4d3b04754901460cfc1694fbadc34ff
-Date:    2026-08-12T18:09:08+02:00
+Commit:  ce5107a1b1976126eb8d9ca5faec07b754b8316e
+Date:    2026-08-15T20:37:07+02:00
 
 Vendor from the ECU's **dev** branch only — dev is the merged wire
 contract. Vendoring from a feature branch would pin this decoder to a

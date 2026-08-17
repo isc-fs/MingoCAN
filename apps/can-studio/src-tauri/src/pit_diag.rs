@@ -535,6 +535,9 @@ pub enum PitDiagEvent {
         stub_start: bool,
         stub_brake: bool,
         stub_torque_cap: bool,
+        /// `0x002` reboot-to-BL refused because the car was in the drive
+        /// ladder (#228) — a touch-free CAN reflash was declined for safety.
+        boot_refused: bool,
     },
     /// ECU `0x708` — the inverter's L1 (power stage) / L2 (machine control)
     /// fault layers (#168). Anomaly lists arrive pre-named and health-bit
@@ -559,8 +562,18 @@ pub enum PitDiagEvent {
         ts_active: bool,
         brake_over_limit: bool,
         r2d_confirm: bool,
+        /// uDV signalled an AS emergency stop (distinct from the ECU's own
+        /// `brake_over_limit` verdict).
+        as_emergency: bool,
+        /// The mirrored `as_status` came from a stale uDV frame — last-known.
+        as_from_stale: bool,
+        /// The uDV `as_status` source is fresh; `as_status` is meaningful.
+        as_fresh: bool,
         dv_torque_pct: u8,
         motor_rpm_mech: i16,
+        /// Autonomous-system state mirrored from the uDV (`off` / `emergency`
+        /// / `ready` / `driving` / `finished` / `unknown`).
+        as_status: String,
     },
     /// AMS `0x6CA` — ungated firmware health (#411). Field names mirror
     /// `EcuHealth` so the frontend renders both boards' health uniformly.
@@ -949,6 +962,7 @@ impl PitDiagEvent {
                 stub_start,
                 stub_brake,
                 stub_torque_cap,
+                boot_refused,
             }) => Self::EcuHealth {
                 free_heap,
                 min_free_heap,
@@ -967,6 +981,7 @@ impl PitDiagEvent {
                 stub_start,
                 stub_brake,
                 stub_torque_cap,
+                boot_refused,
             },
             EcuPitDiagFrame::InvFaults(f) => Self::EcuInvFaults {
                 l1_anomalies: f.l1_anomalies().iter().map(|s| (*s).to_string()).collect(),
@@ -984,16 +999,24 @@ impl PitDiagEvent {
                 ts_active,
                 brake_over_limit,
                 r2d_confirm,
+                as_emergency,
+                as_from_stale,
+                as_fresh,
                 dv_torque_pct,
                 motor_rpm_mech,
+                as_status,
             }) => Self::EcuDv {
                 dv_r2d_req,
                 dv_cmd_fresh,
                 ts_active,
                 brake_over_limit,
                 r2d_confirm,
+                as_emergency,
+                as_from_stale,
+                as_fresh,
                 dv_torque_pct,
                 motor_rpm_mech,
+                as_status: as_status.as_str().to_string(),
             },
         }
     }
