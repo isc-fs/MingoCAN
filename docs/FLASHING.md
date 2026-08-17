@@ -60,6 +60,13 @@ for the bootloader to come up, and retries.
 > that is a real state change, not just a software reset. It is the correct
 > thing to do before flashing — but it is a reason to be on stands.
 
+**The ECU can refuse.** If the car is in the drive ladder it declines the
+trigger rather than dropping out of drive underneath you. Connect then fails,
+and the refusal shows up on the ECU telemetry tab as
+`reboot-to-BL refused (in drive)` — sticky since boot. Leave drive or
+power-cycle; forcing `--enter-bootloader always` will not help, because the
+refusal is the ECU's decision, not a missed trigger.
+
 To do it by hand from the CLI: `can-flasher send-raw 0x002 B0 07 AD 11`.
 
 ---
@@ -118,6 +125,8 @@ In order of likelihood:
 3. The bitrate is wrong — check Settings → Bus parameters against the car.
 4. The board has no bootloader yet. Use **Burn bootloader**.
 5. Wrong node ID. `discover` on the CLI lists every board in bootloader mode.
+6. **The ECU refused the reboot trigger** because the car is in the drive
+   ladder. Check the ECU telemetry tab for `reboot-to-BL refused (in drive)`.
 
 ### Protection violation
 

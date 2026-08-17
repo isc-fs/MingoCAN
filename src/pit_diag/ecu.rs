@@ -514,6 +514,11 @@ pub struct EcuHealthFrame {
     /// on-stands testing (byte 5 bit 6). The fifth stub announce; the
     /// firmware tags it "MUST be 100 for any flight / drive build".
     pub stub_torque_cap: bool,
+    /// The ECU refused a `0x002` reboot-to-bootloader trigger because the car
+    /// was in the drive ladder (byte 5 bit 7, IFS08-CE-ECU #228). Sticky hint
+    /// that a touch-free CAN reflash was declined for safety — power-cycle or
+    /// leave drive before retrying.
+    pub boot_refused: bool,
     /// Pedal-calibration provenance (byte 5 bits 4-5, #169) — stored and
     /// applied, or fell back to compile-time defaults.
     pub cal_status: EcuCalStatus,
@@ -524,6 +529,53 @@ pub struct EcuHealthFrame {
     /// Sticky last-fault sentinel latched across the reset (`0x00` = none;
     /// `0xF1..=0xF7` = HardFault…AssertFailed per the firmware table).
     pub last_fault: u8,
+}
+
+/// Autonomous-system state the ECU mirrors from the uDV (`0x707` byte 4). Same
+/// enum the uDV publishes on `UDV_as_status` (`0x50A`); the ECU echoes it into
+/// the pit-diag stream so the AS state is visible without a second listener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EcuAsStatus {
+    /// 0 — autonomous system off / not engaged.
+    Off,
+    /// 1 — AS emergency (EBS-triggered stop).
+    Emergency,
+    /// 2 — armed and ready to drive.
+    Ready,
+    /// 3 — mission running.
+    Driving,
+    /// 4 — mission finished.
+    Finished,
+    /// Any value outside the known table.
+    Other(u8),
+}
+
+impl EcuAsStatus {
+    /// Decode the raw AS-status byte.
+    #[must_use]
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            0 => Self::Off,
+            1 => Self::Emergency,
+            2 => Self::Ready,
+            3 => Self::Driving,
+            4 => Self::Finished,
+            other => Self::Other(other),
+        }
+    }
+
+    /// Short label for CLI / Studio rendering.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Emergency => "emergency",
+            Self::Ready => "ready",
+            Self::Driving => "driving",
+            Self::Finished => "finished",
+            Self::Other(_) => "unknown",
+        }
+    }
 }
 
 /// `0x707` — the ECU's view of the DV (driverless) integration (#109). The
@@ -541,10 +593,22 @@ pub struct EcuDvFrame {
     pub brake_over_limit: bool,
     /// ECU TX `0x511` — R2D confirmed (== DV drive latched).
     pub r2d_confirm: bool,
+    /// AS emergency asserted (byte 0 bit 5) — the uDV signalled an emergency
+    /// stop. Distinct from `brake_over_limit`, which is the ECU's own verdict.
+    pub as_emergency: bool,
+    /// The mirrored `as_status` was reconstructed from a *stale* uDV frame
+    /// (byte 0 bit 6) — treat the AS state as last-known, not live.
+    pub as_from_stale: bool,
+    /// The uDV `as_status` source is fresh (byte 0 bit 7). Clear means the ECU
+    /// has not seen a recent AS-status frame from the uDV.
+    pub as_fresh: bool,
     /// Conditioned autonomous torque actually applied, percent (0..100).
     pub dv_torque_pct: u8,
     /// Mechanical rpm streamed to the uDV on `0x506` (signed, little-endian).
     pub motor_rpm_mech: i16,
+    /// Autonomous-system state mirrored from the uDV (byte 4). Meaningful only
+    /// when [`as_fresh`](Self::as_fresh) is set.
+    pub as_status: EcuAsStatus,
 }
 
 /// `0x708` — the inverter's two lower fault layers, forwarded from `0x461`
@@ -869,8 +933,9 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 stub_start: (live & 0x80) != 0,
                 stub_brake: (cause & 0x08) != 0,
                 stub_torque_cap: (cause & 0x40) != 0,
+                boot_refused: (cause & 0x80) != 0,
                 // Byte 5 is packed: reset_cause b0-b2, stub_brake b3,
-                // cal_status b4-b5. b6-b7 remain free.
+                // cal_status b4-b5, stub_torque_cap b6, boot_refused b7.
                 cal_status: EcuCalStatus::from_bits(cause >> 4),
                 reset_cause: EcuResetCause::from_byte(cause & 0x07),
                 uptime_s: p[6],
@@ -878,7 +943,9 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
             }))
         }
         ECU_DV_ID => {
-            if p.len() < 4 {
+            // as_status lives at byte 4, so the guard grew from 4 to 5 when the
+            // AS-mirror fields landed (IFS08-CE-ECU DBC ce5107a1).
+            if p.len() < 5 {
                 return None;
             }
             let flags = p[0];
@@ -888,8 +955,12 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 ts_active: (flags & 0x04) != 0,
                 brake_over_limit: (flags & 0x08) != 0,
                 r2d_confirm: (flags & 0x10) != 0,
+                as_emergency: (flags & 0x20) != 0,
+                as_from_stale: (flags & 0x40) != 0,
+                as_fresh: (flags & 0x80) != 0,
                 dv_torque_pct: p[1],
                 motor_rpm_mech: i16::from_le_bytes([p[2], p[3]]),
+                as_status: EcuAsStatus::from_byte(p[4]),
             }))
         }
         ECU_INV_FAULTS_ID => {
@@ -1287,6 +1358,31 @@ mod tests {
     }
 
     #[test]
+    fn health_decodes_boot_refused() {
+        // byte5 bit 7 (#228): a reboot-to-BL trigger refused because the car
+        // was in the drive ladder. It tops off byte 5, so it must stay
+        // independent of reset_cause / stub_torque_cap below it.
+        let p = [0, 0, 0, 0, 0, 0x80, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_HEALTH_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert!(h.boot_refused);
+                assert_eq!(h.reset_cause, EcuResetCause::Unknown);
+                assert!(!h.stub_brake && !h.stub_torque_cap);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+        // stub_torque_cap (bit 6) alone — boot_refused must read clear.
+        let p = [0, 0, 0, 0, 0, 0x40, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_HEALTH_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Health(h) => {
+                assert!(!h.boot_refused);
+                assert!(h.stub_torque_cap);
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn status_carries_dv_mode() {
         // byte2 = 0x30 → bit4 start_button + bit5 dv_mode (#109); rtds clear.
         let p = [5, 4, 0x30, 60, 0xAC, 0x00, 0x00, 0x00];
@@ -1326,18 +1422,58 @@ mod tests {
     #[test]
     fn dv_frame_decodes() {
         // byte0 flags = bits 0,1,4 (r2d_req + cmd_fresh + r2d_confirm);
-        // ts_active/brake_over_limit clear. torque 80%, rpm 1500 (LE).
+        // ts_active/brake_over_limit and the AS-mirror bits clear. torque 80%,
+        // rpm 1500 (LE), as_status 0 (Off).
         let p = [0b0001_0011u8, 80, 0xDC, 0x05, 0, 0, 0, 0];
         let frame = CanFrame::new(ECU_DV_ID, &p).unwrap();
         match decode_frame(&frame).unwrap() {
             EcuPitDiagFrame::Dv(d) => {
                 assert!(d.dv_r2d_req && d.dv_cmd_fresh && d.r2d_confirm);
                 assert!(!d.ts_active && !d.brake_over_limit);
+                assert!(!d.as_emergency && !d.as_from_stale && !d.as_fresh);
                 assert_eq!(d.dv_torque_pct, 80);
                 assert_eq!(d.motor_rpm_mech, 1500);
+                assert_eq!(d.as_status, EcuAsStatus::Off);
             }
             other => panic!("expected Dv, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dv_frame_decodes_as_mirror() {
+        // byte0 high bits: as_emergency (5), as_fresh (7) set, as_from_stale
+        // (6) clear = 0xA0. byte4 = 3 (Driving). The AS-mirror fields sit above
+        // the existing handshake bits, so decoding byte0 too narrow drops them.
+        let p = [0b1010_0000u8, 0, 0, 0, 3, 0, 0, 0];
+        match decode_frame(&CanFrame::new(ECU_DV_ID, &p).unwrap()).unwrap() {
+            EcuPitDiagFrame::Dv(d) => {
+                assert!(d.as_emergency && d.as_fresh);
+                assert!(!d.as_from_stale);
+                assert!(
+                    !d.dv_r2d_req && !d.r2d_confirm,
+                    "low handshake bits stay clear"
+                );
+                assert_eq!(d.as_status, EcuAsStatus::Driving);
+            }
+            other => panic!("expected Dv, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dv_frame_needs_byte4_for_as_status() {
+        // A DLC-4 frame (pre-AS-mirror firmware) can't carry as_status at
+        // byte 4, so the guard rejects it rather than reading past the end.
+        let short = [0b0001_0011u8, 80, 0xDC, 0x05];
+        assert!(decode_frame(&CanFrame::new(ECU_DV_ID, &short).unwrap()).is_none());
+    }
+
+    #[test]
+    fn as_status_covers_the_table_and_unknowns() {
+        assert_eq!(EcuAsStatus::from_byte(0), EcuAsStatus::Off);
+        assert_eq!(EcuAsStatus::from_byte(4), EcuAsStatus::Finished);
+        assert_eq!(EcuAsStatus::from_byte(9), EcuAsStatus::Other(9));
+        assert_eq!(EcuAsStatus::Other(9).as_str(), "unknown");
+        assert_eq!(EcuAsStatus::Driving.as_str(), "driving");
     }
 
     #[test]
