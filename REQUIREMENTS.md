@@ -1,15 +1,42 @@
-# CAN Flasher — Project Requirements
+# MingoCAN — Requirements
 
-Host-side CAN flasher (Rust CLI) for programming the STM32 CAN
-bootloader shipped at [`isc-fs/stm32-can-bootloader`](https://github.com/isc-fs/stm32-can-bootloader)
-**v1.0.0** (`v1.0.0` = Phase-1..4 feature-complete; Phase 5 security is
-deferred — see [§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5)
-at the end of this file).
+The host-side specification: what the tool must implement to talk to the
+STM32 CAN bootloader at
+[`isc-fs/stm32-can-bootloader`](https://github.com/isc-fs/stm32-can-bootloader)
+**v1.0.0** (Phase 1–4 feature-complete; Phase 5 security is deferred — see
+[§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5)).
 
-The bootloader is the source of truth for wire formats and addresses;
-this document tracks what the host tool must implement to speak to
-it. Any drift between this file and `bl_proto.h` / `bl_memmap.h` in
-the bootloader repo is a bug in this file — fix this file first.
+## What this document is, and is not
+
+**This is the spec, not the manual.** For using the tool, see
+[docs/DESKTOP.md](docs/DESKTOP.md) (the app) and [docs/CLI.md](docs/CLI.md)
+(the command line). For how the code is arranged,
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
+**One engine, three surfaces.** Everything specified here is implemented once,
+in the `can_flasher` Rust library, and consumed by all three shipped surfaces:
+
+| Surface | Consumes the engine by |
+|---|---|
+| **MingoCAN** desktop app (`apps/can-studio`) | path dependency — no shell-out, no JSON boundary |
+| **`can-flasher`** CLI | direct — it is the same crate's binary target |
+| **VS Code extension** (`editor/vscode`) | shelling out to an installed binary |
+
+Requirements below are written against the CLI because it is the surface with a
+stable, textual contract worth specifying precisely. **They bind the app
+equally**: where this document says the tool must do something, the app must do
+it too, through the same code.
+
+> ### The doctrine
+>
+> **The bootloader is the source of truth for wire formats and addresses.**
+> This document tracks what the host must implement to speak to it. Any drift
+> between this file and `bl_proto.h` / `bl_memmap.h` in the bootloader repo is a
+> bug **in this file** — fix this file first.
+>
+> The same rule governs the telemetry decoders against the firmware repos'
+> generated DBCs. That one is enforced by tests rather than trust — see
+> [§ Telemetry observers](#telemetry-observers).
 
 ---
 
@@ -159,7 +186,7 @@ same fail-soft contract as PCAN.
 - **Prior art** — Rust is already in use elsewhere in this project;
   sharing the language keeps context switching low.
 
-### Crate dependencies (v1 scope)
+### Crate dependencies
 
 | Crate | Purpose |
 |---|---|
@@ -495,18 +522,33 @@ Commands:
   discover    Scan the bus and list all bootloader-mode devices
   diagnose    Read/clear DTCs, stream logs, stream live data, session health
   config      Read/write device configuration (NVM) and option bytes (WRP)
+  provision   Assign a board's node-id by role name (ECU=1, AMS=2, uDV=3)
+  logs        List / pull the microSD data logs off a node over CAN
+  pit-diag    Telemetry observer — listen, or arm / disarm / stream
   replay      Record or replay a CAN session (testing)
   adapters    List detected CAN adapters on this machine
   send-raw    Send one raw CAN frame (app-level reboot-to-BL, bench probes)
+  swd-flash   First-boot a bare STM32 via ST-LINK        [feature = "swd"]
 ```
 
-No `debug` subcommand in v1: the bootloader does not expose
-`CMD_MEM_READ`/`CMD_MEM_WRITE`. The runtime-inspection surface that
-actually exists is covered by `diagnose log`, `diagnose live-data`,
-and `diagnose health`.
+Three of these do **not** speak the bootloader protocol, and are specified
+separately below because they are different contracts:
 
-No `sign` / `keygen` subcommand in v1: Ed25519 signing is part of
-the deferred security scope. See [§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5).
+- `logs` speaks **LOGFS**, served by the *application* firmware.
+- `pit-diag` decodes **broadcast telemetry**. No session, no handshake.
+- `swd-flash` uses **SWD via probe-rs**, not CAN at all.
+
+Deliberately absent:
+
+- **No `debug` subcommand.** The bootloader exposes no `CMD_MEM_READ` /
+  `CMD_MEM_WRITE`. The runtime-inspection surface that does exist is
+  `diagnose log`, `diagnose live-data`, and `diagnose health`.
+- **No `sign` / `keygen`.** Ed25519 signing is deferred security scope. See
+  [§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5).
+- **No pedal-calibration surface.** Removed in v2.12.0: the feature shipped in
+  v2.10.0 and was never used to successfully calibrate a car. The read-only
+  `cal_status` field on the ECU's ungated health frame remains, because it is
+  part of the telemetry wire rather than a host capability.
 
 ### Global flags
 
@@ -514,13 +556,35 @@ the deferred security scope. See [§ Deferred scope](#deferred-scope-v2-tied-to-
   -i, --interface <TYPE>    CAN backend: slcan | socketcan | pcan | vector | virtual
   -c, --channel <CHANNEL>   Adapter channel (see format table below)
   -b, --bitrate <BPS>       Nominal CAN bitrate [default: 500000]
-      --node-id <ID>        Target node ID hex or decimal [default: broadcast]
-      --timeout <MS>        Per-frame timeout in ms [default: 500]
+      --node-id <ID>        Target node ID, hex `0x0A` or decimal `10`
+      --timeout <MS>        Reply timeout in ms [default: 500]
       --json                Machine-readable JSON output on stdout
       --log <PATH>          Append session to audit log (SQLite)
       --verbose             Trace-level logging
       --operator <NAME>     Override operator name in audit log
 ```
+
+`--timeout` is **per command**, covering a whole reassembled ISO-TP message —
+not per CAN frame. Subcommands whose transport cannot complete inside a short
+deadline may impose a floor: LOGFS raises anything below 2000 ms, because a
+FatFs read on a shared bus cannot finish faster and a spurious timeout mid-pull
+discards minutes of transfer.
+
+#### `--node-id` resolution
+
+There is **no single default**. Each subcommand decides, and the differences are
+deliberate:
+
+| Subcommand | Omitted `--node-id` |
+|---|---|
+| `flash` | **error** — it must never guess which board to overwrite |
+| `logs` | **error**, but reported through the generic exit code 99 rather than a targeted hint |
+| `verify`, `diagnose`, `config` | `0x3` |
+| `provision` | target defaults to `0x3`; the value *written* comes from the role argument |
+| `discover`, `pit-diag`, `replay`, `adapters` | unused — broadcast or passive |
+
+Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`. An uncommissioned board answers on
+`0xF`.
 
 #### `--channel` format by adapter and OS
 
@@ -686,12 +750,153 @@ Subcommands:
 - Reserved keys: `0x0001` `BL_NVM_KEY_NODE_ID`, `0x0002`
   `BL_NVM_KEY_CAN_BITRATE`. `0x1000+` is the user / app range.
 
+### `provision` subcommand
+
+```
+can-flasher provision <ROLE|PATH>        Write node-id by role, then reset
+```
+
+Sugar over `config nvm write node-id` plus `CMD_RESET`. The argument is a role
+name (`ecu`, `ams`, `udv`, case-insensitive) **or** a path whose basename stem
+matches one — the file is never opened, only its name is read, so
+`build/ams.elf` and `../firmware/uDV.HEX` both resolve.
+
+| Flag | Requirement |
+|---|---|
+| `--no-reset` | Skip the post-write reset. For chaining several writes; the last must still reset, or the new ID does not take effect. |
+| `--yes` | Skip the confirmation. **Required for non-interactive use** — a piped stdin auto-declines rather than proceeding unattended. |
+
+Commissioning a bare board takes two steps over two transports: the bootloader
+arrives over SWD, then the node-id is written over CAN *by the now-running
+bootloader*. `swd-flash --provision <role>` chains them, and is therefore
+incompatible with `--no-reset`.
+
+### `logs` subcommand
+
+```
+can-flasher logs list                    List files on the node's microSD card
+can-flasher logs pull --index N|--all    Download to a local directory
+can-flasher logs finalize                Seal the log currently being written
+```
+
+**Served by the application firmware, not the bootloader.** A board sitting in
+its bootloader does not answer LOGFS at all — the two dispatchers are disjoint,
+so "no reply" means either wrong firmware running or nothing there, and only a
+probe distinguishes them.
+
+Requirements:
+
+- **Read-only.** No delete opcode is issued under any flag.
+- `--node-id` is **mandatory**; there is no default.
+- An unsealed log must not appear in a listing. `finalize` seals it without a
+  power cycle.
+- Idempotent opcodes (LIST, READ) **must** retry — up to three attempts with
+  linear backoff. A multi-MB pull is thousands of round trips over minutes, and
+  without retry a single blip on a shared bus discards the whole transfer.
+  OPEN (allocates a handle) and CLOSE (frees one) must **not** retry.
+- An interrupted pull resumes from the last acknowledged offset; the closing
+  CRC still gates the result.
+- The command timeout floor is 2000 ms regardless of `--timeout`.
+
+Throughput is ~10–20 kB/s, which makes a 4 MiB file a 3.5–7 minute operation.
+`--all` is opt-in for that reason.
+
+### `pit-diag` subcommand
+
+```
+can-flasher pit-diag listen              Passive decode — NEVER transmits
+can-flasher pit-diag enable  --profile   Arm the stream on the target
+can-flasher pit-diag disable --profile   Disarm it
+can-flasher pit-diag stream  --profile   Arm, decode, disarm on exit
+```
+
+See [§ Telemetry observers](#telemetry-observers) for the wire contract.
+
+**The send-silence of `listen` is a hard requirement, not an optimisation.** It
+is what makes the mode safe to point at a running car, and the app's entire
+Observe group depends on it holding.
+
+`stream` must disarm on exit including on SIGINT. The firmware also clears the
+flag on reboot, so a crashed tool cannot leave a board streaming forever.
+
 ### `replay` subcommand
 
 ```
 can-flasher replay record --out <FILE>   Record a live session to file
 can-flasher replay run    <FILE>         Replay against virtual backend
 ```
+
+Recording is passive and transmits nothing.
+
+### `swd-flash` subcommand *(feature-gated)*
+
+```
+can-flasher swd-flash <FIRMWARE>         First-boot a bare STM32 via ST-LINK
+```
+
+Built only with `--features swd`; drives an ST-LINK V2/V3 through
+[probe-rs](https://probe.rs). Exists because a never-programmed board has
+nothing listening on CAN, making SWD the only way in.
+
+Currently a feasibility spike: ST-LINK only, no auto-download of the bootloader
+artifact, no GDB/RTT pass-through.
+
+---
+
+## Telemetry observers
+
+A **separate contract** from the bootloader protocol. Boards broadcast telemetry
+on their own; there is no session, no handshake, and no request/response. The
+host decodes what it hears, and — for the gated frames — asks the board to start
+emitting them.
+
+### The two modes, and why the distinction is load-bearing
+
+| Mode | Transmits | Frames |
+|---|---|---|
+| **Passive** | **No** | Only what boards broadcast unasked: ECU health `0x704`, AMS health `0x6CA` |
+| **Armed** | **Yes** | The full per-board frame set |
+
+Passive decode must never place a frame on the bus. This is the property that
+lets the tool be attached to a live car, and it is why the app's sidebar is
+split into Program and Observe.
+
+### Arm / disarm contract
+
+| Board | Arm ID | ACK ID | Stream range | Frames per scan |
+|---|---|---|---|---|
+| AMS | `0x7F0` | `0x7F1` | `0x680`–`0x6CA` | 58 |
+| ECU | `0x7E0` | `0x7E1` | `0x700`–`0x708` | 7 |
+| uDV | `0x7DE` | `0x7DF` | `0x7A0`–`0x7A9` | 4 |
+
+Arm payload `DE AD BE EF`; disarm all zeros. **An ACK whose first byte is
+anything other than `0x01` means disabled** — including an empty payload, which
+must not be treated as an error or as success.
+
+Arming is idempotent firmware-side; re-arming an armed stream is a no-op.
+
+### Decoder conformance — a standing requirement
+
+The decoders are hardcoded: fixed IDs, fixed frame counts, per-field bit
+positions, enum tables. That buys speed and typed structs, and costs a real risk
+of silently mis-decoding when firmware moves.
+
+Two mechanisms are **required**, and neither is sufficient alone:
+
+1. **Conformance tests** against a vendored DBC snapshot, asserting *complete
+   signal sets* — so an upstream **addition** fails the suite too, not only a
+   change. A signal this repo deliberately does not decode must be listed as
+   explicitly deferred, with its tracking issue.
+2. **A scheduled drift watch** diffing the snapshot against upstream. The
+   conformance tests have a blind spot by construction: they check the decoder
+   against the *snapshot*, so they can only fail once somebody re-vendors it.
+   Nothing in this repo changes when the wire moves.
+
+> A `schedule`-triggered workflow only runs from the **default branch**. Merging
+> one to `dev` is not enough; it stays dormant until the next release reaches
+> `main`.
+
+Six decode drifts accumulated behind that gap before the watch existed.
 
 ---
 
@@ -1221,90 +1426,67 @@ duration, result.
 
 ## Project layout
 
-```mermaid
-mindmap
-  root((can-flasher repo))
-    Top-level docs
-      Cargo.toml · manifest + target-gated deps
-      README.md
-      ARCHITECTURE.md · module-level notes
-      REQUIREMENTS.md · this file
-      ROADMAP.md · auto-generated from YAML
-    docs/
-      INSTALL.md · toolchain + per-OS adapter setup
-      CLI.md · subcommand reference + examples
-      CONTRIBUTING.md · contributor guide
-      PERFORMANCE.md · flash-speed baseline + --profile
-    src/
-      lib.rs · pub mod declarations
-      main.rs · clap entry point
-      logging.rs · tracing-subscriber bootstrap
-      cli/
-        mod.rs · Cli + Command + GlobalFlags
-        adapters · enumerate detected adapters
-        flash · end-to-end programming
-        verify · readback CRC comparison
-        discover · bus scan + device table
-        diagnose · DTC / log / live-data / health
-        config · NVM + option bytes + WRP
-        replay · candump record/play
-        send_raw · single raw CAN frame
-      protocol/ · pure wire-format, no I/O
-        mod.rs · CanFrame + ParseError
-        ids.rs · FrameId + MessageType + node consts
-        opcodes.rs · Command/Notify/Nack codes
-        isotp.rs · ISO-TP segment + reassemble
-        records.rs · FirmwareInfo + Health + Live + Dtc + ObStatus
-        commands.rs · typed command builders
-        responses.rs · Response parser
-      transport/ · adapter I/O behind CanBackend trait
-        mod.rs · CanBackend + open_backend router
-        virtual_bus.rs · in-process loopback
-        stub_device.rs · bootloader simulator
-        slcan.rs · all OSes
-        socketcan.rs · Linux only
-        pcan.rs · Windows + macOS
-        vector.rs · Windows XL Driver Library
-      session/
-        mod.rs · handshake + keepalive + reconnect
-      firmware/
-        mod.rs · Image + address validation
-        loader.rs · ELF / Intel HEX / raw .bin
-      flash/
-        mod.rs · FlashManager sector map + diff + verify
-    tests/ · against VirtualBus + StubDevice
-      virtual_pipeline.rs · end-to-end session round-trip
-      flash_manager.rs · FlashManager state-machine harness
-      *_subcommand.rs · one per CLI subcommand
-    demo/
-      MAIN_IFS08_DEMO · reference STM32H733 app
-    apps/
-      can-studio · Tauri 2 desktop app
-    editor/
-      vscode · TypeScript extension
-    .github/
-      roadmap.yaml · source of truth for ROADMAP.md
-      scripts/render_roadmap.py
-      workflows/
-        ci.yml · fmt/clippy/build/test matrix
-        release.yml · v* unified release (CLI + VSIX + Studio bundles)
-        sync-dev-after-release.yml · dispatch recovery handle
-        branch-issue.yml · auto-create tracking issue on branch push
-        close-on-dev-merge.yml · auto-close on dev merge
-        roadmap.yml · regenerate ROADMAP.md from YAML
+```
+Cargo.toml              manifest + target-gated deps
+README.md               MingoCAN front page
+REQUIREMENTS.md         this file — the spec
+ARCHITECTURE.md         how the code is arranged
+ROADMAP.md              auto-generated from .github/roadmap.yaml
+
+docs/
+  INSTALL.md            app / CLI / source install + per-OS adapter setup
+  DESKTOP.md            the app, view by view
+  FLASHING.md           flashing end to end
+  CLI.md                subcommand reference, flags, exit codes
+  TELEMETRY.md          watching a live car
+  DATA_LOGS.md          pulling microSD logs
+  SAFETY.md             every operation that writes to a board
+  UPDATES.md            the app's auto-updater
+  CONTRIBUTING.md       toolchain, tests, CI, release flow
+  PERFORMANCE.md        flash-speed baseline + --profile
+  dbc/                  DBC references
+
+src/                    the engine — see ARCHITECTURE.md for the full tree
+  cli/                  12 subcommands
+  protocol/             wire format, zero I/O (incl. logfs.rs)
+  transport/            5 backends + out-of-process isolation
+  session/              handshake, keepalive, reconnect
+  firmware/  flash/     image loading + the flash state machine
+  pit_diag/             AMS / ECU / uDV decoders + vendored DBC snapshots
+  swd/                  probe-rs driver                    [feature = "swd"]
+  logfs_client.rs       LOGFS session driver
+  app_control.rs        app-level commands (reboot-to-BL)
+
+tests/                  13 integration tests against VirtualBus + StubDevice
+apps/can-studio/        MingoCAN — Tauri 2, links the crate by path
+editor/vscode/          VS Code extension — shells out to the binary
+demo/MAIN_IFS08_DEMO    reference STM32H733 application
+
+.github/
+  roadmap.yaml          source of truth for ROADMAP.md
+  scripts/              render_roadmap.py · dbc_decoder_diff.py
+  workflows/
+    ci.yml                    fmt / clippy / build+test matrix
+    can-studio-ci.yml         app: tsc + build
+    editor-ci.yml             extension
+    release.yml               v* unified release (CLI + VSIX + app bundles)
+    ecu-dbc-drift.yml         daily upstream DBC drift watch
+    sync-dev-after-release.yml
+    branch-issue.yml          tracking issue on branch push
+    close-on-dev-merge.yml
+    roadmap.yml
 ```
 
-The `apps/can-studio/` and `editor/vscode/` integrations have their
-own READMEs detailing the dependency model — Studio links the
-`can-flasher` crate by path; the VS Code extension shells out to
-an installed `can-flasher` binary on `PATH`.
+`apps/can-studio/` and `editor/vscode/` have their own READMEs covering their
+dependency models. The distinction matters: the app links the crate **by path**,
+so it cannot drift from the engine; the extension **shells out**, so it can, and
+must tolerate a `can-flasher` binary of a different version.
 
-No `src/security/` directory in v1 (Phase 5 security work — Ed25519
-signing, challenge-response, replay counter — is deferred); no
-`src/debug/` (no `CMD_MEM_READ` / `CMD_MEM_WRITE` to wrap). The
-`audit` / `output / summary` / `protection / wrp` boxes from earlier
-planning drafts never materialised as separate modules — that
-functionality is inlined into the relevant subcommand instead.
+Deliberately absent: no `src/security/` (Phase 5 is deferred) and no
+`src/debug/` (there is no `CMD_MEM_READ` / `CMD_MEM_WRITE` to wrap). The
+`audit`, `output/summary` and `protection/wrp` modules from early planning
+drafts never materialised — that functionality is inlined into the subcommand
+that needs it.
 
 ---
 
