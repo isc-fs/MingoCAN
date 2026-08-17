@@ -462,3 +462,54 @@ async fn pull_recovers_from_a_mid_transfer_session_drop() {
     let _ = cancel_tx.send(());
     let _ = handle.await;
 }
+
+#[tokio::test]
+async fn pull_finishes_when_drops_exceed_the_budget_but_progress_continues() {
+    use can_flasher::logfs_client;
+
+    // The bus drops the session every 2 served reads — for a ~20-read file
+    // that's ~10 drops, FAR more than the 5-reconnect budget. The old cap
+    // was a total, so it aborted a large transfer that was still advancing
+    // (IFS08_HIL#94: 525 KB died at 41%). With the budget counting only
+    // *consecutive* stalls, every drop is separated by progress, the
+    // counter keeps resetting, and the pull completes.
+    let bus = VirtualBus::new();
+    let host = bus.host_backend();
+    let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
+    drop(bus);
+
+    // ~20 reads at 512 B/read.
+    let payload: Vec<u8> = (0..10_000u32).map(|i| i as u8).collect();
+    let wire = LogfsWire {
+        drop_session_every_reads: 2,
+        ..LogfsWire::SETTLED
+    };
+    let stub = StubDevice::new(device, STUB_NODE).with_logfs(
+        vec![StubLogFile::new("LOG0002.CSV", payload.clone(), 2)],
+        wire,
+    );
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let _ = stub.run(cancel_rx).await;
+    });
+
+    let session = Session::attach(
+        Box::new(host),
+        SessionConfig {
+            target_node: STUB_NODE,
+            keepalive_interval: Duration::from_millis(5_000),
+            command_timeout: Duration::from_millis(150),
+            ..SessionConfig::default()
+        },
+    );
+    session.app_connect().await.expect("initial app CONNECT");
+
+    let result = logfs_client::pull_file(&session, 0, true, |_, _| {}, || false)
+        .await
+        .expect("pull must finish despite >5 total session drops");
+    assert_eq!(result.data, payload, "byte-exact across many reconnects");
+    assert!(result.crc_verified);
+
+    let _ = cancel_tx.send(());
+    let _ = handle.await;
+}
