@@ -1449,7 +1449,10 @@ mod tests {
             EcuPitDiagFrame::Dv(d) => {
                 assert!(d.as_emergency && d.as_fresh);
                 assert!(!d.as_from_stale);
-                assert!(!d.dv_r2d_req && !d.r2d_confirm, "low handshake bits stay clear");
+                assert!(
+                    !d.dv_r2d_req && !d.r2d_confirm,
+                    "low handshake bits stay clear"
+                );
                 assert_eq!(d.as_status, EcuAsStatus::Driving);
             }
             other => panic!("expected Dv, got {other:?}"),

@@ -407,6 +407,11 @@ fn signal_layouts_match_the_decoder() {
 
 // ---- Enum value tables -------------------------------------------
 
+/// `UDV_as_status` (1290 / `0x50A`) — a uDV bus message, not a pit-diag frame.
+/// It is referenced here only because it owns the `VAL_` table for the
+/// `as_status` byte the ECU mirrors into `PitDiag_dv`.
+const UDV_AS_STATUS_ID: u16 = 0x50A;
+
 fn val_table(dbc: &Dbc, msg_id: u16, signal: &str) -> Vec<(i64, String)> {
     let mut v: Vec<(i64, String)> = dbc
         .value_descriptions_for_signal(MessageId::Standard(msg_id), signal)
@@ -565,6 +570,47 @@ fn cal_status_value_table_matches_decoder() {
             "cal_status {raw} ({name}) fallback classification"
         );
     }
+}
+
+/// `as_status` is the one decoder enum whose value table does **not** live
+/// on the message that carries it. `PitDiag_dv` declares the signal with no
+/// `VAL_` of its own — the ECU is mirroring a byte the uDV owns, and the names
+/// are published once, on `UDV_as_status` (`0x50A`).
+///
+/// That indirection is exactly why this test exists. Nothing about
+/// `PitDiag_dv` changes if the uDV renumbers the enum, so a decoder that
+/// hardcoded the labels from the ECU's frame alone would drift silently and
+/// the layout assertions above would keep passing.
+#[test]
+fn as_status_value_table_matches_decoder() {
+    let dbc = load();
+    let dbc_table = val_table(&dbc, UDV_AS_STATUS_ID, "as_status");
+    assert_eq!(
+        dbc_table,
+        table(&[
+            (0, "Off"),
+            (1, "Emergency"),
+            (2, "Ready"),
+            (3, "Driving"),
+            (4, "Finished"),
+        ])
+    );
+    for (raw, name) in &dbc_table {
+        let decoded = ecu::EcuAsStatus::from_byte(u8::try_from(*raw).unwrap());
+        assert!(
+            !matches!(decoded, ecu::EcuAsStatus::Other(_)),
+            "as_status {raw} ({name}) is named in the DBC but decodes to Other"
+        );
+        assert_eq!(
+            decoded.as_str(),
+            name.to_lowercase(),
+            "as_status {raw} label drifted"
+        );
+    }
+    // The field is a full byte and the DBC names only 0..=4, so everything
+    // above must fall through rather than aliasing onto a real state.
+    assert_eq!(ecu::EcuAsStatus::from_byte(5), ecu::EcuAsStatus::Other(5));
+    assert_eq!(ecu::EcuAsStatus::from_byte(0xFF).as_str(), "unknown");
 }
 
 #[test]
