@@ -139,6 +139,12 @@ export function foldFrames(stdout: string): AppNode[] {
             case 'ecuBrake':
             case 'ecuInverterTemps':
             case 'ecuDv':
+            case 'ecuInvFaults':
+            case 'ecuCell':
+            case 'ecuPackTemp':
+            case 'ecuInvFoc':
+            case 'ecuInvTorque':
+            case 'ecuPower':
                 ensureEcu();
                 break;
             default:

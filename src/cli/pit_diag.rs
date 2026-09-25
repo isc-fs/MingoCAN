@@ -928,6 +928,62 @@ fn print_ecu_human(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             d.as_fresh as u8,
             d.as_from_stale as u8,
         ),
+        F::Cell(c) => println!(
+            "{prefix} cell  raw={}mV ocv={}mV comp={:+}mV cap={}% [comp={} floor={} capped={}]",
+            c.raw_mv,
+            c.est_ocv_mv,
+            c.comp_mv,
+            c.cap_pct,
+            c.compensated as u8,
+            c.raw_floor as u8,
+            c.capped as u8,
+        ),
+        F::PackTemp(t) => {
+            let mods: String = t
+                .modules_used
+                .iter()
+                .enumerate()
+                .map(|(m, used)| if *used { char::from(b'0' + m as u8) } else { '-' })
+                .collect();
+            println!(
+                "{prefix} pack  used={}°C raw={}°C cap={}% modules_used[{mods}] [unknown={} capped={}]",
+                t.pack_temp_used_degc,
+                t.pack_temp_raw_degc,
+                t.pack_cap_pct,
+                t.pack_unknown as u8,
+                t.pack_capped as u8,
+            );
+        }
+        F::InvFoc(f) => println!(
+            "{prefix} foc   Id={:.2}A Iq={:.2}A vmod={}‰ mode={} type={} src={} fresh[s4={} s6={} s8={} s9={}]",
+            f.current_d_a(),
+            f.current_q_a(),
+            f.volt_modulus_permil,
+            f.ctrl_mode,
+            f.ctrl_type,
+            f.cmd_src,
+            f.s4_fresh as u8,
+            f.s6_fresh as u8,
+            f.s8_fresh as u8,
+            f.s9_fresh as u8,
+        ),
+        F::InvTorque(t) => println!(
+            // max_feas is deliberately printed raw: its unit (Nm vs deci-Nm)
+            // is unresolved upstream.
+            "{prefix} torq  req={}Nm max_feas={}(raw) est={}Nm Iq_sp={:.2}A",
+            t.torque_req_nm,
+            t.torque_max_feas_raw,
+            t.torque_est_nm,
+            t.setpoint_q_a(),
+        ),
+        F::Power(w) => println!(
+            "{prefix} power shaft={}W ac={}W dc={}V×{:.1}A={:.0}W",
+            w.shaft_power_w(),
+            w.ac_power_w(),
+            w.dc_bus_v,
+            w.accu_current_a(),
+            w.dc_power_w(),
+        ),
     }
 }
 
@@ -1049,6 +1105,46 @@ fn print_ecu_json(ts_ms: u64, record: &ecu::EcuPitDiagFrame) {
             d.dv_torque_pct,
             d.motor_rpm_mech,
             d.as_status.as_str(),
+        ),
+        // Scaled fields go out as the exact raw count (like brakePressureDbar);
+        // consumers apply the scale named in the field.
+        F::Cell(c) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"ecuCell","rawMv":{},"estOcvMv":{},"compMv":{},"capPct":{},"compensated":{},"rawFloor":{},"capped":{}}}"#,
+            c.raw_mv, c.est_ocv_mv, c.comp_mv, c.cap_pct, c.compensated, c.raw_floor, c.capped,
+        ),
+        F::PackTemp(t) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"ecuPackTemp","packTempUsedDegc":{},"packTempRawDegc":{},"packCapPct":{},"modulesUsed":[{}],"packUnknown":{},"packCapped":{}}}"#,
+            t.pack_temp_used_degc,
+            t.pack_temp_raw_degc,
+            t.pack_cap_pct,
+            t.modules_used
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            t.pack_unknown,
+            t.pack_capped,
+        ),
+        F::InvFoc(f) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"ecuInvFoc","currentDRaw":{},"currentQRaw":{},"voltModulusPermil":{},"ctrlMode":{},"ctrlType":{},"cmdSrc":{},"s4Fresh":{},"s6Fresh":{},"s8Fresh":{},"s9Fresh":{}}}"#,
+            f.current_d_raw,
+            f.current_q_raw,
+            f.volt_modulus_permil,
+            f.ctrl_mode,
+            f.ctrl_type,
+            f.cmd_src,
+            f.s4_fresh,
+            f.s6_fresh,
+            f.s8_fresh,
+            f.s9_fresh,
+        ),
+        F::InvTorque(t) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"ecuInvTorque","torqueReqNm":{},"torqueMaxFeasRaw":{},"torqueEstNm":{},"setpointQRaw":{}}}"#,
+            t.torque_req_nm, t.torque_max_feas_raw, t.torque_est_nm, t.setpoint_q_raw,
+        ),
+        F::Power(w) => println!(
+            r#"{{"tsMs":{ts_ms},"kind":"ecuPower","shaftPowerRaw":{},"acPowerRaw":{},"dcBusV":{},"accuCurrentRaw":{}}}"#,
+            w.shaft_power_raw, w.ac_power_raw, w.dc_bus_v, w.accu_current_raw,
         ),
     }
 }

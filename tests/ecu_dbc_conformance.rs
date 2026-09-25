@@ -36,10 +36,12 @@
 
 use can_dbc::{ByteOrder, Dbc, MessageId, ValueType};
 use can_flasher::pit_diag::ecu::{
-    self, ECU_ACK_ID, ECU_ARM_ID, ECU_BRAKE_ID, ECU_DV_ID, ECU_EXPECTED_FRAMES_PER_SCAN,
-    ECU_FWINFO_ID, ECU_HEALTH_ID, ECU_INVERTER_ID, ECU_INVERTER_TEMPS_ID, ECU_INV_FAULTS_ID,
-    ECU_PEDALS_ID, ECU_STATUS_ID,
+    self, EcuPitDiagFrame, ECU_ACK_ID, ECU_ARM_ID, ECU_BRAKE_ID, ECU_CELL_ID, ECU_DV_ID,
+    ECU_EXPECTED_FRAMES_PER_SCAN, ECU_FWINFO_ID, ECU_HEALTH_ID, ECU_INVERTER_ID,
+    ECU_INVERTER_TEMPS_ID, ECU_INV_FAULTS_ID, ECU_INV_FOC_ID, ECU_INV_TORQUE_ID, ECU_PACK_TEMP_ID,
+    ECU_PEDALS_ID, ECU_POWER_ID, ECU_STATUS_ID,
 };
+use can_flasher::protocol::CanFrame;
 
 const ECU_DBC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -83,6 +85,11 @@ const KNOWN_PIT_DIAG_MESSAGES: &[(&str, u16)] = &[
     ("PitDiag_inverter_temps", ECU_INVERTER_TEMPS_ID),
     ("PitDiag_dv", ECU_DV_ID),
     ("PitDiag_inv_faults", ECU_INV_FAULTS_ID),
+    ("PitDiag_cell", ECU_CELL_ID),
+    ("PitDiag_pack_temp", ECU_PACK_TEMP_ID),
+    ("PitDiag_inv_foc", ECU_INV_FOC_ID),
+    ("PitDiag_inv_torque", ECU_INV_TORQUE_ID),
+    ("PitDiag_power", ECU_POWER_ID),
 ];
 
 /// `PitDiag_*` frames present upstream that this decoder does NOT yet
@@ -97,19 +104,7 @@ const KNOWN_PIT_DIAG_MESSAGES: &[(&str, u16)] = &[
 ///
 /// Adding an entry here is a deliberate act: anything in it is a frame the
 /// tool silently drops on the floor.
-const DEFERRED_PIT_DIAG_MESSAGES: &[(&str, &str)] = &[
-    ("PitDiag_cell", "#566 - per-cell OCV/compensation detail"),
-    ("PitDiag_pack_temp", "#566 - pack thermal derate detail"),
-    (
-        "PitDiag_inv_foc",
-        "#566 - inverter FOC currents + control mode",
-    ),
-    (
-        "PitDiag_inv_torque",
-        "#566 - inverter torque request/estimate",
-    ),
-    ("PitDiag_power", "#566 - shaft/AC power + DC bus"),
-];
+const DEFERRED_PIT_DIAG_MESSAGES: &[(&str, &str)] = &[];
 
 // ---- Message set + IDs -------------------------------------------
 
@@ -190,6 +185,11 @@ fn message_lengths_match_the_decoder_minimums() {
         ("PitDiag_inverter_temps", 7),
         ("PitDiag_dv", 8),
         ("PitDiag_inv_faults", 7),
+        ("PitDiag_cell", 8),
+        ("PitDiag_pack_temp", 6),
+        ("PitDiag_inv_foc", 8),
+        ("PitDiag_inv_torque", 8),
+        ("PitDiag_power", 8),
     ];
     for (name, dlc) in expected {
         assert_eq!(
@@ -403,6 +403,272 @@ fn signal_layouts_match_the_decoder() {
         ]),
         "0x708 layout drifted"
     );
+
+    // 0x709 — Motorola 16-bit fields (start = MSB of the first byte).
+    assert_eq!(
+        layout(&dbc, "PitDiag_cell"),
+        expect(&[
+            ("raw_mV", 7, 16, true, false),
+            ("est_ocv_mV", 23, 16, true, false),
+            ("comp_mV", 39, 16, true, true),
+            ("cap_pct", 48, 8, false, false),
+            ("compensated", 56, 1, false, false),
+            ("raw_floor", 57, 1, false, false),
+            ("capped", 58, 1, false, false),
+        ]),
+        "0x709 layout drifted"
+    );
+
+    // 0x70A — Motorola signed temperatures; module mask + status in byte 5.
+    assert_eq!(
+        layout(&dbc, "PitDiag_pack_temp"),
+        expect(&[
+            ("pack_temp_used_degC", 7, 16, true, true),
+            ("pack_temp_raw_degC", 23, 16, true, true),
+            ("pack_cap_pct", 32, 8, false, false),
+            ("mod0_used", 40, 1, false, false),
+            ("mod1_used", 41, 1, false, false),
+            ("mod2_used", 42, 1, false, false),
+            ("mod3_used", 43, 1, false, false),
+            ("mod4_used", 44, 1, false, false),
+            ("pack_unknown", 45, 1, false, false),
+            ("pack_capped", 46, 1, false, false),
+        ]),
+        "0x70A layout drifted"
+    );
+
+    // 0x70B — Intel throughout; three 4-bit enums packed two per byte.
+    assert_eq!(
+        layout(&dbc, "PitDiag_inv_foc"),
+        expect(&[
+            ("current_d_A", 0, 16, false, true),
+            ("current_q_A", 16, 16, false, true),
+            ("volt_modulus", 32, 16, false, false),
+            ("ctrl_mode", 48, 4, false, false),
+            ("ctrl_type", 52, 4, false, false),
+            ("cmd_src", 56, 4, false, false),
+            ("s4_fresh", 60, 1, false, false),
+            ("s6_fresh", 61, 1, false, false),
+            ("s8_fresh", 62, 1, false, false),
+            ("s9_fresh", 63, 1, false, false),
+        ]),
+        "0x70B layout drifted"
+    );
+
+    // 0x70C — four signed Intel 16-bit fields.
+    assert_eq!(
+        layout(&dbc, "PitDiag_inv_torque"),
+        expect(&[
+            ("torque_req", 0, 16, false, true),
+            ("torque_max_feas", 16, 16, false, true),
+            ("torque_est", 32, 16, false, true),
+            ("setpoint_q", 48, 16, false, true),
+        ]),
+        "0x70C layout drifted"
+    );
+
+    // 0x70D — Intel; dc_bus_V is the only unsigned field.
+    assert_eq!(
+        layout(&dbc, "PitDiag_power"),
+        expect(&[
+            ("shaft_power", 0, 16, false, true),
+            ("ac_power", 16, 16, false, true),
+            ("dc_bus_V", 32, 16, false, false),
+            ("accu_current", 48, 16, false, true),
+        ]),
+        "0x70D layout drifted"
+    );
+}
+
+// ---- DBC-driven round trip ---------------------------------------
+//
+// The layout test above compares the DBC against a hand-written list, and
+// the unit tests in ecu.rs check the decoder against hand-built bytes —
+// neither ties the decoder to the DBC's bit positions directly. For frames
+// that mix Motorola and Intel fields that gap is where a byte-order bug
+// hides. So: pack raw signal values into a frame using ONLY the DBC's own
+// start bit / size / byte order / scale, run it through `decode_frame`,
+// and check every field comes back.
+
+/// Set `value` (two's complement, low `size` bits) into `data` at a DBC
+/// signal position. Intel: `start` is the LSB, bits ascend. Motorola:
+/// `start` is the MSB and bits walk the DBC "sawtooth" (down within a
+/// byte, then to bit 7 of the next byte).
+fn put_signal(data: &mut [u8; 8], sig: &can_dbc::Signal, value: i64) {
+    let size = sig.size as i64;
+    let bit_of = |i: i64| (value >> i) & 1 == 1;
+    match sig.byte_order {
+        ByteOrder::LittleEndian => {
+            for i in 0..size {
+                let pos = sig.start_bit as i64 + i;
+                if bit_of(i) {
+                    data[(pos / 8) as usize] |= 1 << (pos % 8);
+                }
+            }
+        }
+        ByteOrder::BigEndian => {
+            let mut pos = sig.start_bit as i64;
+            for i in (0..size).rev() {
+                if bit_of(i) {
+                    data[(pos / 8) as usize] |= 1 << (pos % 8);
+                }
+                pos = if pos % 8 == 0 { pos + 15 } else { pos - 1 };
+            }
+        }
+    }
+}
+
+/// Pack a whole message from `(signal, physical value)` pairs, converting
+/// through the DBC's own factor so a scale mismatch fails too.
+fn pack(dbc: &Dbc, msg: &str, values: &[(&str, f64)]) -> CanFrame {
+    let m = message(dbc, msg);
+    assert_eq!(
+        m.signals.len(),
+        values.len(),
+        "{msg}: give a value for every signal so none goes untested"
+    );
+    let mut data = [0u8; 8];
+    for (name, phys) in values {
+        let sig = m
+            .signals
+            .iter()
+            .find(|s| s.name == *name)
+            .unwrap_or_else(|| panic!("{msg} has no signal {name}"));
+        let raw = ((phys - sig.offset) / sig.factor).round() as i64;
+        put_signal(&mut data, sig, raw);
+    }
+    let id = msg_id_u32(&m.id) as u16;
+    CanFrame::new(id, &data[..m.size as usize]).unwrap()
+}
+
+#[test]
+fn new_frames_round_trip_through_the_dbc_encoding() {
+    let dbc = load();
+
+    // Values chosen so every 16-bit field has distinct high/low bytes
+    // (a byte-swap can't pass by symmetry) and signed fields go negative.
+    let f = pack(
+        &dbc,
+        "PitDiag_cell",
+        &[
+            ("raw_mV", 3412.0),
+            ("est_ocv_mV", 3587.0),
+            ("comp_mV", -175.0),
+            ("cap_pct", 64.0),
+            ("compensated", 1.0),
+            ("raw_floor", 0.0),
+            ("capped", 1.0),
+        ],
+    );
+    match ecu::decode_frame(&f).expect("0x709 decodes") {
+        EcuPitDiagFrame::Cell(c) => {
+            assert_eq!(
+                (c.raw_mv, c.est_ocv_mv, c.comp_mv, c.cap_pct),
+                (3412, 3587, -175, 64)
+            );
+            assert_eq!((c.compensated, c.raw_floor, c.capped), (true, false, true));
+        }
+        other => panic!("0x709 decoded as {other:?}"),
+    }
+
+    let f = pack(
+        &dbc,
+        "PitDiag_pack_temp",
+        &[
+            ("pack_temp_used_degC", 47.0),
+            ("pack_temp_raw_degC", -12.0),
+            ("pack_cap_pct", 83.0),
+            ("mod0_used", 1.0),
+            ("mod1_used", 0.0),
+            ("mod2_used", 1.0),
+            ("mod3_used", 1.0),
+            ("mod4_used", 0.0),
+            ("pack_unknown", 0.0),
+            ("pack_capped", 1.0),
+        ],
+    );
+    match ecu::decode_frame(&f).expect("0x70A decodes") {
+        EcuPitDiagFrame::PackTemp(t) => {
+            assert_eq!(
+                (t.pack_temp_used_degc, t.pack_temp_raw_degc, t.pack_cap_pct),
+                (47, -12, 83)
+            );
+            assert_eq!(t.modules_used, [true, false, true, true, false]);
+            assert_eq!((t.pack_unknown, t.pack_capped), (false, true));
+        }
+        other => panic!("0x70A decoded as {other:?}"),
+    }
+
+    let f = pack(
+        &dbc,
+        "PitDiag_inv_foc",
+        &[
+            ("current_d_A", -42.5),
+            ("current_q_A", 187.25),
+            ("volt_modulus", 947.0),
+            ("ctrl_mode", 3.0),
+            ("ctrl_type", 10.0),
+            ("cmd_src", 6.0),
+            ("s4_fresh", 1.0),
+            ("s6_fresh", 0.0),
+            ("s8_fresh", 1.0),
+            ("s9_fresh", 1.0),
+        ],
+    );
+    match ecu::decode_frame(&f).expect("0x70B decodes") {
+        EcuPitDiagFrame::InvFoc(r) => {
+            assert_eq!((r.current_d_a(), r.current_q_a()), (-42.5, 187.25));
+            assert_eq!(r.volt_modulus_permil, 947);
+            assert_eq!((r.ctrl_mode, r.ctrl_type, r.cmd_src), (3, 10, 6));
+            assert_eq!(
+                (r.s4_fresh, r.s6_fresh, r.s8_fresh, r.s9_fresh),
+                (true, false, true, true)
+            );
+        }
+        other => panic!("0x70B decoded as {other:?}"),
+    }
+
+    let f = pack(
+        &dbc,
+        "PitDiag_inv_torque",
+        &[
+            ("torque_req", -123.0),
+            ("torque_max_feas", 1450.0),
+            ("torque_est", -118.0),
+            ("setpoint_q", -96.5),
+        ],
+    );
+    match ecu::decode_frame(&f).expect("0x70C decodes") {
+        EcuPitDiagFrame::InvTorque(t) => {
+            assert_eq!(
+                (t.torque_req_nm, t.torque_max_feas_raw, t.torque_est_nm),
+                (-123, 1450, -118)
+            );
+            assert_eq!(t.setpoint_q_a(), -96.5);
+        }
+        other => panic!("0x70C decoded as {other:?}"),
+    }
+
+    let f = pack(
+        &dbc,
+        "PitDiag_power",
+        &[
+            ("shaft_power", 71_230.0),
+            ("ac_power", -5_430.0),
+            ("dc_bus_V", 561.0),
+            ("accu_current", -134.7),
+        ],
+    );
+    match ecu::decode_frame(&f).expect("0x70D decodes") {
+        EcuPitDiagFrame::Power(w) => {
+            assert_eq!(
+                (w.shaft_power_w(), w.ac_power_w(), w.dc_bus_v),
+                (71_230, -5_430, 561)
+            );
+            assert_eq!(w.accu_current_raw, -1347);
+        }
+        other => panic!("0x70D decoded as {other:?}"),
+    }
 }
 
 // ---- Enum value tables -------------------------------------------
