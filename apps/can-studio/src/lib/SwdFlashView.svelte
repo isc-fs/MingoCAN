@@ -440,11 +440,19 @@
             </select>
         </label>
         {#if provisionRole === null}
-            <p class="muted small">
-                The SWD burn writes the bootloader (same binary on every
-                board), so it can't tell which board this is. Pick the role to
-                set the node-id over SWD in the same burn — no CAN adapter.
-            </p>
+            <!--
+                A stock bootloader's compile-time node-id is 0x1 — the ECU's
+                address — so an unprovisioned board impersonates the ECU on
+                a shared bus. That's easy to miss when this defaults to
+                "Don't provision", so say it loudly.
+            -->
+            <div class="banner banner-warning small">
+                <strong>This board won't be provisioned.</strong> It will answer
+                as node <code>0x1</code> — the stock bootloader's default, which is
+                the <strong>ECU's</strong> address — and collide with the ECU on a
+                shared bus until you give it an ID. Pick its role to set the
+                node-id over SWD in this burn.
+            </div>
         {:else}
             <p class="muted small">
                 This board will be provisioned as

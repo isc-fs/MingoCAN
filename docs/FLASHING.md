@@ -165,7 +165,9 @@ and its node ID go on together.
 The node ID is written as a provisioning seed that the bootloader adopts into
 its NVM on first boot. This needs a bootloader built with seed support
 (stm32-can-bootloader#183); an older one is refused before the chip is erased.
-Burned without a role, the board answers on the unprovisioned address `0xF`.
+Burned without a role, the board answers as **`0x01`** — the stock bootloader's
+compile-time default, which is the **ECU's** address — so on a shared bus it
+collides with the ECU until it is provisioned. Provision at burn time.
 
 To change the node ID of a board that is already running, use
 [`provision`](CLI.md#provision--assign-a-node-id-by-role) over CAN.

@@ -83,8 +83,11 @@ The PCAN and Vector SDKs are loaded at runtime and cannot be bundled — see
 | AMS | `0x02` | Accumulator management system |
 | uDV | `0x03` | Driverless supervisor |
 
-A board that has never been commissioned answers on `0xF` until you
-[provision](docs/CLI.md#provision--assign-a-node-id-by-role) it.
+A board that has never been commissioned answers as **`0x01`** — the stock
+bootloader's default, which is the ECU's address — until you provision it.
+Provision it when you burn the bootloader
+([`swd-flash --provision`](docs/CLI.md#swd-flash---provision-role0xn--burn-and-provision-in-one-step)),
+or later over CAN with [`provision`](docs/CLI.md#provision--assign-a-node-id-by-role).
 
 ## Documentation
 

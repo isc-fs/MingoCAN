@@ -70,7 +70,10 @@ no single default.
 | `discover`, `pit-diag`, `replay`, `adapters` | not used — broadcast or passive |
 
 Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`. A board that has never been
-commissioned answers on `0xF`.
+commissioned answers on the bootloader's compile-time default — **`0x01` for a
+stock build, the ECU's address** — so on a shared bus it collides with the ECU
+until it is provisioned. (`0xF` is broadcast: addressing it reaches a lone
+board whatever its ID, which is why the `provision` examples below use it.)
 
 Every subcommand has its own `--help` with the complete flag list.
 

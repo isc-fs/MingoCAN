@@ -108,8 +108,10 @@ and **Options**. Needs the ST-LINK setup from
 Set **Provision node-id** to the board's role to commission it in the same
 burn: the node ID is written over SWD, no CAN adapter needed. This needs a
 bootloader built with seed support; an older image is refused before anything
-is erased. Without a role, the board answers on CAN at the unprovisioned
-address `0xF`. Either way, Flash works normally afterwards.
+is erased. Without a role, the board answers as **`0x01`** — the stock
+bootloader's default, which is the **ECU's** address — so on a shared bus it
+collides with the ECU until provisioned; the view warns when you leave it on
+*Don't provision*. Either way, Flash works normally afterwards.
 
 ---
 
@@ -220,7 +222,8 @@ Boards are addressed by a 4-bit node ID. The app lets you pick by role:
 | AMS | `0x02` |
 | uDV | `0x03` |
 
-A board that has never been commissioned answers on `0xF`. Give it a real ID
+A board that has never been commissioned answers as `0x01` — the stock
+bootloader's default, and the ECU's address. Give it a real ID
 when you burn its bootloader (**Provision node-id**, over SWD). For a board
 that's already running, use the CLI's
 [`provision`](CLI.md#provision--assign-a-node-id-by-role) command or accept the
