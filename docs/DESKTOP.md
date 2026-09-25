@@ -105,8 +105,11 @@ Three sections: **Probe** (the ST-LINK), **Firmware** (the bootloader image),
 and **Options**. Needs the ST-LINK setup from
 [INSTALL.md](INSTALL.md#st-link--swd-optional).
 
-Afterwards the board answers on CAN at the unprovisioned address `0xF`, and
-Flash works normally.
+Set **Provision node-id** to the board's role to commission it in the same
+burn: the node ID is written over SWD, no CAN adapter needed. This needs a
+bootloader built with seed support; an older image is refused before anything
+is erased. Without a role, the board answers on CAN at the unprovisioned
+address `0xF`. Either way, Flash works normally afterwards.
 
 ---
 
@@ -218,8 +221,10 @@ Boards are addressed by a 4-bit node ID. The app lets you pick by role:
 | uDV | `0x03` |
 
 A board that has never been commissioned answers on `0xF`. Give it a real ID
-with the CLI's [`provision`](CLI.md#provision--assign-a-node-id-by-role)
-command, or accept the prompt the Flash view offers after a successful flash.
+when you burn its bootloader (**Provision node-id**, over SWD). For a board
+that's already running, use the CLI's
+[`provision`](CLI.md#provision--assign-a-node-id-by-role) command or accept the
+prompt the Flash view offers after a successful flash.
 
 ---
 

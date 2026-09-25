@@ -27,6 +27,12 @@ export interface SwdFlashArgs {
      * callers can leave it out.
      */
     sectorEraseOnly?: boolean;
+    /**
+     * Provision the board as this CAN node-id over SWD in the same burn.
+     * Omitted / null = burn only. Refused up-front (nothing written) if
+     * the bootloader image can't adopt a provisioning seed.
+     */
+    provisionNodeId?: number | null;
 }
 
 export function defaultSwdFlashArgs(): SwdFlashArgs {
@@ -60,6 +66,8 @@ export interface SwdFlashReport {
     crc32Hex: string;
     sizeBytes: number;
     targetVoltageV: number | null;
+    /** Node-id programmed over SWD and verified; null when not provisioning. */
+    provisionedNodeId: number | null;
 }
 
 export function swdFlash(args: SwdFlashArgs): Promise<SwdFlashReport> {
