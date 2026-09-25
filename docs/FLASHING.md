@@ -155,17 +155,22 @@ application flash.
 
 ## Commissioning a new board
 
-A board fresh off the bench needs two things, over two different transports:
+A board fresh off the bench is commissioned in **one SWD step**: the bootloader
+and its node ID go on together.
 
-1. **The bootloader**, over SWD — *Burn bootloader*, or `swd-flash` on the CLI.
-2. **A node ID**, over CAN — written by the now-running bootloader into NVM.
+- **App:** *Burn bootloader*, with **Provision node-id** set to the board's role.
+- **CLI:** `can-flasher swd-flash CAN_BL.elf --provision <role>` — see
+  [`swd-flash --provision`](CLI.md#swd-flash---provision-role0xn--burn-and-provision-in-one-step).
 
-They cannot be one step because they are different transports. Until step 2, the
-board answers on the unprovisioned address `0xF`.
+The node ID is written as a provisioning seed that the bootloader adopts into
+its NVM on first boot. This needs a bootloader built with seed support
+(stm32-can-bootloader#183); an older one is refused before the chip is erased.
+Burned without a role, the board answers as **`0x01`** — the stock bootloader's
+compile-time default, which is the **ECU's** address — so on a shared bus it
+collides with the ECU until it is provisioned. Provision at burn time.
 
-In the app, after a successful flash to a board with a known role, you're
-offered the node-ID write as a follow-up. On the CLI it is
-[`provision`](CLI.md#provision--assign-a-node-id-by-role).
+To change the node ID of a board that is already running, use
+[`provision`](CLI.md#provision--assign-a-node-id-by-role) over CAN.
 
 ---
 

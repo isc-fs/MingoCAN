@@ -64,6 +64,12 @@ pub struct SwdFlashArgs {
     /// inherit the safe default.
     #[serde(default)]
     pub sector_erase_only: Option<bool>,
+    /// Provision the board as this CAN node-id over SWD, in the same
+    /// burn (a provisioning seed the bootloader adopts on first boot).
+    /// `None` = burn only. The library refuses — before touching the
+    /// chip — an image that can't adopt a seed.
+    #[serde(default)]
+    pub provision_node_id: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +91,9 @@ pub struct SwdFlashReportDto {
     pub size_bytes: u64,
     /// VTref in volts, when the probe reports it.
     pub target_voltage_v: Option<f32>,
+    /// Node-id programmed over SWD and read back through the
+    /// bootloader's own seed checks; `None` when not provisioning.
+    pub provisioned_node_id: Option<u8>,
 }
 
 impl From<SwdFlashReport> for SwdFlashReportDto {
@@ -94,6 +103,7 @@ impl From<SwdFlashReport> for SwdFlashReportDto {
             crc32_hex: format!("0x{:08X}", r.crc32),
             size_bytes: r.size_bytes,
             target_voltage_v: r.target_voltage_v,
+            provisioned_node_id: r.seeded_node_id,
         }
     }
 }
@@ -222,6 +232,7 @@ pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<SwdFlashRep
     // library default and keeps older UI builds on the safe path
     // even before the toggle gets wired in.
     request.sector_erase_only = args.sector_erase_only.unwrap_or(false);
+    request.seed_node_id = args.provision_node_id;
 
     // probe-rs's progress closure runs on the blocking thread we're
     // about to spawn. Send the events back to the async runtime via
