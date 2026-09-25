@@ -39,8 +39,9 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use can_flasher::pit_diag::ecu::{
-    self, EcuBrakeFrame, EcuCalStatus, EcuDvFrame, EcuFsmState, EcuFwInfoFrame, EcuHealthFrame,
-    EcuInvState, EcuInverterFrame, EcuInverterTempsFrame, EcuPedalsFrame, EcuPitDiagFrame,
+    self, EcuBrakeFrame, EcuCalStatus, EcuCellFrame, EcuDvFrame, EcuFsmState, EcuFwInfoFrame,
+    EcuHealthFrame, EcuInvFocFrame, EcuInvState, EcuInvTorqueFrame, EcuInverterFrame,
+    EcuInverterTempsFrame, EcuPackTempFrame, EcuPedalsFrame, EcuPitDiagFrame, EcuPowerFrame,
     EcuResetCause, EcuStatusFrame, ECU_ACK_ID,
 };
 use can_flasher::pit_diag::udv::{
@@ -575,6 +576,58 @@ pub enum PitDiagEvent {
         /// / `ready` / `driving` / `finished` / `unknown`).
         as_status: String,
     },
+    // ECU 0x709..0x70D (#566). Scaled fields cross as the exact raw count,
+    // like `brake_pressure_dbar`; the frontend applies the scale named in
+    // each field (`pit_diag.ts` holds the constants).
+    /// ECU `0x709` — low-cell derate estimator.
+    EcuCell {
+        raw_mv: u16,
+        est_ocv_mv: u16,
+        comp_mv: i16,
+        cap_pct: u8,
+        compensated: bool,
+        raw_floor: bool,
+        capped: bool,
+    },
+    /// ECU `0x70A` — pack thermal cap + which modules fed it.
+    EcuPackTemp {
+        pack_temp_used_degc: i16,
+        pack_temp_raw_degc: i16,
+        pack_cap_pct: u8,
+        modules_used: [bool; 5],
+        pack_unknown: bool,
+        pack_capped: bool,
+    },
+    /// ECU `0x70B` — inverter FOC feedback. d/q currents are 1/32 A counts;
+    /// the three control codes are raw (no name table exists upstream).
+    EcuInvFoc {
+        current_d_raw: i16,
+        current_q_raw: i16,
+        volt_modulus_permil: u16,
+        ctrl_mode: u8,
+        ctrl_type: u8,
+        cmd_src: u8,
+        s4_fresh: bool,
+        s6_fresh: bool,
+        s8_fresh: bool,
+        s9_fresh: bool,
+    },
+    /// ECU `0x70C` — torque request / max-feasible (raw, unit unresolved)
+    /// / estimate, + the Iq setpoint in 1/32 A counts.
+    EcuInvTorque {
+        torque_req_nm: i16,
+        torque_max_feas_raw: i16,
+        torque_est_nm: i16,
+        setpoint_q_raw: i16,
+    },
+    /// ECU `0x70D` — shaft / AC power (10 W counts), DC bus (V), accumulator
+    /// current (0.1 A counts).
+    EcuPower {
+        shaft_power_raw: i16,
+        ac_power_raw: i16,
+        dc_bus_v: u16,
+        accu_current_raw: i16,
+    },
     /// AMS `0x6CA` — ungated firmware health (#411). Field names mirror
     /// `EcuHealth` so the frontend renders both boards' health uniformly.
     AmsHealth {
@@ -1018,6 +1071,83 @@ impl PitDiagEvent {
                 motor_rpm_mech,
                 as_status: as_status.as_str().to_string(),
             },
+            EcuPitDiagFrame::Cell(EcuCellFrame {
+                raw_mv,
+                est_ocv_mv,
+                comp_mv,
+                cap_pct,
+                compensated,
+                raw_floor,
+                capped,
+            }) => Self::EcuCell {
+                raw_mv,
+                est_ocv_mv,
+                comp_mv,
+                cap_pct,
+                compensated,
+                raw_floor,
+                capped,
+            },
+            EcuPitDiagFrame::PackTemp(EcuPackTempFrame {
+                pack_temp_used_degc,
+                pack_temp_raw_degc,
+                pack_cap_pct,
+                modules_used,
+                pack_unknown,
+                pack_capped,
+            }) => Self::EcuPackTemp {
+                pack_temp_used_degc,
+                pack_temp_raw_degc,
+                pack_cap_pct,
+                modules_used,
+                pack_unknown,
+                pack_capped,
+            },
+            EcuPitDiagFrame::InvFoc(EcuInvFocFrame {
+                current_d_raw,
+                current_q_raw,
+                volt_modulus_permil,
+                ctrl_mode,
+                ctrl_type,
+                cmd_src,
+                s4_fresh,
+                s6_fresh,
+                s8_fresh,
+                s9_fresh,
+            }) => Self::EcuInvFoc {
+                current_d_raw,
+                current_q_raw,
+                volt_modulus_permil,
+                ctrl_mode,
+                ctrl_type,
+                cmd_src,
+                s4_fresh,
+                s6_fresh,
+                s8_fresh,
+                s9_fresh,
+            },
+            EcuPitDiagFrame::InvTorque(EcuInvTorqueFrame {
+                torque_req_nm,
+                torque_max_feas_raw,
+                torque_est_nm,
+                setpoint_q_raw,
+            }) => Self::EcuInvTorque {
+                torque_req_nm,
+                torque_max_feas_raw,
+                torque_est_nm,
+                setpoint_q_raw,
+            },
+            EcuPitDiagFrame::Power(EcuPowerFrame {
+                shaft_power_raw,
+                ac_power_raw,
+                dc_bus_v,
+                accu_current_raw,
+            }) => Self::EcuPower {
+                shaft_power_raw,
+                ac_power_raw,
+                dc_bus_v,
+                accu_current_raw,
+            },
         }
     }
 
@@ -1412,4 +1542,103 @@ pub async fn pit_diag_disable(
     // the frontend a deterministic state to render to.
     let _ = app.emit(STATUS_EVENT, &PitDiagStatus::Stopped);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend reads these events by camelCase key. The serde gotcha
+    /// (container `rename_all` doesn't cascade to struct-variant fields) once
+    /// left every field `undefined`, so pin the exact wire shape of the #566
+    /// frames — the same keys the CLI's NDJSON emits.
+    #[test]
+    fn new_ecu_telemetry_events_serialize_with_camel_case_keys() {
+        let foc = PitDiagEvent::from_ecu(EcuPitDiagFrame::InvFoc(EcuInvFocFrame {
+            current_d_raw: -1360,
+            current_q_raw: 5992,
+            volt_modulus_permil: 947,
+            ctrl_mode: 3,
+            ctrl_type: 10,
+            cmd_src: 6,
+            s4_fresh: true,
+            s6_fresh: false,
+            s8_fresh: true,
+            s9_fresh: true,
+        }));
+        let v = serde_json::to_value(&foc).unwrap();
+        assert_eq!(v["kind"], "ecuInvFoc");
+        assert_eq!(v["currentDRaw"], -1360);
+        assert_eq!(v["currentQRaw"], 5992);
+        assert_eq!(v["voltModulusPermil"], 947);
+        assert_eq!(v["ctrlMode"], 3);
+        assert_eq!(v["s4Fresh"], true);
+
+        let pack = PitDiagEvent::from_ecu(EcuPitDiagFrame::PackTemp(EcuPackTempFrame {
+            pack_temp_used_degc: 47,
+            pack_temp_raw_degc: -12,
+            pack_cap_pct: 83,
+            modules_used: [true, false, true, true, false],
+            pack_unknown: false,
+            pack_capped: true,
+        }));
+        let v = serde_json::to_value(&pack).unwrap();
+        assert_eq!(v["kind"], "ecuPackTemp");
+        assert_eq!(v["packTempUsedDegc"], 47);
+        assert_eq!(
+            v["modulesUsed"],
+            serde_json::json!([true, false, true, true, false])
+        );
+
+        let power = PitDiagEvent::from_ecu(EcuPitDiagFrame::Power(EcuPowerFrame {
+            shaft_power_raw: 7123,
+            ac_power_raw: -543,
+            dc_bus_v: 561,
+            accu_current_raw: -1347,
+        }));
+        let v = serde_json::to_value(&power).unwrap();
+        assert_eq!(v["kind"], "ecuPower");
+        assert_eq!(
+            (
+                v["shaftPowerRaw"].clone(),
+                v["dcBusV"].clone(),
+                v["accuCurrentRaw"].clone()
+            ),
+            (
+                serde_json::json!(7123),
+                serde_json::json!(561),
+                serde_json::json!(-1347)
+            )
+        );
+
+        for (event, kind, key) in [
+            (
+                PitDiagEvent::from_ecu(EcuPitDiagFrame::Cell(EcuCellFrame {
+                    raw_mv: 3412,
+                    est_ocv_mv: 3587,
+                    comp_mv: -175,
+                    cap_pct: 64,
+                    compensated: true,
+                    raw_floor: false,
+                    capped: true,
+                })),
+                "ecuCell",
+                "estOcvMv",
+            ),
+            (
+                PitDiagEvent::from_ecu(EcuPitDiagFrame::InvTorque(EcuInvTorqueFrame {
+                    torque_req_nm: -123,
+                    torque_max_feas_raw: 1450,
+                    torque_est_nm: -118,
+                    setpoint_q_raw: -3088,
+                })),
+                "ecuInvTorque",
+                "torqueMaxFeasRaw",
+            ),
+        ] {
+            let v = serde_json::to_value(&event).unwrap();
+            assert_eq!(v["kind"], kind);
+            assert!(v.get(key).is_some(), "{kind} is missing {key}: {v}");
+        }
+    }
 }

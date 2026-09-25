@@ -109,6 +109,16 @@ pub struct SwdFlashRequest {
     /// Option bytes live in their own bank on STM32H7, so
     /// chip-erase of user flash doesn't touch them.
     pub sector_erase_only: bool,
+    /// When `Some(id)`, provision the board as node `id` over SWD: after
+    /// the burn, program a provisioning seed (see
+    /// [`crate::provision_seed`]) that the bootloader adopts into its NVM
+    /// on first boot — no CAN adapter, no boot round-trip.
+    ///
+    /// Checked before the probe is opened: the image must be an ELF built
+    /// with seed support (stm32-can-bootloader#183), the chip must be an
+    /// H72x/73x, and the burn must chip-erase (a sector-erase would leave
+    /// the old node-id in NVM, which wins over the seed).
+    pub seed_node_id: Option<u8>,
 }
 
 impl SwdFlashRequest {
@@ -124,6 +134,7 @@ impl SwdFlashRequest {
             verify: true,
             reset_after: true,
             sector_erase_only: false,
+            seed_node_id: None,
         }
     }
 }
@@ -163,6 +174,23 @@ pub enum SwdError {
         base: u64,
         bytes: usize,
     },
+    #[error(
+        "this bootloader image can't be provisioned over SWD: {reason}. Provisioning needs a \
+         bootloader built with seed support (stm32-can-bootloader#183) — nothing was written \
+         to the board"
+    )]
+    SeedUnsupported { reason: String },
+    #[error(
+        "SWD provisioning is only implemented for the STM32H72x/73x bootloader target, not {chip}"
+    )]
+    SeedChipUnsupported { chip: String },
+    #[error("programming the provisioning seed over SWD failed: {0}")]
+    SeedProgram(String),
+    #[error(
+        "the provisioning seed read back from the chip doesn't pass the bootloader's checks \
+         (wanted node-id 0x{node_id:X}) — the board would boot unprovisioned. Re-run the burn."
+    )]
+    SeedReadbackMismatch { node_id: u8 },
 }
 
 /// Enumerate every attached debug probe. Useful for an operator
@@ -241,6 +269,9 @@ pub struct SwdFlashReport {
     /// A low value here is one of the failure modes worth catching
     /// — a brown-out mid-write corrupts flash silently.
     pub target_voltage_v: Option<f32>,
+    /// The node-id seeded over SWD (see [`SwdFlashRequest::seed_node_id`]),
+    /// or `None` when seeding wasn't requested.
+    pub seeded_node_id: Option<u8>,
 }
 
 impl From<ProgressOperation> for SwdOperation {
@@ -297,6 +328,50 @@ where
             path: request.artifact_path.clone(),
         })?
         .to_ascii_lowercase();
+
+    // ---- Provisioning pre-flight --------------------------------------
+    //
+    // Every reason provisioning could fail silently is checked HERE,
+    // before the probe is opened — so a refusal never costs the operator
+    // an erased chip.
+    if let Some(id) = request.seed_node_id {
+        if !chip_supports_seed(&request.chip) {
+            return Err(SwdError::SeedChipUnsupported {
+                chip: request.chip.clone(),
+            });
+        }
+        crate::provision_seed::build_seed_record(id)
+            .map_err(|reason| SwdError::SeedUnsupported { reason })?;
+        if request.sector_erase_only {
+            // Without a chip-erase, sector 7 keeps the old NVM node-id and
+            // the bootloader's "NVM wins" rule ignores the seed: the board
+            // would silently keep its previous ID.
+            return Err(SwdError::SeedUnsupported {
+                reason: "provisioning needs the default chip-erase — with --sector-erase the old \
+                         node-id stays in NVM and the bootloader would ignore the new one"
+                    .into(),
+            });
+        }
+        match crate::provision_seed::bootloader_supports_seed(&request.artifact_path)
+            .map_err(|reason| SwdError::SeedUnsupported { reason })?
+        {
+            crate::provision_seed::SeedSupport::Supported => {}
+            crate::provision_seed::SeedSupport::NotSupported => {
+                return Err(SwdError::SeedUnsupported {
+                    reason: format!(
+                        "{} has no `{}` — it predates seed support",
+                        request.artifact_path.display(),
+                        crate::provision_seed::SEED_CONSUMER_SYMBOL
+                    ),
+                });
+            }
+            crate::provision_seed::SeedSupport::Unverifiable(why) => {
+                return Err(SwdError::SeedUnsupported {
+                    reason: format!("{why}; burn the bootloader's .elf to provision"),
+                });
+            }
+        }
+    }
 
     // Parse the artifact into a flat (base_addr, data) image. This
     // is the SAME view of "what bytes will land on chip" that the
@@ -541,6 +616,27 @@ where
         );
     }
 
+    // ---- Provisioning seed ---------------------------------------------
+    //
+    // After the image is on chip and verified, BEFORE the reset: program
+    // the seed so the bootloader finds it on its first boot and writes
+    // the node-id into its own NVM. Single flashword, register-level —
+    // see `program_provision_seed` for why it can't go through probe-rs.
+    let seeded_node_id = if let Some(id) = request.seed_node_id {
+        info!(
+            node_id = format!("0x{id:X}"),
+            "programming provisioning seed over SWD"
+        );
+        program_provision_seed(&mut session, id)?;
+        info!(
+            node_id = format!("0x{id:X}"),
+            "provisioning seed programmed + verified"
+        );
+        Some(id)
+    } else {
+        None
+    };
+
     // ---- Reset --------------------------------------------------------
     if request.reset_after {
         info!("resetting target");
@@ -566,7 +662,199 @@ where
         crc32: source_crc32,
         size_bytes: image_size as u64,
         target_voltage_v,
+        seeded_node_id,
     })
+}
+
+// ---- Single-flashword programming (provisioning seed) ---------------
+//
+// The seed is ONE 256-bit flashword. It must be programmed as exactly
+// that — not through probe-rs's flash algorithm, whose page on the
+// H72x/73x is 1 KiB (`stm32h72x-73x_1024`, page_size 0x400). A page
+// write pads the other 31 flashwords of 0x080FFC00..0x080FFFFF with
+// 0xFF *and programs them*, which on the H7 leaves them non-virgin while
+// still reading 0xFF. That page holds the app-metadata word
+// (0x080FFFE0), which the bootloader's `bl_flash_write_metadata` writes
+// IN PLACE whenever it reads all-0xFF — so the first CAN app flash after
+// provisioning would program a flashword twice and risk inconsistent
+// ECC (the #166 ECC-brick class). The NVM log's last KiB has the same
+// problem later in life.
+//
+// So we drive the FLASH controller directly, mirroring the bootloader's
+// own `HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD, ...)` register for
+// register (STM32H7 HAL `stm32h7xx_hal_flash.c`, `stm32h733xx.h`):
+// unlock KEYR1 → set CR1.PG → write 8 × u32 → wait SR1.QW → check the
+// HAL's error mask (clear via CCR1) → clear PG → relock.
+
+/// `FLASH_R_BASE` = `D1_AHB1PERIPH_BASE + 0x2000`.
+const H7_FLASH_BASE: u64 = 0x5200_2000;
+const H7_FLASH_KEYR1: u64 = H7_FLASH_BASE + 0x04;
+const H7_FLASH_CR1: u64 = H7_FLASH_BASE + 0x0C;
+const H7_FLASH_SR1: u64 = H7_FLASH_BASE + 0x10;
+const H7_FLASH_CCR1: u64 = H7_FLASH_BASE + 0x14;
+const H7_FLASH_KEY1: u32 = 0x4567_0123;
+const H7_FLASH_KEY2: u32 = 0xCDEF_89AB;
+const H7_CR_LOCK: u32 = 1 << 0;
+const H7_CR_PG: u32 = 1 << 1;
+const H7_SR_QW: u32 = 1 << 2;
+const H7_SR_EOP: u32 = 1 << 16;
+/// `FLASH_FLAG_ALL_ERRORS_BANK1`: WRPERR | PGSERR | STRBERR | INCERR |
+/// OPERR | RDPERR | RDSERR | SNECCERR | DBECCERR | CRCRDERR.
+const H7_SR_ALL_ERRORS: u32 = (1 << 17)
+    | (1 << 18)
+    | (1 << 19)
+    | (1 << 21)
+    | (1 << 22)
+    | (1 << 23)
+    | (1 << 24)
+    | (1 << 25)
+    | (1 << 26)
+    | (1 << 28);
+/// `FLASH_NB_32BITWORD_IN_FLASHWORD` on the H72x/73x (256-bit words).
+const H7_WORDS_PER_FLASHWORD: usize = 8;
+/// Programming one flashword takes microseconds; this only bounds a
+/// wedged controller.
+const H7_FLASH_OP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The register map above is the single-bank, 256-bit-flashword
+/// H72x/73x's, and the seed lives at the top of a **1 MB** bank
+/// (`0x080FFFC0`). So: an H72x/73x part whose flash-size code — the
+/// character after the pin-count letter, e.g. the `G` in `STM32H733ZGTx`
+/// — is `G` (1 MB). That excludes the 128 KB STM32H730 value line and
+/// the 512 KB (`E`) variants, where the seed address doesn't exist.
+fn chip_supports_seed(chip: &str) -> bool {
+    let c = chip.to_ascii_uppercase();
+    (c.starts_with("STM32H72") || c.starts_with("STM32H73")) && c.as_bytes().get(10) == Some(&b'G')
+}
+
+fn wait_flash_idle(core: &mut probe_rs::Core<'_>, what: &str) -> Result<u32, SwdError> {
+    let start = std::time::Instant::now();
+    loop {
+        let sr = core
+            .read_word_32(H7_FLASH_SR1)
+            .map_err(|e| SwdError::SeedProgram(format!("{what}: read FLASH_SR1: {e}")))?;
+        if sr & H7_SR_QW == 0 {
+            return Ok(sr);
+        }
+        if start.elapsed() > H7_FLASH_OP_TIMEOUT {
+            return Err(SwdError::SeedProgram(format!(
+                "{what}: flash controller still busy after {H7_FLASH_OP_TIMEOUT:?} (FLASH_SR1=0x{sr:08X})"
+            )));
+        }
+    }
+}
+
+/// Program the provisioning seed as a single flashword at
+/// [`crate::provision_seed::SEED_ADDR`], then read it back through the
+/// same checks the bootloader applies. Resets and halts the core first
+/// so the FLASH controller is in the same post-reset state the
+/// bootloader programs from, and so the bootloader cannot run and
+/// consume anything before we've verified the word.
+fn program_provision_seed(session: &mut Session, node_id: u8) -> Result<(), SwdError> {
+    use crate::provision_seed::{parse_seed_record, SEED_ADDR, SEED_LEN};
+
+    let record = crate::provision_seed::build_seed_record(node_id)
+        .map_err(|e| SwdError::SeedProgram(format!("building provisioning seed: {e}")))?;
+
+    let mut core = session
+        .core(0)
+        .map_err(|e| SwdError::ProbeRs(format!("get core for seed programming: {e}")))?;
+    core.reset_and_halt(Duration::from_millis(500))
+        .map_err(|e| SwdError::ProbeRs(format!("reset-and-halt before seed programming: {e}")))?;
+
+    // Never program a flashword twice. After the default chip-erase burn
+    // the seed word is virgin (all 0xFF); anything else means sector 7
+    // wasn't erased and the write must not happen.
+    let mut current = [0u8; SEED_LEN];
+    core.read(SEED_ADDR, &mut current)
+        .map_err(|e| SwdError::ProbeRs(format!("read seed word before programming: {e}")))?;
+    if current.iter().any(|&b| b != 0xFF) {
+        return Err(SwdError::SeedProgram(format!(
+            "the seed flashword at 0x{SEED_ADDR:08X} is already programmed, so sector 7 was not \
+             erased — refusing to program it twice. Burn with the default chip-erase."
+        )));
+    }
+
+    // HAL_FLASH_Program: wait for the last operation, bailing on any
+    // stale error flag.
+    let sr = wait_flash_idle(&mut core, "before seed programming")?;
+    if sr & H7_SR_ALL_ERRORS != 0 {
+        let _ = core.write_word_32(H7_FLASH_CCR1, sr & H7_SR_ALL_ERRORS);
+        return Err(SwdError::SeedProgram(format!(
+            "flash controller reported an error before programming (FLASH_SR1=0x{sr:08X})"
+        )));
+    }
+
+    // HAL_FLASH_Unlock.
+    let cr = core
+        .read_word_32(H7_FLASH_CR1)
+        .map_err(|e| SwdError::SeedProgram(format!("read FLASH_CR1: {e}")))?;
+    if cr & H7_CR_LOCK != 0 {
+        core.write_word_32(H7_FLASH_KEYR1, H7_FLASH_KEY1)
+            .and_then(|()| core.write_word_32(H7_FLASH_KEYR1, H7_FLASH_KEY2))
+            .map_err(|e| SwdError::SeedProgram(format!("unlock FLASH_CR1: {e}")))?;
+        let cr = core
+            .read_word_32(H7_FLASH_CR1)
+            .map_err(|e| SwdError::SeedProgram(format!("read FLASH_CR1 after unlock: {e}")))?;
+        if cr & H7_CR_LOCK != 0 {
+            return Err(SwdError::SeedProgram(
+                "FLASH_CR1 stayed locked after the unlock key sequence".into(),
+            ));
+        }
+    }
+
+    // The programming itself. Whatever happens, relock afterwards.
+    let programmed = (|| -> Result<(), SwdError> {
+        let cr = core
+            .read_word_32(H7_FLASH_CR1)
+            .map_err(|e| SwdError::SeedProgram(format!("read FLASH_CR1: {e}")))?;
+        core.write_word_32(H7_FLASH_CR1, cr | H7_CR_PG)
+            .map_err(|e| SwdError::SeedProgram(format!("set FLASH_CR1.PG: {e}")))?;
+
+        for (i, chunk) in record
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .take(H7_WORDS_PER_FLASHWORD)
+            .enumerate()
+        {
+            let word = u32::from_le_bytes(*chunk);
+            core.write_word_32(SEED_ADDR + (i as u64) * 4, word)
+                .map_err(|e| SwdError::SeedProgram(format!("write seed word {i}: {e}")))?;
+        }
+
+        let sr = wait_flash_idle(&mut core, "seed programming")?;
+        let errors = sr & H7_SR_ALL_ERRORS;
+        if errors != 0 {
+            let _ = core.write_word_32(H7_FLASH_CCR1, errors);
+            return Err(SwdError::SeedProgram(format!(
+                "flash controller rejected the seed write (FLASH_SR1=0x{sr:08X})"
+            )));
+        }
+        if sr & H7_SR_EOP != 0 {
+            let _ = core.write_word_32(H7_FLASH_CCR1, H7_SR_EOP);
+        }
+        Ok(())
+    })();
+
+    // CLEAR_BIT(CR1, PG) then HAL_FLASH_Lock — attempted even on failure.
+    let relock = core
+        .read_word_32(H7_FLASH_CR1)
+        .and_then(|cr| core.write_word_32(H7_FLASH_CR1, (cr & !H7_CR_PG) | H7_CR_LOCK));
+    programmed?;
+    relock.map_err(|e| SwdError::SeedProgram(format!("relock FLASH_CR1: {e}")))?;
+
+    // Read it back through the bootloader's own acceptance checks
+    // (magic, complement, range, CRC). A torn or mis-laid-out seed is
+    // silently ignored by the bootloader, so this is the last place it
+    // can be caught.
+    let mut readback = [0u8; SEED_LEN];
+    core.read(SEED_ADDR, &mut readback)
+        .map_err(|e| SwdError::ProbeRs(format!("seed readback: {e}")))?;
+    match parse_seed_record(&readback) {
+        Some(id) if id == node_id => Ok(()),
+        _ => Err(SwdError::SeedReadbackMismatch { node_id }),
+    }
 }
 
 /// Inputs to [`erase_chip`] — the same probe + chip selection as
@@ -711,5 +999,62 @@ mod tests {
                 "extension {ext:?} expected match={ok}, got {recognized}"
             );
         }
+    }
+
+    #[test]
+    fn seed_programming_is_gated_to_the_h72x_73x() {
+        // Same 256-bit flashword, single bank, same FLASH register map.
+        for chip in [
+            "STM32H733ZGTx",
+            "stm32h733zgtx",
+            "STM32H723ZGTx",
+            "STM32H735IGKx",
+        ] {
+            assert!(chip_supports_seed(chip), "{chip}");
+        }
+        // Wrong family (different flashword width / bank layout), or a
+        // smaller flash where 0x080FFFC0 doesn't exist: the 128 KB H730
+        // value line and the 512 KB `E` variants.
+        for chip in [
+            "STM32H730VBTx",
+            "STM32H723VETx",
+            "STM32H743ZITx",
+            "STM32H7A3ZITxQ",
+            "STM32H7",
+            "STM32F446RETx",
+            "",
+        ] {
+            assert!(!chip_supports_seed(chip), "{chip}");
+        }
+    }
+
+    #[test]
+    fn flash_register_constants_match_the_stm32h733_hal() {
+        // stm32h733xx.h: FLASH_R_BASE = D1_AHB1PERIPH_BASE (0x5200_0000) + 0x2000.
+        assert_eq!(H7_FLASH_BASE, 0x5200_0000 + 0x2000);
+        assert_eq!(
+            (H7_FLASH_KEYR1, H7_FLASH_CR1, H7_FLASH_SR1, H7_FLASH_CCR1),
+            (0x5200_2004, 0x5200_200C, 0x5200_2010, 0x5200_2014)
+        );
+        // stm32h7xx_hal_flash.h
+        assert_eq!((H7_FLASH_KEY1, H7_FLASH_KEY2), (0x4567_0123, 0xCDEF_89AB));
+        // FLASH_FLAG_ALL_ERRORS_BANK1 from the *_Pos defines:
+        // WRPERR 17, PGSERR 18, STRBERR 19, INCERR 21, OPERR 22, RDPERR 23,
+        // RDSERR 24, SNECCERR 25, DBECCERR 26, CRCRDERR 28.
+        let expected = [17, 18, 19, 21, 22, 23, 24, 25, 26, 28]
+            .iter()
+            .fold(0u32, |m, b| m | (1 << b));
+        assert_eq!(H7_SR_ALL_ERRORS, expected);
+        assert_eq!(
+            (H7_CR_LOCK, H7_CR_PG, H7_SR_QW, H7_SR_EOP),
+            (1, 2, 4, 1 << 16)
+        );
+        // FLASH_NB_32BITWORD_IN_FLASHWORD, and the seed is exactly one flashword.
+        assert_eq!(H7_WORDS_PER_FLASHWORD * 4, crate::provision_seed::SEED_LEN);
+        assert_eq!(
+            crate::provision_seed::SEED_ADDR % 32,
+            0,
+            "flashword-aligned"
+        );
     }
 }

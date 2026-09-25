@@ -158,7 +158,7 @@ const FIRMWARE_EXTENSIONS: &[&str] = &["elf", "hex", "bin"];
 
 /// Where the resolved role came from, surfaced to the operator
 /// so a misleading filename can't quietly provision the wrong id.
-enum RoleSource {
+pub(crate) enum RoleSource {
     /// Operator typed the role name directly (e.g. `can-flasher provision ams`).
     Explicit,
     /// Role was inferred from a firmware path's basename stem; the
@@ -182,7 +182,7 @@ enum RoleSource {
 /// Bare strings without a separator or a matching extension fall
 /// through to the literal-name branch; the registry rejects
 /// non-matches with a clear error.
-fn resolve_role_or_path(raw: &str) -> Option<(u8, RoleSource)> {
+pub(crate) fn resolve_role_or_path(raw: &str) -> Option<(u8, RoleSource)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;

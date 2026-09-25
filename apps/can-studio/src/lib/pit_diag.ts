@@ -408,6 +408,77 @@ export type PitDiagEvent =
            *  "driving" | "finished" | "unknown". Meaningful when asFresh. */
           asStatus: string;
       }
+    // ECU 0x709..0x70D (#566). Scaled fields arrive as the exact raw
+    // count (like brakePressureDbar); the scale constants below convert.
+    | {
+          /** ECU 0x709 — low-cell derate estimator. Commissions
+           *  CellIrMilliOhm: estOcvMv should stay flat while rawMv sags. */
+          kind: 'ecuCell';
+          rawMv: number;
+          estOcvMv: number;
+          /** estOcv − raw, signed mV. */
+          compMv: number;
+          /** Torque CEILING from this derate, % (a min, not a scale). */
+          capPct: number;
+          /** false = current went stale; fell back to the raw loaded V. */
+          compensated: boolean;
+          /** The backstop fired; the estimate was ignored entirely. */
+          rawFloor: boolean;
+          capped: boolean;
+      }
+    | {
+          /** ECU 0x70A — pack thermal cap + which modules fed it. */
+          kind: 'ecuPackTemp';
+          packTempUsedDegc: number;
+          packTempRawDegc: number;
+          packCapPct: number;
+          /** Modules 0..4 that fed the max. An excluded module is how a hot
+           *  pack goes unnoticed. */
+          modulesUsed: boolean[];
+          /** No module usable — cap sits at its unknown-temperature fallback. */
+          packUnknown: boolean;
+          packCapped: boolean;
+      }
+    | {
+          /** ECU 0x70B — inverter FOC feedback. Currents are 1/32 A counts
+           *  (ECU_FOC_A_PER_COUNT). The three control codes are the
+           *  inverter's raw 4-bit values: no name table exists upstream. */
+          kind: 'ecuInvFoc';
+          currentDRaw: number;
+          currentQRaw: number;
+          /** ‰ of available bus voltage in use; near 1000 = no headroom. */
+          voltModulusPermil: number;
+          ctrlMode: number;
+          ctrlType: number;
+          cmdSrc: number;
+          s4Fresh: boolean;
+          s6Fresh: boolean;
+          s8Fresh: boolean;
+          s9Fresh: boolean;
+      }
+    | {
+          /** ECU 0x70C — ask / ceiling / delivered torque. */
+          kind: 'ecuInvTorque';
+          /** Nm, NEGATIVE for forward drive (mechanical negation). */
+          torqueReqNm: number;
+          /** RAW — unit unresolved upstream (vendor calls it "Ndm"). Do not
+           *  compare to the Nm fields. */
+          torqueMaxFeasRaw: number;
+          torqueEstNm: number;
+          /** Iq setpoint, 1/32 A counts. */
+          setpointQRaw: number;
+      }
+    | {
+          /** ECU 0x70D — shaft / AC / DC power. */
+          kind: 'ecuPower';
+          /** 10 W counts (ECU_POWER_W_PER_COUNT). */
+          shaftPowerRaw: number;
+          /** 10 W counts. */
+          acPowerRaw: number;
+          dcBusV: number;
+          /** 0.1 A counts (ECU_ACCU_A_PER_COUNT). */
+          accuCurrentRaw: number;
+      }
     | {
           /** uDV 0x7A0 — AS state + 10-bit signal mask + mission + EBS-init
            *  + ASSI. Enum fields are debug names ("Driving"/"Ready"/…). */
@@ -531,6 +602,13 @@ export type PitDiagEvent =
 /** The inverter-temperature value that means "sensor disconnected"
  *  (raw 0xFF − 50). */
 export const ECU_INV_TEMP_DISCONNECTED_C = 205;
+
+/** ECU 0x70B / 0x70C inverter currents: amps per raw count (1/32 A). */
+export const ECU_FOC_A_PER_COUNT = 0.03125;
+/** ECU 0x70D shaft / AC power: watts per raw count. */
+export const ECU_POWER_W_PER_COUNT = 10;
+/** ECU 0x70D accumulator current: amps per raw count. */
+export const ECU_ACCU_A_PER_COUNT = 0.1;
 
 // ---- Wrappers ----
 

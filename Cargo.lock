@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "can-flasher"
-version = "2.14.0"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "can-studio"
-version = "2.14.0"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "can-dbc",
@@ -3087,6 +3087,9 @@ version = "0.36.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
 dependencies = [
+ "crc32fast",
+ "hashbrown 0.15.5",
+ "indexmap 2.14.0",
  "memchr",
 ]
 
