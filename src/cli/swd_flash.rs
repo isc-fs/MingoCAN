@@ -92,37 +92,53 @@ pub struct SwdFlashArgs {
     #[arg(long, default_value_t = false)]
     pub sector_erase: bool,
 
-    /// After the SWD burn, assign the board's CAN node-id by role,
-    /// over CAN — the second commissioning step that otherwise needs
-    /// a separate `can-flasher provision <role>`. Accepts a role name (`ecu`,
-    /// `ams`, `udv`) or a firmware path whose basename matches
-    /// (e.g. `build/ams.elf`). Requires the global CAN flags
-    /// (`--interface`, `--channel`) since the provision step talks to
-    /// the freshly-booted bootloader over CAN; for a fresh board
-    /// address it with `--node-id 0xF` (broadcast) when it's the only
-    /// node on the bus. Incompatible with `--no-reset` (the board
-    /// must boot the bootloader to be provisioned).
-    #[arg(long)]
+    /// Provision the board's CAN node-id over SWD, in the same run as
+    /// the burn — no CAN adapter, no second step. Accepts a role (`ecu`,
+    /// `ams`, `udv`), a firmware path whose basename matches one
+    /// (e.g. `build/ams.elf`), or a raw node-id `0x1`..`0xE`.
+    ///
+    /// Programs a provisioning seed that the bootloader stores in its NVM
+    /// on first boot. Needs a bootloader `.elf` built with seed support
+    /// (stm32-can-bootloader#183) — checked before anything touches the
+    /// chip, so an unsupported image is refused rather than leaving the
+    /// board silently unprovisioned. Incompatible with `--sector-erase`:
+    /// without a chip-erase the old node-id stays in NVM and wins.
+    ///
+    /// To change the node-id of a board that is already running, use
+    /// `can-flasher provision` (over CAN) or re-burn with this flag.
+    #[arg(long, value_name = "ROLE|0xN", conflicts_with = "sector_erase")]
     pub provision: Option<String>,
 }
 
-/// Auto-provision (`--provision`) needs the board running the new
-/// bootloader, which the post-flash reset provides — so it's
-/// incompatible with `--no-reset`. Pure so it's unit-testable.
-fn check_provision_reset_combo(provision: bool, no_reset: bool) -> Result<()> {
-    if provision && no_reset {
-        return Err(exit_err(
-            ExitCodeHint::InputFileError,
-            "--provision can't be combined with --no-reset: the board must boot the \
-             bootloader to be provisioned over CAN",
-        ));
+/// Resolve `--provision`: a role / firmware path (`ams`/`ecu`/`udv`)
+/// or a raw node-id (`0x1`..`0xE` / `1`..`14`).
+fn resolve_provision_node_id(raw: &str) -> Result<u8> {
+    if let Some((id, _src)) = super::provision::resolve_role_or_path(raw) {
+        return Ok(id);
     }
-    Ok(())
+    let t = raw.trim();
+    let parsed = if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u8::from_str_radix(hex, 16)
+    } else {
+        t.parse::<u8>()
+    };
+    match parsed {
+        Ok(n) if (0x1..=0x0E).contains(&n) => Ok(n),
+        _ => Err(exit_err(
+            ExitCodeHint::InputFileError,
+            format!("--provision {raw:?}: expected a role (ecu/ams/udv) or a node-id 0x1..=0xE"),
+        )),
+    }
 }
 
-pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
-    // Catch the contradiction before we burn anything.
-    check_provision_reset_combo(args.provision.is_some(), args.no_reset)?;
+pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
+    // Resolve the node-id first: a typo should fail before any download
+    // or probe I/O.
+    let provision_id = args
+        .provision
+        .as_deref()
+        .map(resolve_provision_node_id)
+        .transpose()?;
 
     let base_addr = parse_hex_u64(&args.base).ok_or_else(|| {
         exit_err(
@@ -144,6 +160,10 @@ pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
     request.verify = !args.no_verify;
     request.reset_after = !args.no_reset;
     request.sector_erase_only = args.sector_erase;
+    if let Some(id) = provision_id {
+        request.seed_node_id = Some(id);
+        println!("Will provision node-id 0x{id:X} over SWD.");
+    }
 
     // probe-rs is blocking; run on the blocking pool so the tokio
     // runtime stays responsive (matters for future Studio / VS
@@ -187,29 +207,13 @@ pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
              Re-run without --no-verify before declaring the chip good."
         );
     }
-
-    // ---- Optional auto-provision over CAN (commissioning step 2) ----
-    //
-    // The SWD burn writes only the bootloader; the CAN node-id lives
-    // in NVM and is written over CAN by the running bootloader. With
-    // `--provision`, chain that second step here so a fresh board is
-    // commissioned in one command instead of burn-then-provision by
-    // hand. The post-flash reset (guaranteed: we reject `--no-reset`
-    // above) has just rebooted the chip into the new bootloader.
-    if let Some(role) = args.provision {
-        println!("\nBootloader is up; provisioning node-id over CAN…");
-        // Give the freshly-reset bootloader a moment to initialise its
-        // CAN peripheral before we open a session against it.
-        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-        let prov = super::provision::ProvisionArgs {
-            role,
-            no_reset: false,
-            // `swd-flash --provision <role>` is itself the explicit
-            // opt-in, so don't double-prompt (FMEA #271 G17's confirm
-            // is for the standalone `can-flasher provision` mis-target case).
-            yes: true,
-        };
-        super::provision::run(prov, global).await?;
+    if let Some(id) = report.seeded_node_id {
+        println!("    ↳ provisioned as node-id 0x{id:X} over SWD (seed programmed + verified)");
+        if request_for_msg.reset_after {
+            println!("      the bootloader stored it in NVM on the boot that just happened.");
+        } else {
+            println!("      --no-reset: the bootloader stores it in NVM on its next boot.");
+        }
     }
 
     Ok(())
@@ -379,14 +383,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provision_requires_post_flash_reset() {
-        // --provision + --no-reset is contradictory: the board can't
-        // be provisioned over CAN if it isn't booted into the BL.
-        assert!(check_provision_reset_combo(true, true).is_err());
-        // Every other combination is fine.
-        assert!(check_provision_reset_combo(true, false).is_ok());
-        assert!(check_provision_reset_combo(false, true).is_ok());
-        assert!(check_provision_reset_combo(false, false).is_ok());
+    fn provision_accepts_roles_and_raw_ids() {
+        assert_eq!(resolve_provision_node_id("ecu").unwrap(), 0x1);
+        assert_eq!(resolve_provision_node_id("AMS").unwrap(), 0x2);
+        assert_eq!(resolve_provision_node_id("udv").unwrap(), 0x3);
+        assert_eq!(resolve_provision_node_id("0x5").unwrap(), 0x5);
+        assert_eq!(resolve_provision_node_id("14").unwrap(), 0xE);
+        for bad in ["0x0", "0xF", "15", "abc", ""] {
+            assert!(
+                resolve_provision_node_id(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn provision_conflicts_with_sector_erase_at_parse_time() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: SwdFlashArgs,
+        }
+        assert!(Cli::try_parse_from(["t", "bl.elf", "--provision", "ams"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["t", "bl.elf", "--provision", "ams", "--sector-erase"]).is_err(),
+            "a sector-erase burn keeps the old NVM node-id, which wins over the seed"
+        );
+        // --no-reset is fine now: the seed is simply adopted on the next boot.
+        assert!(Cli::try_parse_from(["t", "bl.elf", "--provision", "ams", "--no-reset"]).is_ok());
     }
 
     #[test]

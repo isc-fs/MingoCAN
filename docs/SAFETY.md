@@ -44,8 +44,20 @@ on the bus, so this is the only way in.
 
 ## Node-ID provisioning
 
-`can-flasher provision <role>` — also offered by the app after a successful
-flash to a board with a known role.
+**At bootloader burn, over SWD** — *Burn bootloader* → **Provision node-id** ·
+`can-flasher swd-flash … --provision <role>`
+
+Programs a provisioning seed the bootloader adopts into NVM on first boot.
+
+**Guards**, all checked before the probe is opened so a refusal never costs an
+erased chip: the image must be a bootloader `.elf` that contains the seed
+consumer (older bootloaders would silently ignore the seed); the chip must be an
+H72x/73x; the burn must chip-erase (`--sector-erase` would leave the old node ID
+in NVM, which wins). The seed word is only ever programmed when erased, as a
+single flash word, and is read back through the bootloader's own checks.
+
+**On a running board, over CAN** — `can-flasher provision <role>`, also offered
+by the app after a successful flash to a board with a known role.
 
 Writes the board's node ID into bootloader NVM and resets it so the new ID takes
 effect. Get it wrong and the board answers on a different address than you
