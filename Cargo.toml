@@ -93,6 +93,11 @@ tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sy
 # AMS wire definition. NOT a runtime dependency — the shipped decoder
 # stays hardcoded (fast, typed); this only guards against silent drift.
 can-dbc = "9"
+# Test-only: synthesize bootloader ELFs (with / without the seed consumer
+# symbol) so the SWD-provisioning capability check is exercised against
+# real ELF parsing rather than a mock. Same crate as the runtime dep,
+# just with the writer enabled; all its deps are already in the tree.
+object = { version = "0.36", default-features = false, features = ["write_std", "elf"] }
 
 # Linux-only dependencies. SocketCAN talks to the kernel's AF_CAN
 # stack directly; on macOS and Windows the same --interface choices

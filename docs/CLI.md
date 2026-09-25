@@ -70,7 +70,10 @@ no single default.
 | `discover`, `pit-diag`, `replay`, `adapters` | not used — broadcast or passive |
 
 Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`. A board that has never been
-commissioned answers on `0xF`.
+commissioned answers on the bootloader's compile-time default — **`0x01` for a
+stock build, the ECU's address** — so on a shared bus it collides with the ECU
+until it is provisioned. (`0xF` is broadcast: addressing it reaches a lone
+board whatever its ID, which is why the `provision` examples below use it.)
 
 Every subcommand has its own `--help` with the complete flag list.
 
@@ -224,10 +227,38 @@ read.
 | `--no-reset` | Skip the post-write reset. Only for chaining several writes; the last one should still reset. |
 | `--yes` | Skip the confirmation. Required for scripts — a piped stdin otherwise auto-declines. |
 
-A fresh board takes **two** steps, over two transports: the bootloader goes on
-over SWD, then the node ID goes into NVM over CAN, written by the now-running
-bootloader. `swd-flash --provision <role>` chains them, which is why it is
-incompatible with `--no-reset`.
+This is the tool for changing the node ID of a board that is **already running**
+its bootloader. A fresh board gets its node ID over SWD in the same step as the
+bootloader burn — see below.
+
+### `swd-flash --provision <role|0xN>` — burn and provision in one step
+
+Sets the node ID over the **debug probe** as part of the bootloader burn — no
+CAN adapter, no second step. After writing the bootloader it programs a small
+*provisioning seed* (magic, node ID, its complement and a CRC32) at a reserved
+flash word; on its first boot the bootloader validates the seed and stores the
+node ID in its own NVM.
+
+```bash
+can-flasher swd-flash CAN_BL.elf --provision ams
+can-flasher swd-flash --release --provision 0x2
+```
+
+Accepts a role (`ecu`, `ams`, `udv`), a firmware path whose name matches one,
+or a raw node ID `0x1`–`0xE`.
+
+- **Needs a bootloader built with seed support**
+  ([stm32-can-bootloader#183](https://github.com/isc-fs/stm32-can-bootloader/issues/183)),
+  as an `.elf`. The image is checked **before anything touches the chip**: an
+  older bootloader (or a `.hex`/`.bin`, which carries no symbols to check) is
+  refused, rather than burned and left silently unprovisioned.
+- **Incompatible with `--sector-erase`.** Without a chip-erase the old node ID
+  stays in NVM, and the bootloader keeps it over the seed.
+- The seed is written as a single 256-bit flash word straight through the flash
+  controller, never through probe-rs's 1 KiB page writes — those would also
+  program the neighbouring app-metadata word the bootloader later rewrites. It
+  is then read back through the bootloader's own acceptance checks.
+- With `--no-reset` the board takes the node ID on its next boot.
 
 ## `logs` — pull microSD car-data logs
 
