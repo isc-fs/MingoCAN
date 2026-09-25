@@ -30,13 +30,23 @@
 //!   - `0x706` — inverter temperatures (board / power stage / motors).
 //!   - `0x707` — the DV (driverless) handshake view.
 //!   - `0x708` — the inverter's L1/L2 fault layers + commanded burst.
+//!   - `0x709` — the low-cell derate estimator (raw vs estimated-OCV cell V).
+//!   - `0x70A` — the pack thermal cap and which modules fed it.
+//!   - `0x70B` — inverter FOC feedback: d/q currents, voltage modulus,
+//!     control law + command source.
+//!   - `0x70C` — torque requested / max-feasible / estimated, + Iq setpoint.
+//!   - `0x70D` — shaft / AC power, DC bus, accumulator current.
 //!   - `0x704` — firmware health. **Ungated** and 1 Hz, not part of the
 //!     100 ms cyclic set above.
 //!
-//! Endianness: the multi-byte numeric fields (cell-V, torque cmd,
-//! APPS/brake raw, DC-bus, RPM, brake pressure, git hash) are
-//! big-endian per the `FIELD_BE*` markers; the single-byte fields and
-//! the bit flags are position-only. No ID overlaps the AMS stream
+//! Endianness is **per field**, mirrored from the `FIELD_BE*` / `FIELD_LE*`
+//! markers — it is NOT uniform. The older frames and `0x709`/`0x70A` are
+//! big-endian; `0x707`'s rpm and all of `0x70B`–`0x70D` are little-endian.
+//! Single-byte fields and bit flags are position-only.
+//!
+//! Scaled fields are returned as the exact raw count with the scale in the
+//! doc (like `brake_pressure_dbar`), plus a helper for engineering units —
+//! decode never goes through a float. No ID overlaps the AMS stream
 //! (`0x680..=0x6C8`, `0x7F0/0x7F1`), so the two decoders are independent.
 //!
 //! Note the arm *payload* (`DE AD BE EF`) is the same sentinel the AMS
@@ -80,6 +90,20 @@ pub const ECU_INV_FAULTS_ID: u16 = 0x708;
 /// R2D/torque-stream freshness + the TX-side autonomy handshake verdicts +
 /// the conditioned autonomous torque. 100 ms while armed.
 pub const ECU_DV_ID: u16 = 0x707;
+/// `0x709` — the low-cell derate estimator laid open (#566).
+pub const ECU_CELL_ID: u16 = 0x709;
+/// `0x70A` — the accumulator thermal cap and which modules fed it (#566).
+pub const ECU_PACK_TEMP_ID: u16 = 0x70A;
+/// `0x70B` — inverter FOC feedback forwarded from `0x463`/`0x465` (#566).
+pub const ECU_INV_FOC_ID: u16 = 0x70B;
+/// `0x70C` — torque ask / ceiling / delivered, on one frame (#566).
+pub const ECU_INV_TORQUE_ID: u16 = 0x70C;
+/// `0x70D` — shaft / AC / DC power, for measuring drivetrain efficiency (#566).
+pub const ECU_POWER_ID: u16 = 0x70D;
+
+/// One count of the inverter's FOC currents (`0x70B` d/q, `0x70C` Iq
+/// setpoint): 1/32 A.
+pub const ECU_FOC_AMPS_PER_COUNT: f32 = 0.031_25;
 
 /// Inverter temperature sentinel — raw `0xFF` (= 205 °C after the −50
 /// offset) means the NX/EMC inverter reports that sensor as disconnected.
@@ -87,9 +111,9 @@ pub const ECU_INV_TEMP_DISCONNECTED_C: i16 = 205;
 
 /// Number of CYCLIC (100 ms) stream frames emitted per scan when armed:
 /// status / pedals / inverter / fwinfo / brake / inverter-temps / dv (#109) /
-/// inv-faults (#168). The `0x704` health frame is acyclic-ish (1 Hz) and not
-/// counted here.
-pub const ECU_EXPECTED_FRAMES_PER_SCAN: usize = 8;
+/// inv-faults (#168) / cell / pack-temp / inv-foc / inv-torque / power (#566).
+/// The `0x704` health frame is acyclic-ish (1 Hz) and not counted here.
+pub const ECU_EXPECTED_FRAMES_PER_SCAN: usize = 13;
 
 // ---- Enums -------------------------------------------------------
 
@@ -764,6 +788,172 @@ impl EcuInvFaultsFrame {
     }
 }
 
+/// `0x709` — the low-cell derate estimator (#566). Exists to commission
+/// `CellIrMilliOhm`: on one acceleration run, `est_ocv_mv` should stay flat
+/// while `raw_mv` sags. Still dips → IR set too low; humps up → too high.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuCellFrame {
+    /// Loaded (sagging) minimum cell voltage, mV.
+    pub raw_mv: u16,
+    /// Estimated open-circuit voltage after IR compensation, mV.
+    pub est_ocv_mv: u16,
+    /// Compensation applied (`est_ocv - raw`), mV. Signed.
+    pub comp_mv: i16,
+    /// Torque **ceiling** from this derate, % (torque = min(torque, cap) —
+    /// not a scale factor).
+    pub cap_pct: u8,
+    /// Clear = the current signal went stale and the derate fell back to
+    /// the raw loaded voltage.
+    pub compensated: bool,
+    /// The backstop fired and the estimate was ignored entirely.
+    pub raw_floor: bool,
+    /// The cap is below 100 % — this derate is limiting torque.
+    pub capped: bool,
+}
+
+/// `0x70A` — the accumulator thermal cap laid open (#566). The point of the
+/// frame is `modules_used`: a module the cap silently excluded (AMS offline,
+/// implausible reading) is how a hot pack goes unnoticed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuPackTempFrame {
+    /// Pack temperature the cap actually used, °C.
+    pub pack_temp_used_degc: i16,
+    /// Hottest raw module reading, °C, before plausibility filtering.
+    pub pack_temp_raw_degc: i16,
+    /// Torque ceiling from the pack thermal cap, %.
+    pub pack_cap_pct: u8,
+    /// Which of the five AMS modules fed the max, module 0..=4.
+    pub modules_used: [bool; 5],
+    /// NO module was usable — the cap is sitting at its unknown-temperature
+    /// fallback. (0 °C is a real pack temperature, so there's no implausible
+    /// value to catch this otherwise.)
+    pub pack_unknown: bool,
+    /// The cap is below 100 % — the pack is limiting torque.
+    pub pack_capped: bool,
+}
+
+/// `0x70B` — the inverter's FOC feedback (#566), forwarded from
+/// `EMC_TX_STATE_4`/`_6` (`0x463`/`0x465`).
+///
+/// `ctrl_mode`, `ctrl_type` and `cmd_src` are the inverter's raw 4-bit
+/// codes. Neither the ECU firmware nor the inverter vendor DBC
+/// (`NX0001_STS04_A16.dbc`) defines names for them, so they're surfaced as
+/// numbers rather than guessed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuInvFocFrame {
+    /// Flux-axis current, raw count of [`ECU_FOC_AMPS_PER_COUNT`]. Large
+    /// negative at speed = field weakening.
+    pub current_d_raw: i16,
+    /// Torque-producing-axis current, raw count of
+    /// [`ECU_FOC_AMPS_PER_COUNT`]. Plateauing while `0x70C` `torque_req`
+    /// climbs = the inverter is limiting.
+    pub current_q_raw: i16,
+    /// Share of the available bus voltage the modulator uses, ‰. Near 1000
+    /// means no voltage headroom left — the normal, non-fault reason torque
+    /// falls off at the top of the straight.
+    pub volt_modulus_permil: u16,
+    /// Control law running (`Ctrl_Mode_App`), raw 4-bit code.
+    pub ctrl_mode: u8,
+    /// Control type (`Ctrl_Type_App`), raw 4-bit code.
+    pub ctrl_type: u8,
+    /// Where the setpoint comes from (`Cmd_Src_App`), raw 4-bit code.
+    pub cmd_src: u8,
+    /// Per-frame freshness of inverter `EMC_TX_STATE_4` (`0x463`).
+    pub s4_fresh: bool,
+    /// Per-frame freshness of `EMC_TX_STATE_6` (`0x465`).
+    pub s6_fresh: bool,
+    /// Per-frame freshness of `EMC_TX_STATE_8` (`0x467`) — a frozen
+    /// max-feasible torque otherwise reads as a healthy ceiling.
+    pub s8_fresh: bool,
+    /// Per-frame freshness of `EMC_TX_STATE_9` (`0x468`).
+    pub s9_fresh: bool,
+}
+
+impl EcuInvFocFrame {
+    /// Flux-axis current in amps.
+    #[must_use]
+    pub fn current_d_a(&self) -> f32 {
+        f32::from(self.current_d_raw) * ECU_FOC_AMPS_PER_COUNT
+    }
+
+    /// Torque-axis current in amps.
+    #[must_use]
+    pub fn current_q_a(&self) -> f32 {
+        f32::from(self.current_q_raw) * ECU_FOC_AMPS_PER_COUNT
+    }
+}
+
+/// `0x70C` — "is the inverter limiting us?" on one frame (#566).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuInvTorqueFrame {
+    /// Torque the ECU put on `0x362` this cycle, Nm. **Negative for forward
+    /// drive** — the mechanical negation of the motor mounting, not a bug.
+    pub torque_req_nm: i16,
+    /// What the inverter says it can deliver (`0x467`), **raw**. The vendor
+    /// DBC names it `Torque_Max_Feas_Ndm` ("Ndm", not "Nm") at scale 1, and
+    /// whether that means deci-Nm is unresolved — so it is forwarded raw on
+    /// purpose. Don't compare it to the Nm fields until that's settled on
+    /// the car.
+    pub torque_max_feas_raw: i16,
+    /// What the inverter believes it is delivering (`0x468`), Nm.
+    pub torque_est_nm: i16,
+    /// The inverter's own Iq command, raw count of
+    /// [`ECU_FOC_AMPS_PER_COUNT`]. Against `0x70B` `current_q` it shows a
+    /// shortfall is a LIMIT vs a failure to follow.
+    pub setpoint_q_raw: i16,
+}
+
+impl EcuInvTorqueFrame {
+    /// Iq setpoint in amps.
+    #[must_use]
+    pub fn setpoint_q_a(&self) -> f32 {
+        f32::from(self.setpoint_q_raw) * ECU_FOC_AMPS_PER_COUNT
+    }
+}
+
+/// `0x70D` — everything needed to MEASURE drivetrain efficiency (#566):
+/// motor+gearbox = shaft / AC; total = shaft / (DC bus × accumulator current).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcuPowerFrame {
+    /// Commanded mechanical power, raw count of **10 W**. Positive for
+    /// forward drive.
+    pub shaft_power_raw: i16,
+    /// The inverter's own AC output measurement, raw count of **10 W**.
+    /// Should also read positive under a forward pull — negative there
+    /// means a decode problem, not the inverter.
+    pub ac_power_raw: i16,
+    /// DC-bus voltage, V.
+    pub dc_bus_v: u16,
+    /// Accumulator current from the AMS (`0x135`), raw count of **0.1 A**.
+    pub accu_current_raw: i16,
+}
+
+impl EcuPowerFrame {
+    /// Commanded shaft power in watts.
+    #[must_use]
+    pub fn shaft_power_w(&self) -> i32 {
+        i32::from(self.shaft_power_raw) * 10
+    }
+
+    /// Inverter AC output power in watts.
+    #[must_use]
+    pub fn ac_power_w(&self) -> i32 {
+        i32::from(self.ac_power_raw) * 10
+    }
+
+    /// Accumulator current in amps.
+    #[must_use]
+    pub fn accu_current_a(&self) -> f32 {
+        f32::from(self.accu_current_raw) / 10.0
+    }
+
+    /// DC power at the accumulator, W — the side the power rule is judged on.
+    #[must_use]
+    pub fn dc_power_w(&self) -> f32 {
+        f32::from(self.dc_bus_v) * self.accu_current_a()
+    }
+}
+
 /// A decoded ECU pit-diag frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EcuPitDiagFrame {
@@ -790,6 +980,16 @@ pub enum EcuPitDiagFrame {
     Dv(EcuDvFrame),
     /// `0x708` — inverter L1/L2 fault layers + commanded burst (#168).
     InvFaults(EcuInvFaultsFrame),
+    /// `0x709` — low-cell derate estimator (#566).
+    Cell(EcuCellFrame),
+    /// `0x70A` — pack thermal cap (#566).
+    PackTemp(EcuPackTempFrame),
+    /// `0x70B` — inverter FOC feedback (#566).
+    InvFoc(EcuInvFocFrame),
+    /// `0x70C` — torque request / max-feasible / estimate (#566).
+    InvTorque(EcuInvTorqueFrame),
+    /// `0x70D` — shaft / AC / DC power (#566).
+    Power(EcuPowerFrame),
 }
 
 // ---- Encode / decode ---------------------------------------------
@@ -998,6 +1198,79 @@ pub fn decode_frame(frame: &CanFrame) -> Option<EcuPitDiagFrame> {
                 inv_state_age_ms: p[4],
                 inv_state_seq: p[5],
                 inv_redrive_count: p[6],
+            }))
+        }
+        ECU_CELL_ID => {
+            // FIELD_BE for the three 16-bit fields; flags in byte 7.
+            if p.len() < 8 {
+                return None;
+            }
+            let flags = p[7];
+            Some(EcuPitDiagFrame::Cell(EcuCellFrame {
+                raw_mv: u16::from_be_bytes([p[0], p[1]]),
+                est_ocv_mv: u16::from_be_bytes([p[2], p[3]]),
+                comp_mv: i16::from_be_bytes([p[4], p[5]]),
+                cap_pct: p[6],
+                compensated: (flags & 0x01) != 0,
+                raw_floor: (flags & 0x02) != 0,
+                capped: (flags & 0x04) != 0,
+            }))
+        }
+        ECU_PACK_TEMP_ID => {
+            // DLC 6. FIELD_BE_S temperatures; byte 5 = module mask b0-b4,
+            // pack_unknown b5, pack_capped b6.
+            if p.len() < 6 {
+                return None;
+            }
+            let flags = p[5];
+            Some(EcuPitDiagFrame::PackTemp(EcuPackTempFrame {
+                pack_temp_used_degc: i16::from_be_bytes([p[0], p[1]]),
+                pack_temp_raw_degc: i16::from_be_bytes([p[2], p[3]]),
+                pack_cap_pct: p[4],
+                modules_used: std::array::from_fn(|m| flags & (1 << m) != 0),
+                pack_unknown: (flags & 0x20) != 0,
+                pack_capped: (flags & 0x40) != 0,
+            }))
+        }
+        ECU_INV_FOC_ID => {
+            // All FIELD_LE. Byte 6 = ctrl_mode (lo nibble) | ctrl_type (hi);
+            // byte 7 = cmd_src (lo nibble) | s4/s6/s8/s9 fresh (b4..b7).
+            if p.len() < 8 {
+                return None;
+            }
+            Some(EcuPitDiagFrame::InvFoc(EcuInvFocFrame {
+                current_d_raw: i16::from_le_bytes([p[0], p[1]]),
+                current_q_raw: i16::from_le_bytes([p[2], p[3]]),
+                volt_modulus_permil: u16::from_le_bytes([p[4], p[5]]),
+                ctrl_mode: p[6] & 0x0F,
+                ctrl_type: p[6] >> 4,
+                cmd_src: p[7] & 0x0F,
+                s4_fresh: (p[7] & 0x10) != 0,
+                s6_fresh: (p[7] & 0x20) != 0,
+                s8_fresh: (p[7] & 0x40) != 0,
+                s9_fresh: (p[7] & 0x80) != 0,
+            }))
+        }
+        ECU_INV_TORQUE_ID => {
+            if p.len() < 8 {
+                return None;
+            }
+            Some(EcuPitDiagFrame::InvTorque(EcuInvTorqueFrame {
+                torque_req_nm: i16::from_le_bytes([p[0], p[1]]),
+                torque_max_feas_raw: i16::from_le_bytes([p[2], p[3]]),
+                torque_est_nm: i16::from_le_bytes([p[4], p[5]]),
+                setpoint_q_raw: i16::from_le_bytes([p[6], p[7]]),
+            }))
+        }
+        ECU_POWER_ID => {
+            if p.len() < 8 {
+                return None;
+            }
+            Some(EcuPitDiagFrame::Power(EcuPowerFrame {
+                shaft_power_raw: i16::from_le_bytes([p[0], p[1]]),
+                ac_power_raw: i16::from_le_bytes([p[2], p[3]]),
+                dc_bus_v: u16::from_le_bytes([p[4], p[5]]),
+                accu_current_raw: i16::from_le_bytes([p[6], p[7]]),
             }))
         }
         _ => None,
@@ -1574,5 +1847,61 @@ mod tests {
         );
         // Foreign ID (an AMS cell-V frame) is not ours.
         assert_eq!(decode_frame(&CanFrame::new(0x680, &[0; 8]).unwrap()), None);
+    }
+
+    #[test]
+    fn new_telemetry_frames_reject_short_payloads() {
+        // One byte short of each frame's DLC must not decode — a truncated
+        // frame would otherwise read neighbouring garbage as a value.
+        for (id, dlc) in [
+            (ECU_CELL_ID, 8),
+            (ECU_PACK_TEMP_ID, 6),
+            (ECU_INV_FOC_ID, 8),
+            (ECU_INV_TORQUE_ID, 8),
+            (ECU_POWER_ID, 8),
+        ] {
+            let short = CanFrame::new(id, &vec![0u8; dlc - 1]).unwrap();
+            assert!(decode_frame(&short).is_none(), "0x{id:03X} DLC {}", dlc - 1);
+            let full = CanFrame::new(id, &vec![0u8; dlc]).unwrap();
+            assert!(decode_frame(&full).is_some(), "0x{id:03X} DLC {dlc}");
+        }
+    }
+
+    #[test]
+    fn power_frame_helpers_scale_and_combine() {
+        let w = EcuPowerFrame {
+            shaft_power_raw: 7_123, // x10 W
+            ac_power_raw: 7_450,    // x10 W
+            dc_bus_v: 560,
+            accu_current_raw: 1_400, // x0.1 A
+        };
+        assert_eq!(w.shaft_power_w(), 71_230);
+        assert_eq!(w.ac_power_w(), 74_500);
+        assert_eq!(w.accu_current_a(), 140.0);
+        assert_eq!(w.dc_power_w(), 78_400.0);
+        // i16 x10 must not overflow into a wrong sign at the extremes.
+        let extreme = EcuPowerFrame {
+            shaft_power_raw: i16::MIN,
+            ..w
+        };
+        assert_eq!(extreme.shaft_power_w(), -327_680);
+    }
+
+    #[test]
+    fn foc_currents_are_one_thirty_second_amp_per_count() {
+        let f = EcuInvFocFrame {
+            current_d_raw: -32,
+            current_q_raw: 6_000,
+            volt_modulus_permil: 0,
+            ctrl_mode: 0,
+            ctrl_type: 0,
+            cmd_src: 0,
+            s4_fresh: false,
+            s6_fresh: false,
+            s8_fresh: false,
+            s9_fresh: false,
+        };
+        assert_eq!(f.current_d_a(), -1.0);
+        assert_eq!(f.current_q_a(), 187.5);
     }
 }

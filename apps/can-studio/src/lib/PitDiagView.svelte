@@ -38,7 +38,10 @@
         AMS_NTC_PER_MODULE,
         AMS_NUM_MODULES,
         AMS_NUM_NTCS,
+        ECU_ACCU_A_PER_COUNT,
+        ECU_FOC_A_PER_COUNT,
         ECU_INV_TEMP_DISCONNECTED_C,
+        ECU_POWER_W_PER_COUNT,
         onPitDiagFrame,
         onPitDiagStatus,
         pitDiagDisable,
@@ -46,6 +49,7 @@
         pitDiagEnable,
         writeCellsInto,
         writeNtcsInto,
+        type PitDiagEvent,
         type PitDiagProfile,
         type PitDiagStatus,
     } from './pit_diag';
@@ -262,6 +266,32 @@
     let ecuHealth = $state<EcuHealthSnapshot | null>(null);
     let ecuDv = $state<EcuDvSnapshot | null>(null);
     let ecuInvFaults = $state<EcuInvFaultsSnapshot | null>(null);
+    // 0x709..0x70D (#566) — stored as the event itself; the fields are
+    // already the shape the cards read.
+    type EcuEvent<K extends PitDiagEvent['kind']> = Extract<PitDiagEvent, { kind: K }>;
+    let ecuCell = $state<EcuEvent<'ecuCell'> | null>(null);
+    let ecuPackTemp = $state<EcuEvent<'ecuPackTemp'> | null>(null);
+    let ecuInvFoc = $state<EcuEvent<'ecuInvFoc'> | null>(null);
+    let ecuInvTorque = $state<EcuEvent<'ecuInvTorque'> | null>(null);
+    let ecuPower = $state<EcuEvent<'ecuPower'> | null>(null);
+
+    function fmtKw(watts: number): string {
+        return `${(watts / 1000).toFixed(1)} kW`;
+    }
+
+    // Below this the efficiency ratios are noise (idle, coasting) — the
+    // frame's purpose is one capture at steady full throttle.
+    const EFFICIENCY_MIN_W = 5000;
+    const ecuPowerView = $derived.by(() => {
+        if (ecuPower === null) return null;
+        const shaftW = ecuPower.shaftPowerRaw * ECU_POWER_W_PER_COUNT;
+        const acW = ecuPower.acPowerRaw * ECU_POWER_W_PER_COUNT;
+        const accuA = ecuPower.accuCurrentRaw * ECU_ACCU_A_PER_COUNT;
+        const dcW = ecuPower.dcBusV * accuA;
+        const ratio = (den: number) =>
+            shaftW > 0 && Math.abs(den) >= EFFICIENCY_MIN_W ? shaftW / Math.abs(den) : null;
+        return { shaftW, acW, accuA, dcW, motorEff: ratio(acW), totalEff: ratio(dcW) };
+    });
 
     // ---- uDV pit-diag snapshots (0x7A0..=0x7A4) ----
     interface UdvStatusSnapshot {
@@ -753,6 +783,11 @@
         ecuHealth = null;
         ecuDv = null;
         ecuInvFaults = null;
+        ecuCell = null;
+        ecuPackTemp = null;
+        ecuInvFoc = null;
+        ecuInvTorque = null;
+        ecuPower = null;
         udvStatus = null;
         udvRes = null;
         udvPipe = null;
@@ -1000,6 +1035,21 @@
                     motorRpmMech: event.motorRpmMech,
                     asStatus: event.asStatus,
                 };
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuCell') {
+                ecuCell = event;
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuPackTemp') {
+                ecuPackTemp = event;
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuInvFoc') {
+                ecuInvFoc = event;
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuInvTorque') {
+                ecuInvTorque = event;
+                framesThisScan += 1;
+            } else if (event.kind === 'ecuPower') {
+                ecuPower = event;
                 framesThisScan += 1;
                 // ---- uDV profile frames (0x7A0..=0x7A4) ----
             } else if (event.kind === 'udvStatus') {
@@ -2148,6 +2198,254 @@
                         </div>
                     {:else}
                         <p class="muted small">No fault-layer frame yet.</p>
+                    {/if}
+                </div>
+
+                <!-- Torque derates (0x709 cell, 0x70A pack thermal, #566).
+                     Answers "which derate is capping torque right now". -->
+                <div class="card">
+                    <h3 class="card-h">Torque derates</h3>
+                    {#if ecuCell !== null || ecuPackTemp !== null}
+                        {#if ecuCell !== null}
+                            {@const c = ecuCell}
+                            <div
+                                class="meter-row"
+                                title="Low-cell derate ceiling (0x709 cap_pct): torque = min(torque, cap). A ceiling, not a scale factor."
+                            >
+                                <span class="meter-label">cell</span>
+                                <div class="meter">
+                                    <div
+                                        class="meter-fill"
+                                        class:warn={c.capped}
+                                        style="width: {Math.min(c.capPct, 100)}%"
+                                    ></div>
+                                </div>
+                                <span class="meter-val mono">{c.capPct}%</span>
+                            </div>
+                            <div class="reads">
+                                <span class="stat" title="Loaded minimum cell voltage — sags under load.">
+                                    <span>cell raw</span>
+                                    <strong>{(c.rawMv / 1000).toFixed(3)} V</strong>
+                                </span>
+                                <span
+                                    class="stat"
+                                    title="Estimated open-circuit voltage. On one acceleration run this should stay FLAT while raw sags. Still dips → CellIrMilliOhm too low; humps up → too high."
+                                >
+                                    <span>est. OCV</span>
+                                    <strong>{(c.estOcvMv / 1000).toFixed(3)} V</strong>
+                                </span>
+                                <span class="stat" title="IR compensation applied (est. OCV − raw).">
+                                    <span>IR comp</span>
+                                    <strong>{c.compMv > 0 ? '+' : ''}{c.compMv} mV</strong>
+                                </span>
+                            </div>
+                            <div class="flags">
+                                <span class="flag" class:warn={c.capped}>cell capping</span>
+                                <span
+                                    class="flag"
+                                    class:warn={!c.compensated}
+                                    title="The current signal went stale, so the derate fell back to the raw (sagging) loaded voltage."
+                                >
+                                    uncompensated
+                                </span>
+                                <span
+                                    class="flag"
+                                    class:warn={c.rawFloor}
+                                    title="The backstop fired and the OCV estimate was ignored entirely."
+                                >
+                                    raw floor
+                                </span>
+                            </div>
+                        {/if}
+                        {#if ecuPackTemp !== null}
+                            {@const t = ecuPackTemp}
+                            <div
+                                class="meter-row reads-temps"
+                                title="Pack thermal cap (0x70A pack_cap_pct)."
+                            >
+                                <span class="meter-label">pack</span>
+                                <div class="meter">
+                                    <div
+                                        class="meter-fill"
+                                        class:warn={t.packCapped || t.packUnknown}
+                                        style="width: {Math.min(t.packCapPct, 100)}%"
+                                    ></div>
+                                </div>
+                                <span class="meter-val mono">{t.packCapPct}%</span>
+                            </div>
+                            <div class="reads">
+                                <span class="stat" title="Pack temperature the cap actually used.">
+                                    <span>pack used</span>
+                                    <strong>{t.packTempUsedDegc} °C</strong>
+                                </span>
+                                <span class="stat" title="Hottest raw module reading, before plausibility filtering.">
+                                    <span>pack raw</span>
+                                    <strong>{t.packTempRawDegc} °C</strong>
+                                </span>
+                            </div>
+                            <div
+                                class="flags"
+                                title="Modules that fed the pack max. An excluded module (AMS offline, implausible reading) is silently absent — which is how a hot pack goes unnoticed."
+                            >
+                                {#each t.modulesUsed as used, m (m)}
+                                    <span class="flag" class:on={used} class:warn={!used}>M{m}</span>
+                                {/each}
+                                <span class="flag" class:warn={t.packCapped}>pack capping</span>
+                                {#if t.packUnknown}
+                                    <span
+                                        class="pill pill-danger"
+                                        title="No module was usable: the cap is at its unknown-temperature fallback. 0 °C is a real pack temperature, so nothing else catches this."
+                                    >
+                                        temp unknown
+                                    </span>
+                                {/if}
+                            </div>
+                        {/if}
+                    {:else}
+                        <p class="muted small">No derate frames yet.</p>
+                    {/if}
+                </div>
+
+                <!-- Is the inverter limiting us? (0x70B FOC, 0x70C torque, #566) -->
+                <div class="card">
+                    <h3 class="card-h">Inverter limiting?</h3>
+                    {#if ecuInvTorque !== null || ecuInvFoc !== null}
+                        {#if ecuInvTorque !== null}
+                            {@const q = ecuInvTorque}
+                            <div class="reads">
+                                <span
+                                    class="stat"
+                                    title="Torque the ECU put on 0x362. NEGATIVE for forward drive — the mechanical negation of the motor mounting, not a bug."
+                                >
+                                    <span>requested</span>
+                                    <strong>{q.torqueReqNm} Nm</strong>
+                                </span>
+                                <span class="stat" title="What the inverter believes it is delivering (0x468).">
+                                    <span>estimated</span>
+                                    <strong>{q.torqueEstNm} Nm</strong>
+                                </span>
+                                <span
+                                    class="stat"
+                                    title="Max feasible torque from the inverter (0x467), shown RAW: the vendor DBC calls it Torque_Max_Feas_Ndm ('Ndm', not 'Nm') and whether that means deci-Nm is unresolved. Don't compare it to the Nm values until that's settled on the car."
+                                >
+                                    <span>max feasible</span>
+                                    <strong>{q.torqueMaxFeasRaw} <span class="muted">raw ⚠</span></strong>
+                                </span>
+                            </div>
+                        {/if}
+                        {#if ecuInvFoc !== null}
+                            {@const f = ecuInvFoc}
+                            <div class="reads reads-temps">
+                                <span
+                                    class="stat"
+                                    title="Torque-producing current. Plateauing while 'requested' climbs = the inverter is limiting."
+                                >
+                                    <span>Iq</span>
+                                    <strong>{(f.currentQRaw * ECU_FOC_A_PER_COUNT).toFixed(1)} A</strong>
+                                </span>
+                                {#if ecuInvTorque !== null}
+                                    <span
+                                        class="stat"
+                                        title="The inverter's own Iq command. Iq tracking it = a LIMIT; Iq not following it = a failure to follow."
+                                    >
+                                        <span>Iq setpoint</span>
+                                        <strong>
+                                            {(ecuInvTorque.setpointQRaw * ECU_FOC_A_PER_COUNT).toFixed(1)} A
+                                        </strong>
+                                    </span>
+                                {/if}
+                                <span class="stat" title="Flux-axis current. Large negative at speed = field weakening.">
+                                    <span>Id</span>
+                                    <strong>{(f.currentDRaw * ECU_FOC_A_PER_COUNT).toFixed(1)} A</strong>
+                                </span>
+                            </div>
+                            <div
+                                class="meter-row"
+                                title="Voltage modulus: share of the available bus voltage the modulator is using. Near 100 % there is no voltage headroom — the ordinary, non-fault reason torque falls off at the top of the straight."
+                            >
+                                <span class="meter-label">V mod</span>
+                                <div class="meter">
+                                    <div
+                                        class="meter-fill"
+                                        class:warn={f.voltModulusPermil >= 950}
+                                        style="width: {Math.min(f.voltModulusPermil / 10, 100)}%"
+                                    ></div>
+                                </div>
+                                <span class="meter-val mono">{(f.voltModulusPermil / 10).toFixed(1)}%</span>
+                            </div>
+                            <div
+                                class="flags"
+                                title="Per-frame freshness of the inverter feedback frames. A stale 0x467 makes a frozen max-feasible torque read as a healthy ceiling."
+                            >
+                                <span class="flag" class:on={f.s4Fresh} class:warn={!f.s4Fresh}>0x463</span>
+                                <span class="flag" class:on={f.s6Fresh} class:warn={!f.s6Fresh}>0x465</span>
+                                <span class="flag" class:on={f.s8Fresh} class:warn={!f.s8Fresh}>0x467</span>
+                                <span class="flag" class:on={f.s9Fresh} class:warn={!f.s9Fresh}>0x468</span>
+                            </div>
+                            <p
+                                class="muted small mono"
+                                title="Raw inverter codes from 0x465 (Ctrl_Mode_App / Ctrl_Type_App / Cmd_Src_App). Neither the ECU firmware nor the inverter vendor DBC defines names for them."
+                            >
+                                ctrl mode {f.ctrlMode} · type {f.ctrlType} · cmd src {f.cmdSrc}
+                            </p>
+                        {/if}
+                    {:else}
+                        <p class="muted small">No inverter-limit frames yet.</p>
+                    {/if}
+                </div>
+
+                <!-- Power & efficiency (0x70D, #566). Measures DrivetrainEffPct
+                     instead of guessing it. -->
+                <div class="card">
+                    <h3 class="card-h">Power &amp; efficiency</h3>
+                    {#if ecuPowerView !== null}
+                        {@const w = ecuPowerView}
+                        <div class="reads">
+                            <span class="stat" title="Commanded mechanical power, torque × ω. Positive for forward drive.">
+                                <span>shaft</span>
+                                <strong>{fmtKw(w.shaftW)}</strong>
+                            </span>
+                            <span
+                                class="stat"
+                                class:bad={w.shaftW > EFFICIENCY_MIN_W && w.acW < 0}
+                                title="The inverter's own AC output measurement. Should be positive under a forward pull — negative there means a decode problem, not the inverter."
+                            >
+                                <span>AC</span>
+                                <strong>{fmtKw(w.acW)}</strong>
+                            </span>
+                            <span
+                                class="stat"
+                                title="DC power at the accumulator (DC bus × AMS accumulator current) — the side the power rule is judged on."
+                            >
+                                <span>DC</span>
+                                <strong>
+                                    {fmtKw(w.dcW)}
+                                    <span class="muted">({ecuPower?.dcBusV} V × {w.accuA.toFixed(1)} A)</span>
+                                </strong>
+                            </span>
+                        </div>
+                        <div class="reads reads-temps">
+                            <span
+                                class="stat"
+                                title="Motor + gearbox efficiency = shaft / AC. Shown above {EFFICIENCY_MIN_W / 1000} kW; meaningful at steady full throttle just under the knee."
+                            >
+                                <span>motor η</span>
+                                <strong>
+                                    {w.motorEff === null ? '—' : `${(w.motorEff * 100).toFixed(1)} %`}
+                                </strong>
+                            </span>
+                            <span
+                                class="stat"
+                                title="TOTAL efficiency = shaft / DC — the number DrivetrainEffPct should be set to. Shown above {EFFICIENCY_MIN_W / 1000} kW."
+                            >
+                                <span>total η</span>
+                                <strong>
+                                    {w.totalEff === null ? '—' : `${(w.totalEff * 100).toFixed(1)} %`}
+                                </strong>
+                            </span>
+                        </div>
+                    {:else}
+                        <p class="muted small">No power frame yet.</p>
                     {/if}
                 </div>
 
@@ -3491,6 +3789,12 @@
         color: var(--success);
         background: var(--success-soft, transparent);
     }
+    /* Lit amber: a limiting / degraded condition (capping, stale, excluded). */
+    .flag.warn {
+        border-color: var(--warning);
+        color: var(--warning);
+        background: var(--warning-soft, transparent);
+    }
     .reads {
         display: flex;
         flex-wrap: wrap;
@@ -3528,6 +3832,9 @@
         height: 100%;
         background: var(--accent);
         transition: width 0.1s linear;
+    }
+    .meter-fill.warn {
+        background: var(--warning);
     }
     .meter-val {
         font-size: var(--text-sm);
