@@ -812,11 +812,13 @@ fn program_provision_seed(session: &mut Session, node_id: u8) -> Result<(), SwdE
             .map_err(|e| SwdError::SeedProgram(format!("set FLASH_CR1.PG: {e}")))?;
 
         for (i, chunk) in record
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take(H7_WORDS_PER_FLASHWORD)
             .enumerate()
         {
-            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let word = u32::from_le_bytes(*chunk);
             core.write_word_32(SEED_ADDR + (i as u64) * 4, word)
                 .map_err(|e| SwdError::SeedProgram(format!("write seed word {i}: {e}")))?;
         }
