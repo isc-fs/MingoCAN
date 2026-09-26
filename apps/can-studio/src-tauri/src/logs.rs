@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use can_flasher::logfs_client;
-use can_flasher::protocol::commands::{cmd_logfs_finalize, cmd_logfs_list};
+use can_flasher::protocol::commands::cmd_logfs_list;
 use can_flasher::protocol::logfs;
 use can_flasher::protocol::Response;
 use can_flasher::session::{Session, SessionConfig, SessionError};
@@ -385,27 +385,6 @@ fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
         }
     }
     base
-}
-
-/// Seal the log currently being written so the run that just happened can
-/// be pulled without power-cycling the car.
-///
-/// Returns the index the sealed log now occupies. The node NACKs
-/// `FILE_NOT_FOUND` when there is nothing to seal — no active file, or no
-/// rows written to it yet.
-#[tauri::command]
-pub async fn logs_finalize(request: LogsRequest) -> Result<u16, String> {
-    let _busy = BusyGuard::acquire()?;
-    let session = open_session(&request)?;
-    session
-        .app_connect()
-        .await
-        .map_err(|e| format!("app CONNECT before LOGFS_FINALIZE: {e}"))?;
-    let body = ack_body(&session, cmd_logfs_finalize(), "LOGFS_FINALIZE").await;
-    let _ = session.app_disconnect().await;
-
-    let index = logfs::parse_finalize(&body?).map_err(|e| format!("parse LOGFS_FINALIZE: {e}"))?;
-    Ok(index)
 }
 
 /// Ask an in-flight [`logs_pull`] to stop. Cooperative: the transfer
