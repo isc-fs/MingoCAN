@@ -19,7 +19,6 @@
         logsList,
         logsPull,
         logsCancel,
-        logsFinalize,
         CANCELLED_MSG,
         onPullProgress,
         formatBytes,
@@ -62,7 +61,6 @@
     let total = $state<number>(0);
     let lastResult = $state<string | null>(null);
     let cancelling = $state<boolean>(false);
-    let finalizing = $state<boolean>(false);
 
     let unlisten: UnlistenFn | null = null;
     onPullProgress((p) => {
@@ -107,31 +105,6 @@
             files = null;
         } finally {
             listing = false;
-        }
-    }
-
-    // The logger only closes a file on shutdown, so the run an operator
-    // actually cares about — the one that just happened — is the single
-    // file they can't pull. Sealing it makes it listable immediately.
-    async function finalize(): Promise<void> {
-        const request = buildRequest();
-        if (request === null) return;
-        finalizing = true;
-        error = null;
-        lastResult = null;
-        try {
-            const index = await logsFinalize(request);
-            lastResult = `Sealed the active log — it is now index ${index}.`;
-            await refresh();
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            // FILE_NOT_FOUND here means "nothing to seal", which is a
-            // normal state (no run since boot), not a fault.
-            error = msg.includes('FILE_NOT_FOUND')
-                ? 'Nothing to seal — no log is currently being written.'
-                : msg;
-        } finally {
-            finalizing = false;
         }
     }
 
@@ -212,15 +185,6 @@
                 onclick={refresh}
             >
                 {listing ? 'Listing…' : 'List logs'}
-            </button>
-            <button
-                type="button"
-                class="btn"
-                disabled={finalizing || pullingIndex !== null || !targetIsAms}
-                title="Close the log currently being written so it can be downloaded"
-                onclick={finalize}
-            >
-                {finalizing ? 'Sealing…' : 'Seal active log'}
             </button>
             <button
                 type="button"
@@ -308,7 +272,7 @@
                     Hit <strong>List logs</strong> to enumerate the files on the
                     card. Requires the node's log-transfer service (AMS
                     firmware) to be running. The run currently being recorded
-                    won't appear until you <strong>Seal active log</strong>.
+                    appears once the AMS closes it, on the next shutdown.
                 </p>
             </div>
         {:else if files.length === 0}
