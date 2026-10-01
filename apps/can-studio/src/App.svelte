@@ -18,6 +18,8 @@
     } from './lib/settings.svelte';
     import { loadDbc, unloadDbc } from './lib/dbc';
     import { checkForUpdate, type AvailableUpdate } from './lib/updater';
+    import { logsTransferActive } from './lib/logs';
+    import { ask } from '@tauri-apps/plugin-dialog';
 
     import Sidebar from './lib/Sidebar.svelte';
     import AdapterStatusBar from './lib/AdapterStatusBar.svelte';
@@ -35,7 +37,16 @@
     let settingsReady = $state<boolean>(false);
     let update = $state<AvailableUpdate | null>(null);
 
-    function selectView(id: ViewId): void {
+    async function selectView(id: ViewId): Promise<void> {
+        // Leaving Data logs cancels a running log download (see
+        // DataLogsView's onDestroy) — make that a choice, not a surprise.
+        if (id !== activeView && activeView === 'dataLogs' && logsTransferActive()) {
+            const leave = await ask(
+                'A log is still downloading. Leaving this page cancels it, and the file is not saved.',
+                { title: 'Cancel the download?', kind: 'warning', okLabel: 'Leave and cancel', cancelLabel: 'Stay' },
+            );
+            if (!leave) return;
+        }
         activeView = id;
     }
 

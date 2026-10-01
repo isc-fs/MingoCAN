@@ -1,8 +1,10 @@
-// Data-logs (LOGFS) bridge — list + pull the node's microSD car-data
+// Data-logs (LOGFS) bridge — scan + pull the node's microSD car-data
 // logs over CAN (#506). Mirrors `src-tauri/src/logs.rs`.
 //
-// `mtimeMonotonic` is boot-relative (the AMS has no set RTC) — render it
-// as an ordering / uptime value, NEVER as a calendar date.
+// The card has no delete, so the backend keeps a per-laptop download
+// ledger and `logsScan` reports each file's status against it: `new`,
+// `downloaded` (a copy is on disk at the listed size), `missing`
+// (downloaded once, copy gone) or `hidden` (dismissed by hand).
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -16,12 +18,26 @@ export interface LogsRequest {
     timeoutMs: number;
 }
 
-export interface LogFile {
+export type FileStatus = 'new' | 'downloaded' | 'missing' | 'hidden';
+
+export interface ScannedFile {
     index: number;
     name: string;
     size: number;
-    /** Boot-relative / monotonic. Not a timestamp. */
-    mtimeMonotonic: number;
+    status: FileStatus;
+    /** The copy on disk (downloaded) or where it used to be (missing). */
+    path: string | null;
+    /** Unix seconds of that download. */
+    pulledAt: number | null;
+}
+
+export interface ScanResult {
+    /** Card (directory) order — sort with `newestFirst`. */
+    files: ScannedFile[];
+    /** A downloaded file's CRC no longer matches: reformatted or swapped
+     *  card. Everything is reported as new. */
+    cardChanged: boolean;
+    ledgerError: string | null;
 }
 
 export interface PullProgress {
@@ -36,29 +52,63 @@ export interface PullResult {
     path: string;
     bytes: number;
     crcVerified: boolean;
+    /** Saved, but not recorded — it will show as new on the next scan. */
+    ledgerError: string | null;
 }
 
 /** Backend marker for an operator-cancelled pull (not a failure). */
 export const CANCELLED_MSG = 'cancelled by operator';
 
+/** Backend marker: the listed index no longer holds that file. */
+export const CARD_CHANGED_MSG = 'the card changed since it was listed';
+
 /** Progress event emitted during `logsPull`. */
 export const LOGS_PROGRESS_EVENT = 'logs://progress';
 
-export function logsList(request: LogsRequest): Promise<LogFile[]> {
-    return invoke<LogFile[]>('logs_list', { request });
+export function logsScan(request: LogsRequest): Promise<ScanResult> {
+    return invoke<ScanResult>('logs_scan', { request });
 }
 
 export function logsPull(
     request: LogsRequest,
-    index: number,
+    file: ScannedFile,
     destDir: string,
 ): Promise<PullResult> {
-    return invoke<PullResult>('logs_pull', { request, index, destDir });
+    return invoke<PullResult>('logs_pull', {
+        request,
+        index: file.index,
+        expectName: file.name,
+        expectSize: file.size,
+        destDir,
+    });
 }
 
 /** Ask an in-flight pull to stop; it aborts at the next read boundary. */
 export function logsCancel(): Promise<void> {
     return invoke<void>('logs_cancel');
+}
+
+/** Record hides / unhides / forgets in this laptop's ledger. Touches
+ *  neither the card nor any file on disk. */
+export function logsMark(
+    action: 'hide' | 'unhide' | 'forget',
+    node: number,
+    files: ReadonlyArray<Pick<ScannedFile, 'name' | 'size'>>,
+): Promise<void> {
+    return invoke<void>('logs_mark', {
+        action,
+        files: files.map((f) => ({ node, name: f.name, size: f.size })),
+    });
+}
+
+/** `<Documents>/MingoCAN Logs` on this machine. */
+export function logsDefaultRoot(): Promise<string> {
+    return invoke<string>('logs_default_root');
+}
+
+/** Show a file (selected) or folder in Finder / Explorer / the file manager. */
+export function logsReveal(path: string): Promise<void> {
+    return invoke<void>('logs_reveal', { path });
 }
 
 export function onPullProgress(
@@ -67,9 +117,90 @@ export function onPullProgress(
     return listen<PullProgress>(LOGS_PROGRESS_EVENT, (e) => handler(e.payload));
 }
 
+// ---- Card file helpers ----
+
+/** The AMS lists `IMUnnnn.CSV` at index `0x8000 | nnnn` and `LOGnnnn.CSV`
+ *  at `nnnn` (IFS08-CE-AMS log_names.hpp). */
+export function kindOf(index: number): 'log' | 'imu' {
+    return (index & 0x8000) !== 0 ? 'imu' : 'log';
+}
+
+/** Rotation number — a new file every 5 min / 4 MiB, counting up. */
+export function runNumber(index: number): number {
+    return index & 0x7fff;
+}
+
+/** Sort comparator: newest rotation first. The card lists in directory
+ *  order, which is not necessarily index order. */
+export function newestFirst(a: ScannedFile, b: ScannedFile): number {
+    return runNumber(b.index) - runNumber(a.index);
+}
+
+// ---- Download location ----
+
+/** Local calendar date, `YYYY-MM-DD`. */
+export function localDate(d: Date = new Date()): string {
+    const p = (n: number) => n.toString().padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** Join path parts with the separator `root` already uses. */
+export function joinPath(root: string, ...parts: string[]): string {
+    const sep = root.includes('\\') && !root.includes('/') ? '\\' : '/';
+    return [root.replace(/[\\/]+$/, ''), ...parts].join(sep);
+}
+
+// ---- Formatting ----
+
 /** Human byte size — logs run to multiple MB. */
 export function formatBytes(n: number): string {
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
     return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+/** Classic CAN moves roughly 10–20 kB/s of log data. */
+const SLOW_BPS = 10_000;
+const FAST_BPS = 20_000;
+
+export function formatDuration(seconds: number): string {
+    const s = Math.max(1, Math.round(seconds));
+    if (s < 60) return `${s} s`;
+    const m = Math.round(s / 60);
+    return `${m} min`;
+}
+
+/** Up-front estimate for `bytes`, e.g. "~2–4 min". */
+export function estimate(bytes: number): string {
+    const fast = formatDuration(bytes / FAST_BPS);
+    const slow = formatDuration(bytes / SLOW_BPS);
+    if (fast === slow) return `~${fast}`;
+    const [fastN, fastUnit] = fast.split(' ');
+    const [slowN, slowUnit] = slow.split(' ');
+    return fastUnit === slowUnit
+        ? `~${fastN}–${slowN} ${slowUnit}`
+        : `~${fast}–${slow}`;
+}
+
+// ---- Transfer guard ----
+
+// Leaving Data logs cancels a running pull (it holds the one adapter for
+// minutes). App.svelte reads this to ask before navigating away.
+let transferActive = false;
+
+export function setLogsTransferActive(active: boolean): void {
+    transferActive = active;
+}
+
+export function logsTransferActive(): boolean {
+    return transferActive;
+}
+
+/** "today 14:31" / "3 Oct 14:31" for a ledger timestamp (unix seconds). */
+export function formatPulledAt(secs: number | null): string {
+    if (secs === null) return '';
+    const d = new Date(secs * 1000);
+    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (localDate(d) === localDate()) return `today ${time}`;
+    return `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`;
 }

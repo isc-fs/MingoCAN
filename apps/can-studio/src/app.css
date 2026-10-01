@@ -249,20 +249,25 @@ button.btn {
     cursor: not-allowed;
 }
 
+/* Variants are written as `.btn.btn-*` (0,2,0) so they outrank the
+   `button.btn` base selector (0,1,1) above. A bare `.btn-*` (0,1,0)
+   loses to it on every <button>, which silently dropped the fill,
+   colours, border and compact padding of all variants. */
+
 /* Primary — the only filled button. Reserve for the main action
    in a section (Flash, Burn bootloader, Provision). */
-.btn-primary {
+.btn.btn-primary {
     background: var(--accent);
     color: #1a1a1a;
     border-color: var(--accent);
     font-weight: 600;
 }
-.btn-primary:hover:not(:disabled) {
+.btn.btn-primary:hover:not(:disabled) {
     background: var(--accent-hover);
     border-color: var(--accent-hover);
     color: #1a1a1a;
 }
-.btn-primary:active:not(:disabled) {
+.btn.btn-primary:active:not(:disabled) {
     background: var(--accent-strong);
     border-color: var(--accent-strong);
 }
@@ -270,7 +275,7 @@ button.btn {
 /* Secondary — quieter than the outline default: hover swaps the
    text + outline to accent. Useful for "view this" / "switch
    that" inline-link buttons. */
-.btn-secondary:hover:not(:disabled) {
+.btn.btn-secondary:hover:not(:disabled) {
     border-color: var(--accent);
     color: var(--accent);
     background: transparent;
@@ -278,11 +283,11 @@ button.btn {
 
 /* Ghost — no outline, no fill. For inline secondary actions in
    tables/lists where a full button would be too loud. */
-.btn-ghost {
+.btn.btn-ghost {
     background: transparent;
     border-color: transparent;
 }
-.btn-ghost:hover:not(:disabled) {
+.btn.btn-ghost:hover:not(:disabled) {
     background: var(--hover);
     border-color: var(--border);
 }
@@ -290,18 +295,18 @@ button.btn {
 /* Danger — destructive actions (Clear DTCs, Erase chip). Outlined
    in --danger; fills with a faint tint on hover so accidental
    clicks don't blend in. */
-.btn-danger {
+.btn.btn-danger {
     color: var(--danger);
     border-color: var(--danger);
 }
-.btn-danger:hover:not(:disabled) {
+.btn.btn-danger:hover:not(:disabled) {
     background: var(--danger-soft);
     border-color: var(--danger);
     color: var(--danger);
 }
 
 /* Compact size — for inline secondary actions next to fields. */
-.btn-sm {
+.btn.btn-sm {
     padding: var(--space-1) var(--space-3);
     font-size: var(--text-sm);
 }

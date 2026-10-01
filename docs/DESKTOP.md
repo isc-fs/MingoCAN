@@ -161,9 +161,13 @@ matters on a live car. **[TELEMETRY.md](TELEMETRY.md)** is the guide.
 Pulls the car-data logs off a board's microSD card over CAN, so you don't have
 to open anything up. Read-only — there is no delete.
 
-Two things trip people up: an unsealed log doesn't appear in a listing, and a
-full card is a coffee break rather than a pause. **[DATA_LOGS.md](DATA_LOGS.md)**
-covers both.
+The newest file sits at the top with one **Download newest** button, files save
+to `Documents/MingoCAN Logs/<board>/<date>/` without a dialog, and files this
+laptop already has fold into a collapsed group.
+
+Two things trip people up: the file being written only appears after the next
+power-cycle, and a full card is a coffee break rather than a pause.
+**[DATA_LOGS.md](DATA_LOGS.md)** covers both.
 
 ---
 
