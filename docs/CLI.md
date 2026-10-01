@@ -266,10 +266,10 @@ Boards write car data to a microSD card; LOGFS pulls those files off over CAN.
 **Read-only — there is no delete.** Served by the *application* firmware, so a
 board sitting in its bootloader will not answer.
 
-```bash
-# Seal the log being written right now. An unsealed log does not list.
-can-flasher … --node-id 0x02 logs finalize
+The log a board is writing right now does not list until the AMS seals it on
+shutdown, so power-cycle the car to get today's run.
 
+```bash
 can-flasher … --node-id 0x02 logs list
 can-flasher … --node-id 0x02 logs pull --index 3 --out ./logs/
 can-flasher … --node-id 0x02 logs pull --all --out ./logs/

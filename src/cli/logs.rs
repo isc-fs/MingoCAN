@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 
 use super::GlobalFlags;
 use crate::logfs_client;
-use crate::protocol::commands::{cmd_logfs_finalize, cmd_logfs_list};
+use crate::protocol::commands::cmd_logfs_list;
 use crate::protocol::logfs::{self, LogEntry};
 use crate::protocol::responses::Response;
 use crate::session::{Session, SessionConfig, SessionError};
@@ -42,10 +42,6 @@ pub enum LogsCommand {
 
     /// Download log file(s) to a local directory
     Pull(PullArgs),
-
-    /// Seal the log currently being written so it can be listed and
-    /// pulled without power-cycling the car
-    Finalize,
 }
 
 #[derive(Debug, Args)]
@@ -73,7 +69,6 @@ pub async fn run(global: &GlobalFlags, args: &LogsArgs) -> Result<()> {
     match &args.command {
         LogsCommand::List => run_list(global).await,
         LogsCommand::Pull(p) => run_pull(global, p).await,
-        LogsCommand::Finalize => run_finalize(global).await,
     }
 }
 
@@ -378,27 +373,6 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
 
     let _ = session.app_disconnect().await;
     result
-}
-
-/// Seal the log that is currently being written.
-///
-/// Without this, the run you just did isn't listable — the logger only
-/// closes a file on shutdown, so the data from the session you care about
-/// most is the one file you can't pull. NACKs `FILE_NOT_FOUND` when
-/// there's nothing to seal (no active file, or no rows in it yet).
-async fn run_finalize(global: &GlobalFlags) -> Result<()> {
-    let session = open_session(global)?;
-    open_app_session(&session, "LOGFS_FINALIZE").await?;
-    let body = ack_body(&session, cmd_logfs_finalize(), "LOGFS_FINALIZE").await;
-    let _ = session.app_disconnect().await;
-
-    let index = logfs::parse_finalize(&body?).context("parsing LOGFS_FINALIZE")?;
-    if global.json {
-        println!("{}", serde_json::json!({ "status": "ok", "index": index }));
-    } else {
-        println!("Sealed the active log — it is now index {index}, ready to pull.");
-    }
-    Ok(())
 }
 
 /// Don't clobber an existing download — `LOG0001.CSV` → `LOG0001.CSV.1`.

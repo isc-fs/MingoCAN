@@ -11,8 +11,8 @@ It is **read-only**: files come off, nothing goes on, and nothing is deleted.
 
 **1. Today's run isn't listed yet.** The log a board is writing *right now*
 does not appear in a listing until it is sealed, which the AMS does when it
-shuts down. Power-cycle the car (or run `logs finalize` from the CLI), then
-list. If a listing comes back empty or missing today's run, this is why.
+shuts down. Power-cycle the car, then list. If a listing comes back empty or
+missing today's run, this is why.
 
 **2. It takes minutes, not seconds.** Throughput is roughly **10–20 kB/s**, so a
 4 MiB file is **3.5 to 7 minutes**, and pulling a full card is a 20–35 minute
@@ -26,7 +26,7 @@ job. Plan for it rather than assuming the tool has hung.
 2. Pick one and pull it, or pull them all.
 
 The app lists sealed logs only. To get the run that is still being recorded,
-power-cycle the car first, or seal it with `logs finalize` from the CLI.
+power-cycle the car first.
 
 Progress and cancellation are handled for you. The transfer survives a busy bus:
 if the session drops, it re-establishes and resumes from the last acknowledged
@@ -35,8 +35,7 @@ offset, with a final CRC gating the result.
 ## From the CLI
 
 ```bash
-can-flasher --interface pcan --channel PCAN_USBBUS1 --node-id 0x02 logs finalize
-can-flasher … --node-id 0x02 logs list
+can-flasher --interface pcan --channel PCAN_USBBUS1 --node-id 0x02 logs list
 can-flasher … --node-id 0x02 logs pull --index 3 --out ./logs/
 can-flasher … --node-id 0x02 logs pull --all --out ./logs/
 ```
@@ -63,8 +62,7 @@ shorter deadline cannot outlast a FatFs read on a shared bus.
 ## Troubleshooting
 
 **Nothing lists, or today's run is missing.** It's still being written, and an
-unsealed log is invisible. Power-cycle the car, or run `logs finalize` from the
-CLI.
+unsealed log is invisible. Power-cycle the car.
 
 **It exits 99 with a confusing message.** Check `--node-id` is present.
 
