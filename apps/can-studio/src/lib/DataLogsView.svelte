@@ -1,31 +1,53 @@
 <script lang="ts">
     /*
-        Data logs — list the microSD car-data logs on a node and pull them
-        to a local folder over CAN (#506, firmware spec IFS08-CE-AMS#406).
+        Data logs — pull the car-data logs off a node's microSD card over
+        CAN (#506, firmware spec IFS08-CE-AMS#406).
 
-        Read-only by design: v1 has no delete. Transfers run at classic-CAN
-        speeds (tens of KB/s), so a multi-MB log takes minutes — every pull
-        shows a live progress bar and the CRC verdict when it lands.
+        Built around the one task that matters in the pits: get the run we
+        just did. Opening the tab lists the card; the newest file sits at
+        the top with one button; downloads go straight to a remembered
+        folder (<root>/<ROLE>/<YYYY-MM-DD>/) with no dialog.
 
-        `mtimeMonotonic` is boot-relative (no RTC on the AMS), so it is
-        labelled "uptime" and never formatted as a date.
+        The card can't delete, so the backend keeps a per-laptop ledger and
+        each scan says which files are already safely on this disk. Those
+        fold into a collapsed group — but only while the copy really
+        exists at the listed size; a deleted copy shows up as "missing",
+        never hidden. LOG and IMU files are shown separately.
+
+        Transfers run at classic-CAN speeds (10–20 kB/s), so a 4 MiB file
+        is minutes: the top card turns into a progress panel with rate,
+        time left and cancel.
     */
-    import { onDestroy } from 'svelte';
-    import { open as openDialog } from '@tauri-apps/plugin-dialog';
+    import { onDestroy, onMount, untrack } from 'svelte';
+    import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
     import type { UnlistenFn } from '@tauri-apps/api/event';
 
     import { settings } from './settings.svelte';
     import {
-        logsList,
+        logsScan,
         logsPull,
         logsCancel,
-        CANCELLED_MSG,
+        logsMark,
+        logsDefaultRoot,
+        logsReveal,
         onPullProgress,
+        setLogsTransferActive,
+        CANCELLED_MSG,
+        CARD_CHANGED_MSG,
+        kindOf,
+        newestFirst,
+        localDate,
+        joinPath,
         formatBytes,
-        type LogFile,
+        formatDuration,
+        formatPulledAt,
+        estimate,
         type LogsRequest,
+        type ScanResult,
+        type ScannedFile,
     } from './logs';
     import { ROLES } from './provision';
+    import NodeIdRolePicker from './NodeIdRolePicker.svelte';
     import type { ViewId } from './stores';
 
     interface Props {
@@ -39,44 +61,33 @@
                 settings.adapter.channel.length > 0),
     );
 
-    // LOGFS is AMS-only today. The app-wide adapter default is 0x3 (uDV),
-    // so without surfacing the target an operator can sit here timing out
-    // against the wrong board — and our bootloader probe would even get an
-    // answer from it and tell them to reflash it. Show the target, and say
-    // plainly when it isn't the AMS.
-    const AMS_NODE_ID = 0x02;
-    const targetNode = $derived(settings.adapter.nodeId);
-    const targetRole = $derived(
-        ROLES.find((r) => r.nodeId === settings.adapter.nodeId)?.name ?? null,
+    // ---- Target + destination ----
+
+    const node = $derived(settings.logs.nodeId);
+    const roleName = $derived(
+        ROLES.find((r) => r.nodeId === node)?.name.toUpperCase() ?? null,
     );
-    const targetIsAms = $derived(settings.adapter.nodeId === AMS_NODE_ID);
+    const nodeLabel = $derived(
+        node === null
+            ? 'no board'
+            : `${roleName ?? 'node'} 0x${node.toString(16).padStart(2, '0')}`,
+    );
+    /** Per-board folder, so ECU / uDV logs never land among the AMS's. */
+    const boardFolder = $derived(
+        roleName ?? `node-0x${(node ?? 0).toString(16).padStart(2, '0')}`,
+    );
 
-    let files = $state<LogFile[] | null>(null);
-    let listing = $state<boolean>(false);
-    let error = $state<string | null>(null);
-
-    let destDir = $state<string | null>(null);
-    let pullingIndex = $state<number | null>(null);
-    let received = $state<number>(0);
-    let total = $state<number>(0);
-    let lastResult = $state<string | null>(null);
-    let cancelling = $state<boolean>(false);
-
-    let unlisten: UnlistenFn | null = null;
-    onPullProgress((p) => {
-        if (pullingIndex === null) return;
-        received = p.received;
-        total = p.total;
-    }).then((fn) => (unlisten = fn));
-    // Leaving the view does NOT stop the transfer — the pull runs in the
-    // backend and holds the one CAN adapter for minutes, so navigating
-    // away would orphan it: every other view stays locked out and the
-    // next pull is refused until it finishes on its own. Ask it to stop
-    // on the way out.
-    onDestroy(() => {
-        unlisten?.();
-        if (pullingIndex !== null) void logsCancel();
-    });
+    let defaultRoot = $state<string | null>(null);
+    const root = $derived(
+        settings.logs.rootDir !== '' ? settings.logs.rootDir : defaultRoot,
+    );
+    const boardDir = $derived(root === null ? null : joinPath(root, boardFolder));
+    /** Where the next download lands (the date is the download date —
+     *  the card has no clock). */
+    function destDir(): string | null {
+        if (boardDir === null) return null;
+        return settings.logs.dateFolders ? joinPath(boardDir, localDate()) : boardDir;
+    }
 
     function buildRequest(): LogsRequest | null {
         if (!adapterReady || settings.adapter.interface === null) return null;
@@ -87,33 +98,217 @@
                     ? settings.adapter.channel
                     : null,
             bitrate: settings.adapter.bitrate,
-            nodeId: settings.adapter.nodeId,
+            nodeId: settings.logs.nodeId,
             timeoutMs: settings.adapter.timeoutMs,
         };
     }
 
-    async function refresh(): Promise<void> {
+    // ---- Scan ----
+
+    let scan = $state<ScanResult | null>(null);
+    let scanning = $state<boolean>(false);
+    let scannedAt = $state<Date | null>(null);
+    let scanError = $state<string | null>(null);
+
+    async function rescan(): Promise<void> {
         const request = buildRequest();
-        if (request === null) return;
-        listing = true;
-        error = null;
-        lastResult = null;
+        if (request === null || scanning || current !== null) return;
+        scanning = true;
+        scanError = null;
         try {
-            files = await logsList(request);
+            scan = await logsScan(request);
+            scannedAt = new Date();
+            savedNow = {};
         } catch (err) {
-            error = err instanceof Error ? err.message : String(err);
-            files = null;
+            scanError = err instanceof Error ? err.message : String(err);
+            scan = null;
+            scannedAt = null;
         } finally {
-            listing = false;
+            scanning = false;
         }
     }
 
-    async function chooseFolder(): Promise<void> {
-        const picked = await openDialog({ directory: true, multiple: false });
-        if (typeof picked === 'string') destDir = picked;
+    // List on open, and again when the board changes. Debounced so typing
+    // a custom node id doesn't fire a scan per keystroke.
+    let scanTimer: ReturnType<typeof setTimeout> | null = null;
+    $effect(() => {
+        void settings.logs.nodeId;
+        void adapterReady;
+        untrack(() => {
+            scan = null;
+            if (scanTimer !== null) clearTimeout(scanTimer);
+            scanTimer = setTimeout(() => void rescan(), 300);
+        });
+    });
+
+    // ---- Grouping for the selected kind (LOG or IMU) ----
+
+    /** Rows downloaded since the last scan stay where they were (marked
+     *  saved) instead of jumping into the collapsed group under the cursor. */
+    let savedNow = $state<Record<number, string>>({});
+
+    const kind = $derived(settings.logs.kind);
+    const ofKind = $derived(
+        scan === null
+            ? []
+            : scan.files.filter((f) => kindOf(f.index) === kind).sort(newestFirst),
+    );
+    const fresh = $derived(
+        ofKind.filter(
+            (f) => f.status === 'new' || savedNow[f.index] !== undefined,
+        ),
+    );
+    const toDownload = $derived(fresh.filter((f) => savedNow[f.index] === undefined));
+    const missing = $derived(ofKind.filter((f) => f.status === 'missing'));
+    const downloaded = $derived(
+        ofKind.filter(
+            (f) => f.status === 'downloaded' && savedNow[f.index] === undefined,
+        ),
+    );
+    const hidden = $derived(ofKind.filter((f) => f.status === 'hidden'));
+    /** The top of the card, ignoring files the operator dismissed. */
+    const newest = $derived(ofKind.find((f) => f.status !== 'hidden') ?? null);
+    const toDownloadBytes = $derived(toDownload.reduce((n, f) => n + f.size, 0));
+
+    function newCount(k: 'log' | 'imu'): number {
+        if (scan === null) return 0;
+        return scan.files.filter(
+            (f) =>
+                kindOf(f.index) === k &&
+                f.status === 'new' &&
+                savedNow[f.index] === undefined,
+        ).length;
     }
 
-    async function cancel(): Promise<void> {
+    // ---- Download queue ----
+
+    let current = $state<ScannedFile | null>(null);
+    let queue = $state<ScannedFile[]>([]);
+    let queueTotal = $state<number>(0);
+    let queueDone = $state<number>(0);
+    let stopAfter = $state<boolean>(false);
+    let cancelling = $state<boolean>(false);
+    let received = $state<number>(0);
+    let total = $state<number>(0);
+    let samples: { t: number; bytes: number }[] = [];
+    let rate = $state<number | null>(null);
+    let lastProgressAt = $state<number>(0);
+    let now = $state<number>(0);
+    let ticker: ReturnType<typeof setInterval> | null = null;
+
+    /** Outcome line under the top card. */
+    let notice = $state<{
+        tone: 'success' | 'info' | 'warning' | 'danger';
+        text: string;
+        path?: string;
+    } | null>(null);
+
+    let unlisten: UnlistenFn | null = null;
+    onPullProgress((p) => {
+        if (current === null || p.index !== current.index) return;
+        received = p.received;
+        if (p.total > 0) total = p.total;
+        const t = performance.now();
+        lastProgressAt = t;
+        samples.push({ t, bytes: p.received });
+        // Rate over the last 10 s: steady enough to read, quick to react.
+        while (samples.length > 2 && t - samples[0].t > 10_000) samples.shift();
+        const span = (t - samples[0].t) / 1000;
+        rate = span >= 2 ? (p.received - samples[0].bytes) / span : null;
+    }).then((fn) => (unlisten = fn));
+
+    onMount(async () => {
+        try {
+            defaultRoot = await logsDefaultRoot();
+        } catch (err) {
+            notice = {
+                tone: 'warning',
+                text: `No default download folder: ${err instanceof Error ? err.message : err}. Pick one with Change….`,
+            };
+        }
+    });
+
+    // Leaving the view cancels the transfer — the pull holds the one CAN
+    // adapter for minutes, and an orphaned one would lock every other view
+    // out. App.svelte asks before navigating away while this is running.
+    onDestroy(() => {
+        unlisten?.();
+        if (scanTimer !== null) clearTimeout(scanTimer);
+        if (ticker !== null) clearInterval(ticker);
+        if (current !== null) void logsCancel();
+        setLogsTransferActive(false);
+    });
+
+    async function download(list: ScannedFile[]): Promise<void> {
+        const request = buildRequest();
+        const first = destDir();
+        if (request === null || first === null || list.length === 0 || current !== null) return;
+        queue = [...list];
+        queueTotal = list.length;
+        queueDone = 0;
+        stopAfter = false;
+        notice = null;
+        setLogsTransferActive(true);
+        now = performance.now();
+        ticker = setInterval(() => (now = performance.now()), 1000);
+        let relist = false;
+        try {
+            while (queue.length > 0) {
+                const file = queue.shift()!;
+                const dir = destDir()!;
+                current = file;
+                received = 0;
+                total = file.size;
+                samples = [];
+                rate = null;
+                lastProgressAt = performance.now();
+                try {
+                    const res = await logsPull(request, file, dir);
+                    file.status = 'downloaded';
+                    file.path = res.path;
+                    file.pulledAt = Math.floor(Date.now() / 1000);
+                    savedNow[file.index] = res.path;
+                    queueDone += 1;
+                    notice = res.ledgerError
+                        ? {
+                              tone: 'warning',
+                              text: `Saved ${file.name}, but couldn't record it (${res.ledgerError}) — it will show as new next time.`,
+                              path: res.path,
+                          }
+                        : {
+                              tone: 'success',
+                              text: `Saved ${file.name}${res.crcVerified ? ' · CRC verified' : ''}`,
+                              path: res.path,
+                          };
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    if (msg.includes(CANCELLED_MSG)) {
+                        notice = { tone: 'info', text: `Cancelled — ${file.name} was not saved.` };
+                    } else if (msg.includes(CARD_CHANGED_MSG)) {
+                        notice = {
+                            tone: 'warning',
+                            text: 'The card changed since it was listed (the AMS restarted?). Listed it again — check the newest file and download again.',
+                        };
+                        relist = true;
+                    } else {
+                        notice = { tone: 'danger', text: msg };
+                    }
+                    break;
+                }
+                if (stopAfter) break;
+            }
+        } finally {
+            current = null;
+            queue = [];
+            cancelling = false;
+            if (ticker !== null) clearInterval(ticker);
+            ticker = null;
+            setLogsTransferActive(false);
+        }
+        if (relist) await rescan();
+    }
+
+    async function cancelNow(): Promise<void> {
         cancelling = true;
         try {
             await logsCancel();
@@ -122,37 +317,97 @@
         }
     }
 
-    async function pull(file: LogFile): Promise<void> {
-        const request = buildRequest();
-        if (request === null || destDir === null) return;
-        pullingIndex = file.index;
-        received = 0;
-        total = file.size;
-        error = null;
-        lastResult = null;
-        cancelling = false;
+    const pct = $derived(
+        total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0,
+    );
+    const remainingBytes = $derived(
+        Math.max(0, total - received) + queue.reduce((n, f) => n + f.size, 0),
+    );
+    const stalled = $derived(current !== null && now - lastProgressAt > 5_000);
+
+    // ---- Hide / unhide / forget (this laptop's ledger only) ----
+
+    async function mark(
+        action: 'hide' | 'unhide' | 'forget',
+        files: ScannedFile[],
+    ): Promise<void> {
+        if (node === null || files.length === 0) return;
         try {
-            const res = await logsPull(request, file.index, destDir);
-            lastResult = `Saved ${res.path} (${formatBytes(res.bytes)})${
-                res.crcVerified ? ' — CRC verified' : ''
-            }`;
+            await logsMark(action, node, files);
         } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            // A cancel is an operator choice, not a failure — say so plainly
-            // and don't paint the view red.
-            if (msg.includes(CANCELLED_MSG)) {
-                lastResult = `Cancelled — ${file.name} was not saved.`;
-            } else {
-                error = msg;
+            notice = { tone: 'danger', text: `Couldn't update the download list: ${err instanceof Error ? err.message : err}` };
+            return;
+        }
+        for (const f of files) {
+            if (action === 'hide') f.status = 'hidden';
+            if (action === 'forget') {
+                f.status = 'new';
+                f.path = null;
+                f.pulledAt = null;
             }
-        } finally {
-            pullingIndex = null;
-            cancelling = false;
+        }
+        // An unhidden file goes back to whatever it really is (new,
+        // downloaded or missing) — only a scan knows that.
+        if (action === 'unhide') {
+            for (const f of files) f.status = 'new';
+            await rescan();
         }
     }
 
-    const pct = $derived(
-        total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0,
+    async function hideAllNew(): Promise<void> {
+        const list = toDownload;
+        const ok = await ask(
+            `Hide ${list.length} ${kind === 'imu' ? 'IMU ' : ''}file${list.length === 1 ? '' : 's'} on this laptop? Nothing is deleted from the card or the disk — they move to "Hidden", where you can bring them back.`,
+            { title: 'Hide all new files', kind: 'info', okLabel: 'Hide', cancelLabel: 'Keep' },
+        );
+        if (ok) await mark('hide', list);
+    }
+
+    // ---- Folder ----
+
+    async function changeFolder(): Promise<void> {
+        const picked = await openDialog({
+            directory: true,
+            multiple: false,
+            defaultPath: root ?? undefined,
+        });
+        if (typeof picked === 'string') settings.logs.rootDir = picked;
+    }
+
+    async function reveal(path: string | null): Promise<void> {
+        if (path === null) return;
+        try {
+            await logsReveal(path);
+        } catch (err) {
+            notice = { tone: 'info', text: err instanceof Error ? err.message : String(err) };
+        }
+    }
+
+    async function openFolder(): Promise<void> {
+        // The board folder only exists after the first download.
+        if (boardDir === null || root === null) return;
+        try {
+            await logsReveal(boardDir);
+        } catch {
+            await reveal(root);
+        }
+    }
+
+    // ---- Focus: the newest-file button takes Enter as soon as it shows ----
+
+    let heroButton = $state<HTMLButtonElement | null>(null);
+    $effect(() => {
+        heroButton?.focus();
+    });
+
+    const KINDS = [
+        { k: 'log', label: 'LOG files' },
+        { k: 'imu', label: 'IMU files' },
+    ] as const;
+
+    const kindWord = $derived(kind === 'imu' ? 'IMU log' : 'log');
+    const listedAt = $derived(
+        scannedAt?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? null,
     );
 </script>
 
@@ -160,8 +415,8 @@
     <header class="view-header">
         <h2>Data logs</h2>
         <p class="muted">
-            Pull the car-data logs off a node's microSD card over CAN — no
-            card removal. Read-only.
+            Pull the car-data logs off a board's microSD card over CAN — no
+            card removal. Read-only: nothing on the card is changed.
         </p>
     </header>
 
@@ -177,171 +432,566 @@
             </button>
         </div>
     {:else}
-        <div class="toolbar card card-tight">
-            <button
-                type="button"
-                class="btn btn-primary"
-                disabled={listing || pullingIndex !== null || !targetIsAms}
-                onclick={refresh}
-            >
-                {listing ? 'Listing…' : 'List logs'}
-            </button>
-            <button
-                type="button"
-                class="btn"
-                disabled={pullingIndex !== null}
-                onclick={chooseFolder}
-            >
-                {destDir === null ? 'Choose folder…' : 'Change folder'}
-            </button>
-            {#if destDir !== null}
-                <span class="stat">
-                    <span>save to</span><strong class="mono">{destDir}</strong>
+        <!-- Where from, where to. -->
+        <div class="card card-tight setup">
+            <div class="setup-row">
+                <span class="label">Logs from</span>
+                <!-- Switching boards re-lists the card: not mid-download. -->
+                <fieldset class="plain" disabled={current !== null}>
+                    <NodeIdRolePicker bind:value={settings.logs.nodeId} />
+                </fieldset>
+                <span class="spacer"></span>
+                <span class="muted small">
+                    {#if scanning}
+                        checking the card…
+                    {:else if listedAt !== null}
+                        listed {listedAt}
+                    {/if}
                 </span>
-            {/if}
-            <span class="stat">
-                <span>target</span>
-                <strong class="mono">
-                    {targetNode === null
-                        ? 'none'
-                        : `${targetRole ? targetRole.toUpperCase() + ' ' : ''}0x${targetNode
-                              .toString(16)
-                              .padStart(2, '0')}`}
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    disabled={scanning || current !== null}
+                    onclick={rescan}
+                >
+                    Check again
+                </button>
+            </div>
+            <div class="setup-row">
+                <span class="label">Saving to</span>
+                <strong class="mono path" title={boardDir ?? ''}>
+                    {boardDir === null
+                        ? '…'
+                        : settings.logs.dateFolders
+                          ? joinPath(boardDir, localDate())
+                          : boardDir}
                 </strong>
-            </span>
+                <span class="spacer"></span>
+                <label class="check small">
+                    <input type="checkbox" bind:checked={settings.logs.dateFolders} />
+                    one folder per day
+                </label>
+                <button type="button" class="btn btn-sm" disabled={root === null} onclick={openFolder}>
+                    Open folder
+                </button>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    disabled={current !== null}
+                    onclick={changeFolder}
+                >
+                    Change…
+                </button>
+                {#if settings.logs.rootDir !== ''}
+                    <button
+                        type="button"
+                        class="btn btn-sm btn-ghost"
+                        disabled={current !== null}
+                        onclick={() => (settings.logs.rootDir = '')}
+                    >
+                        Use default
+                    </button>
+                {/if}
+            </div>
         </div>
 
-        {#if !targetIsAms}
-            <div class="banner banner-warning">
-                <strong>Target is not the AMS.</strong>
-                The microSD log service is AMS-only today, but the selected
-                node is
-                {targetNode === null
-                    ? 'unset'
-                    : `${targetRole ? targetRole.toUpperCase() : 'node'} 0x${targetNode
-                          .toString(16)
-                          .padStart(2, '0')}`}. Listing will time out (or answer
-                from the wrong board). Change the node id in
-                <button type="button" class="linkish" onclick={() => navigateTo('adapters')}>
-                    Adapters
+        <div class="segmented kind-tabs" role="group" aria-label="File type">
+            {#each KINDS as { k, label } (k)}
+                {@const n = newCount(k)}
+                <button
+                    type="button"
+                    class="seg"
+                    class:active={kind === k}
+                    aria-pressed={kind === k}
+                    onclick={() => (settings.logs.kind = k)}
+                >
+                    {label}{#if n > 0}<span class="seg-badge">{n} new</span>{/if}
                 </button>
-                first.
+            {/each}
+        </div>
+
+        {#if scan?.cardChanged}
+            <div class="banner banner-warning">
+                <strong>This card doesn't match earlier downloads.</strong>
+                It was probably reformatted or swapped, so everything is shown
+                as new.
+            </div>
+        {/if}
+        {#if scan?.ledgerError}
+            <div class="banner banner-warning">
+                <strong>Couldn't read the download list</strong>
+                ({scan.ledgerError}), so everything is shown as new.
             </div>
         {/if}
 
-        {#if error !== null}
-            <div class="banner banner-danger"><strong>Error:</strong> {error}</div>
-        {/if}
-        {#if lastResult !== null}
-            <div class="banner banner-success">{lastResult}</div>
-        {/if}
-
-        {#if pullingIndex !== null}
-            <section class="card">
-                <div class="card-header">
-                    <h3>Downloading</h3>
-                    <button
-                        type="button"
-                        class="btn btn-danger"
-                        disabled={cancelling}
-                        onclick={cancel}
-                    >
-                        {cancelling ? 'Cancelling…' : 'Cancel'}
-                    </button>
-                    <span class="muted small mono">
-                        {formatBytes(received)}{total > 0
-                            ? ` / ${formatBytes(total)}`
-                            : ''}
-                    </span>
+        <!-- The top card: newest file, or the transfer in progress. -->
+        <section class="card hero">
+            {#if current !== null}
+                <div class="hero-head">
+                    <span class="eyebrow">Downloading</span>
+                    <span class="mono">{current.name}</span>
+                    {#if queueTotal > 1}
+                        <span class="muted small">file {queueDone + 1} of {queueTotal}</span>
+                    {/if}
                 </div>
                 <div class="meter">
                     <div class="meter-fill" style="width: {pct}%"></div>
                 </div>
-                <p class="muted small">
-                    {pct}% — classic CAN runs at tens of KB/s, so a multi-MB log
-                    takes minutes. The transfer is verified against the node's
-                    CRC when it finishes.
+                <p class="progress-line mono small">
+                    <span>{pct}%</span>
+                    <span>{formatBytes(received)} / {formatBytes(total)}</span>
+                    {#if stalled}
+                        <span class="warn">waiting for {roleName ?? 'the board'} to answer…</span>
+                    {:else if rate !== null && rate > 0}
+                        <span>{(rate / 1000).toFixed(1)} kB/s</span>
+                        <span>~{formatDuration(remainingBytes / rate)} left{queue.length > 0 ? ' in total' : ''}</span>
+                    {:else}
+                        <span class="muted">estimating…</span>
+                    {/if}
                 </p>
-            </section>
+                {#if queue.length > 0}
+                    <p class="muted small">
+                        Next: {queue.slice(0, 3).map((f) => f.name).join(', ')}{queue.length > 3
+                            ? ` and ${queue.length - 3} more`
+                            : ''}
+                    </p>
+                {/if}
+                <div class="hero-actions">
+                    <span class="muted small">Stay on this page — leaving cancels the download.</span>
+                    <span class="spacer"></span>
+                    {#if queue.length > 0}
+                        <button
+                            type="button"
+                            class="btn"
+                            disabled={stopAfter || cancelling}
+                            onclick={() => (stopAfter = true)}
+                        >
+                            {stopAfter ? 'Stopping after this file' : 'Stop after this file'}
+                        </button>
+                    {/if}
+                    <button type="button" class="btn btn-danger" disabled={cancelling} onclick={cancelNow}>
+                        {cancelling ? 'Cancelling…' : 'Cancel now'}
+                    </button>
+                </div>
+            {:else if scanning && scan === null}
+                <p class="muted">Checking the card on {nodeLabel}…</p>
+            {:else if scanError !== null}
+                <div class="hero-head">
+                    <span class="eyebrow warn">No answer</span>
+                </div>
+                <p>{scanError}</p>
+                <p class="muted small">
+                    Is the low-voltage system on and the {roleName ?? 'board'}'s
+                    application running? Logs come from the application firmware,
+                    not the bootloader.
+                </p>
+                <div class="hero-actions">
+                    <button type="button" class="btn btn-primary" disabled={scanning} onclick={rescan}>
+                        Check again
+                    </button>
+                </div>
+            {:else if scan === null}
+                <p class="muted">Not listed yet.</p>
+                <div class="hero-actions">
+                    <button type="button" class="btn btn-primary" disabled={scanning} onclick={rescan}>
+                        Check the card
+                    </button>
+                </div>
+            {:else if newest === null}
+                <div class="hero-head"><span class="eyebrow">No {kindWord}s on the card</span></div>
+                <p class="muted small">
+                    The file being written right now appears after the
+                    {roleName ?? 'board'} restarts — power-cycle the car, then
+                    Check again.
+                </p>
+            {:else}
+                {@const isNew = newest.status === 'new' && savedNow[newest.index] === undefined}
+                <div class="hero-head">
+                    <span class="eyebrow">Newest {kindWord}</span>
+                    <span class="mono hero-name">{newest.name}</span>
+                    <span class="muted mono small">{formatBytes(newest.size)}</span>
+                    {#if isNew}
+                        <span class="badge badge-new">new</span>
+                    {:else if newest.status === 'missing'}
+                        <span class="badge badge-warn">missing on disk</span>
+                    {:else}
+                        <span class="badge badge-ok">downloaded {formatPulledAt(newest.pulledAt)}</span>
+                    {/if}
+                </div>
+                <div class="hero-actions">
+                    {#if isNew || newest.status === 'missing'}
+                        <button
+                            type="button"
+                            class="btn btn-primary btn-hero"
+                            bind:this={heroButton}
+                            disabled={root === null}
+                            onclick={() => download([newest])}
+                        >
+                            Download newest · {estimate(newest.size)}
+                        </button>
+                    {:else}
+                        <button type="button" class="btn" onclick={() => reveal(newest.path)}>
+                            Show in folder
+                        </button>
+                    {/if}
+                    {#if toDownload.length > 1 || (toDownload.length === 1 && toDownload[0] !== newest)}
+                        <button
+                            type="button"
+                            class="btn"
+                            disabled={root === null}
+                            onclick={() => download(toDownload)}
+                        >
+                            Download all {toDownload.length} new · {formatBytes(toDownloadBytes)} · {estimate(toDownloadBytes)}
+                        </button>
+                    {/if}
+                </div>
+                <p class="muted small">
+                    {#if toDownload.length === 0}
+                        Nothing new on the card.
+                    {/if}
+                    The file being written right now appears after the
+                    {roleName ?? 'board'} restarts — power-cycle the car, then
+                    Check again.
+                </p>
+            {/if}
+        </section>
+
+        {#if notice !== null}
+            <div class="banner banner-{notice.tone} notice">
+                <span>{notice.text}</span>
+                {#if notice.path}
+                    <button type="button" class="linkish" onclick={() => reveal(notice?.path ?? null)}>
+                        Show in folder
+                    </button>
+                {/if}
+            </div>
         {/if}
 
-        {#if files === null}
-            <div class="card placeholder-card">
-                <h3>No listing yet</h3>
-                <p class="muted">
-                    Hit <strong>List logs</strong> to enumerate the files on the
-                    card. Requires the node's log-transfer service (AMS
-                    firmware) to be running. The run currently being recorded
-                    appears once the AMS closes it, on the next shutdown.
-                </p>
-            </div>
-        {:else if files.length === 0}
-            <div class="card placeholder-card">
-                <h3>No log files</h3>
-                <p class="muted">The card has no sealed logs to download.</p>
-            </div>
-        {:else}
-            <section class="card">
-                <div class="card-header">
-                    <h3>{files.length} log file{files.length === 1 ? '' : 's'}</h3>
-                    <span class="muted small">
-                        uptime is boot-relative (no RTC) — ordering only
-                    </span>
-                </div>
-                <table class="logs-table">
-                    <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th class="num">Size</th>
-                            <th class="num">Uptime</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {#each files as f (f.index)}
-                            <tr>
-                                <td class="mono">{f.name}</td>
-                                <td class="num mono">{formatBytes(f.size)}</td>
-                                <td class="num mono">{f.mtimeMonotonic}</td>
-                                <td class="num">
-                                    <button
-                                        type="button"
-                                        class="btn"
-                                        disabled={pullingIndex !== null || destDir === null}
-                                        title={destDir === null
-                                            ? 'Choose a destination folder first'
-                                            : `Download ${f.name}`}
-                                        onclick={() => pull(f)}
-                                    >
-                                        Download
-                                    </button>
-                                </td>
-                            </tr>
-                        {/each}
-                    </tbody>
-                </table>
-            </section>
+        {#if scan !== null && ofKind.length > 0}
+            {#if fresh.length > 0}
+                <section class="card">
+                    <div class="card-header">
+                        <h3>New on the card ({toDownload.length})</h3>
+                        <span class="muted small">newest first</span>
+                        <span class="spacer"></span>
+                        {#if toDownload.length > 1}
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-ghost"
+                                disabled={current !== null}
+                                onclick={hideAllNew}
+                            >
+                                Hide all
+                            </button>
+                        {/if}
+                    </div>
+                    <table class="logs-table">
+                        <tbody>
+                            {#each fresh as f (f.index)}
+                                {@const saved = savedNow[f.index]}
+                                <tr class:row-active={current?.index === f.index}>
+                                    <td class="mono">{f.name}</td>
+                                    <td class="num mono">{formatBytes(f.size)}</td>
+                                    <td class="muted small">
+                                        {saved !== undefined ? 'saved ✓' : estimate(f.size)}
+                                    </td>
+                                    <td class="actions">
+                                        {#if saved !== undefined}
+                                            <button type="button" class="btn btn-sm" onclick={() => reveal(saved)}>
+                                                Show
+                                            </button>
+                                        {:else}
+                                            <button
+                                                type="button"
+                                                class="btn btn-sm"
+                                                disabled={current !== null || root === null}
+                                                onclick={() => download([f])}
+                                            >
+                                                Download
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="btn btn-sm btn-ghost"
+                                                disabled={current?.index === f.index}
+                                                title="Move to Hidden on this laptop. Nothing is deleted."
+                                                onclick={() => mark('hide', [f])}
+                                            >
+                                                Hide
+                                            </button>
+                                        {/if}
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </section>
+            {/if}
+
+            {#if missing.length > 0}
+                <section class="card card-missing">
+                    <div class="card-header">
+                        <h3>Missing on disk ({missing.length})</h3>
+                        <span class="muted small">downloaded before, but the copy is gone or changed</span>
+                    </div>
+                    <table class="logs-table">
+                        <tbody>
+                            {#each missing as f (f.index)}
+                                <tr>
+                                    <td class="mono">{f.name}</td>
+                                    <td class="muted small mono cell-path" title={f.path ?? ''}>was {f.path}</td>
+                                    <td class="actions">
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm"
+                                            disabled={current !== null || root === null}
+                                            onclick={() => download([f])}
+                                        >
+                                            Download again
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm btn-ghost"
+                                            title="Stop tracking the old copy. The file shows as new."
+                                            onclick={() => mark('forget', [f])}
+                                        >
+                                            Forget
+                                        </button>
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </section>
+            {/if}
+
+            {#if downloaded.length > 0}
+                <details class="card fold">
+                    <summary>
+                        <h3>Already downloaded ({downloaded.length})</h3>
+                        <span class="muted small">on this laptop, at the listed size</span>
+                    </summary>
+                    <table class="logs-table">
+                        <tbody>
+                            {#each downloaded as f (f.index)}
+                                <tr>
+                                    <td class="mono">{f.name}</td>
+                                    <td class="num mono">{formatBytes(f.size)}</td>
+                                    <td class="muted small">{formatPulledAt(f.pulledAt)}</td>
+                                    <td class="actions">
+                                        <button type="button" class="btn btn-sm" onclick={() => reveal(f.path)}>
+                                            Show
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm btn-ghost"
+                                            disabled={current !== null || root === null}
+                                            onclick={() => download([f])}
+                                        >
+                                            Download again
+                                        </button>
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </details>
+            {/if}
+
+            {#if hidden.length > 0}
+                <details class="card fold">
+                    <summary>
+                        <h3>Hidden ({hidden.length})</h3>
+                        <span class="muted small">dismissed on this laptop — not necessarily downloaded</span>
+                    </summary>
+                    <div class="fold-actions">
+                        <button
+                            type="button"
+                            class="btn btn-sm btn-ghost"
+                            disabled={scanning || current !== null}
+                            onclick={() => mark('unhide', hidden)}
+                        >
+                            Unhide all
+                        </button>
+                    </div>
+                    <table class="logs-table">
+                        <tbody>
+                            {#each hidden as f (f.index)}
+                                <tr>
+                                    <td class="mono">{f.name}</td>
+                                    <td class="num mono">{formatBytes(f.size)}</td>
+                                    <td class="actions">
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm"
+                                            disabled={scanning || current !== null}
+                                            onclick={() => mark('unhide', [f])}
+                                        >
+                                            Unhide
+                                        </button>
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </details>
+            {/if}
         {/if}
     {/if}
 </div>
 
 <style>
-    .toolbar {
+    .setup {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+    }
+    .setup-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+        flex-wrap: wrap;
+        font-size: var(--text-sm);
+    }
+    .label {
+        color: var(--text-muted);
+        min-width: 5.5rem;
+    }
+    .spacer {
+        flex: 1;
+    }
+    .plain {
+        border: none;
+        margin: 0;
+        padding: 0;
+        min-width: 0;
+    }
+    .path {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 32rem;
+    }
+    .check {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-1);
+        color: var(--text-secondary);
+    }
+
+    /* File-type tabs — same segmented language as NodeIdRolePicker. */
+    .segmented {
+        display: inline-flex;
+        gap: 2px;
+        padding: 2px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        align-self: flex-start;
+    }
+    .seg {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        font: inherit;
+        font-size: var(--text-sm);
+        padding: var(--space-1) var(--space-4);
+        border-radius: calc(var(--radius-md) - 2px);
+        cursor: pointer;
+    }
+    .seg:hover {
+        color: var(--text);
+    }
+    .seg.active {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        font-weight: 600;
+    }
+    .seg-badge {
+        margin-left: var(--space-2);
+        font-size: var(--text-xs);
+        opacity: 0.8;
+    }
+
+    .hero {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+        border-color: var(--accent);
+    }
+    .hero p {
+        margin: 0;
+    }
+    .hero-head {
+        display: flex;
+        align-items: baseline;
+        gap: var(--space-3);
+        flex-wrap: wrap;
+    }
+    .eyebrow {
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-muted);
+        font-weight: 600;
+    }
+    .hero-name {
+        font-size: var(--text-xl);
+        font-weight: 600;
+    }
+    .hero-actions {
         display: flex;
         align-items: center;
         gap: var(--space-3);
         flex-wrap: wrap;
     }
-    .stat {
-        display: inline-flex;
-        gap: var(--space-2);
-        align-items: center;
-        font-size: var(--text-sm);
-        color: var(--text-muted);
-    }
-    .stat strong {
-        color: var(--text);
+    /* The one action this page exists for: bigger, and in the accent
+       colour so it reads first even as an outline. */
+    .btn-hero {
+        font-size: var(--text-lg);
         font-weight: 600;
+        padding: var(--space-3) var(--space-5);
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+    .badge {
+        font-size: var(--text-xs);
+        padding: 1px var(--space-2);
+        border-radius: 999px;
+        border: 1px solid currentColor;
+    }
+    .badge-new {
+        color: var(--accent);
+    }
+    .badge-ok {
+        color: var(--success);
+    }
+    .badge-warn {
+        color: var(--warning);
+    }
+    .warn {
+        color: var(--warning);
+    }
+    .progress-line {
+        display: flex;
+        gap: var(--space-4);
+        flex-wrap: wrap;
+    }
+    .notice {
+        display: flex;
+        gap: var(--space-3);
+        align-items: center;
+    }
+
+    .placeholder-card {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+        align-items: flex-start;
+    }
+    .placeholder-card h3,
+    .placeholder-card p {
+        margin: 0;
     }
     .linkish {
         appearance: none;
@@ -353,37 +1003,78 @@
         text-decoration: underline;
         cursor: pointer;
     }
-    .placeholder-card {
+
+    .card-header {
+        justify-content: flex-start;
+        gap: var(--space-3);
+    }
+    .card-missing {
+        border-color: var(--warning);
+    }
+    .fold summary {
         display: flex;
-        flex-direction: column;
-        gap: var(--space-2);
-        align-items: flex-start;
+        align-items: baseline;
+        gap: var(--space-3);
+        cursor: pointer;
+        list-style: none;
     }
-    .placeholder-card h3,
-    .placeholder-card p {
+    .fold summary::-webkit-details-marker {
+        display: none;
+    }
+    .fold summary::before {
+        content: '▸';
+        color: var(--text-muted);
+    }
+    .fold[open] summary::before {
+        content: '▾';
+    }
+    .fold summary h3 {
         margin: 0;
+        font-size: var(--text-base);
     }
+    .fold[open] summary {
+        margin-bottom: var(--space-2);
+    }
+    .fold-actions {
+        display: flex;
+        justify-content: flex-end;
+    }
+
     .logs-table {
         width: 100%;
         border-collapse: collapse;
         font-size: var(--text-sm);
     }
-    .logs-table th {
-        text-align: left;
-        font-size: var(--text-xs);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        color: var(--text-muted);
-        padding: var(--space-2) var(--space-3);
-        border-bottom: 1px solid var(--border);
-    }
     .logs-table td {
         padding: var(--space-2) var(--space-3);
         border-bottom: 1px solid var(--border);
     }
+    .logs-table tr:last-child td {
+        border-bottom: none;
+    }
+    /* Long paths truncate instead of pushing the buttons off-screen;
+       the full path is in the tooltip. */
+    .logs-table .cell-path {
+        max-width: 0;
+        width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
     .logs-table .num {
         text-align: right;
     }
+    .logs-table .actions {
+        text-align: right;
+        white-space: nowrap;
+    }
+    .logs-table .actions .btn + .btn {
+        margin-left: var(--space-2);
+    }
+    .row-active td {
+        background: var(--accent-soft);
+    }
+
     /* Left-origin progress bar, reused from the pedal meters. */
     .meter {
         position: relative;
