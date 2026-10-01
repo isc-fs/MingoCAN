@@ -945,14 +945,12 @@
         gap: var(--space-3);
         flex-wrap: wrap;
     }
-    /* The one action this page exists for: bigger, and in the accent
-       colour so it reads first even as an outline. */
+    /* The one action this page exists for: the filled primary button,
+       just bigger. Colours come from .btn-primary — overriding them here
+       would put accent text on the accent fill. */
     .btn-hero {
         font-size: var(--text-lg);
-        font-weight: 600;
         padding: var(--space-3) var(--space-5);
-        border-color: var(--accent);
-        color: var(--accent);
     }
     .badge {
         font-size: var(--text-xs);
