@@ -20,6 +20,7 @@ export interface Settings {
     flash: FlashSettings;
     busMonitor: BusMonitorSettings;
     dbc: DbcSettings;
+    logs: LogsSettings;
 }
 
 export interface AdapterSettings {
@@ -94,6 +95,21 @@ export function currentDbcPath(): string | null {
     return settings.dbc.paths[key] ?? null;
 }
 
+export interface LogsSettings {
+    /** Which board the Data logs tab reads. Separate from
+     *  `adapter.nodeId` (default 0x3, uDV) because the log service lives
+     *  on the AMS — sharing it sent every first visit through Adapters. */
+    nodeId: number | null;
+    /** Where downloads go. Empty = the default, `<Documents>/MingoCAN
+     *  Logs`, resolved by the backend. */
+    rootDir: string;
+    /** Save into `<root>/<ROLE>/<YYYY-MM-DD>/` (the download date — the
+     *  card has no clock) instead of straight into `<root>/<ROLE>/`. */
+    dateFolders: boolean;
+    /** Which files the tab shows: the AMS state logs or the IMU logs. */
+    kind: 'log' | 'imu';
+}
+
 // ---- Defaults ----
 
 export function defaultSettings(): Settings {
@@ -125,6 +141,12 @@ export function defaultSettings(): Settings {
         },
         dbc: {
             paths: {},
+        },
+        logs: {
+            nodeId: 0x02,
+            rootDir: '',
+            dateFolders: true,
+            kind: 'log',
         },
     };
 }
