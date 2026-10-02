@@ -12,7 +12,8 @@
         each scan says which files are already safely on this disk. Those
         fold into a collapsed group — but only while the copy really
         exists at the listed size; a deleted copy shows up as "missing",
-        never hidden. LOG and IMU files are shown separately.
+        never hidden. LOG, IMU and CEL files are shown separately; binary
+        logs (.BIN) are decoded to a CSV beside them as they're saved.
 
         Transfers run at classic-CAN speeds (10–20 kB/s), so a 4 MiB file
         is minutes: the top card turns into a progress panel with rate,
@@ -42,7 +43,9 @@
         formatDuration,
         formatPulledAt,
         estimate,
+        type LogKind,
         type LogsRequest,
+        type PullResult,
         type ScanResult,
         type ScannedFile,
     } from './logs';
@@ -141,7 +144,7 @@
         });
     });
 
-    // ---- Grouping for the selected kind (LOG or IMU) ----
+    // ---- Grouping for the selected kind (LOG, IMU, CEL…) ----
 
     /** Rows downloaded since the last scan stay where they were (marked
      *  saved) instead of jumping into the collapsed group under the cursor. */
@@ -170,7 +173,7 @@
     const newest = $derived(ofKind.find((f) => f.status !== 'hidden') ?? null);
     const toDownloadBytes = $derived(toDownload.reduce((n, f) => n + f.size, 0));
 
-    function newCount(k: 'log' | 'imu'): number {
+    function newCount(k: LogKind): number {
         if (scan === null) return 0;
         return scan.files.filter(
             (f) =>
@@ -267,19 +270,11 @@
                     file.status = 'downloaded';
                     file.path = res.path;
                     file.pulledAt = Math.floor(Date.now() / 1000);
-                    savedNow[file.index] = res.path;
+                    // Point "Show" at the spreadsheet when a binary log was
+                    // decoded — that's the file people open.
+                    savedNow[file.index] = res.decoded?.path ?? res.path;
                     queueDone += 1;
-                    notice = res.ledgerError
-                        ? {
-                              tone: 'warning',
-                              text: `Saved ${file.name}, but couldn't record it (${res.ledgerError}) — it will show as new next time.`,
-                              path: res.path,
-                          }
-                        : {
-                              tone: 'success',
-                              text: `Saved ${file.name}${res.crcVerified ? ' · CRC verified' : ''}`,
-                              path: res.path,
-                          };
+                    notice = savedNotice(file, res);
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     if (msg.includes(CANCELLED_MSG)) {
@@ -306,6 +301,34 @@
             setLogsTransferActive(false);
         }
         if (relist) await rescan();
+    }
+
+    function savedNotice(file: ScannedFile, res: PullResult): NonNullable<typeof notice> {
+        const path = res.decoded?.path ?? res.path;
+        if (res.ledgerError) {
+            return {
+                tone: 'warning',
+                text: `Saved ${file.name}, but couldn't record it (${res.ledgerError}) — it will show as new next time.`,
+                path,
+            };
+        }
+        if (res.decodeError) {
+            return {
+                tone: 'warning',
+                text: `Saved ${file.name}, but couldn't turn it into a CSV (${res.decodeError}). The file itself is fine and kept.`,
+                path,
+            };
+        }
+        let text = `Saved ${file.name}${res.crcVerified ? ' · CRC verified' : ''}`;
+        if (res.decoded) {
+            text += ` · decoded to ${baseName(res.decoded.path)} (${res.decoded.records.toLocaleString()} records)`;
+            if (res.decoded.tornBytes > 0) text += ' · last partial record dropped (cut short by a power-off)';
+        }
+        return { tone: 'success', text, path };
+    }
+
+    function baseName(path: string): string {
+        return path.split(/[\\/]/).pop() ?? path;
     }
 
     async function cancelNow(): Promise<void> {
@@ -357,7 +380,7 @@
     async function hideAllNew(): Promise<void> {
         const list = toDownload;
         const ok = await ask(
-            `Hide ${list.length} ${kind === 'imu' ? 'IMU ' : ''}file${list.length === 1 ? '' : 's'} on this laptop? Nothing is deleted from the card or the disk — they move to "Hidden", where you can bring them back.`,
+            `Hide ${list.length} ${kindWord}${list.length === 1 ? '' : 's'} on this laptop? Nothing is deleted from the card or the disk — they move to "Hidden", where you can bring them back.`,
             { title: 'Hide all new files', kind: 'info', okLabel: 'Hide', cancelLabel: 'Keep' },
         );
         if (ok) await mark('hide', list);
@@ -400,12 +423,23 @@
         heroButton?.focus();
     });
 
-    const KINDS = [
-        { k: 'log', label: 'LOG files' },
-        { k: 'imu', label: 'IMU files' },
-    ] as const;
+    const KINDS: ReadonlyArray<{ k: LogKind; label: string; word: string }> = [
+        { k: 'log', label: 'LOG files', word: 'log' },
+        { k: 'imu', label: 'IMU files', word: 'IMU log' },
+        { k: 'cel', label: 'CEL files', word: 'cell log' },
+        { k: 'other', label: 'Other files', word: 'file' },
+    ];
+    /** "Other" (a stream newer than this app) only shows when the card has one. */
+    const visibleKinds = $derived(
+        KINDS.filter(
+            (x) =>
+                x.k !== 'other' ||
+                kind === 'other' ||
+                (scan?.files.some((f) => kindOf(f.index) === 'other') ?? false),
+        ),
+    );
 
-    const kindWord = $derived(kind === 'imu' ? 'IMU log' : 'log');
+    const kindWord = $derived(KINDS.find((x) => x.k === kind)?.word ?? 'file');
     const listedAt = $derived(
         scannedAt?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? null,
     );
@@ -496,7 +530,7 @@
         </div>
 
         <div class="segmented kind-tabs" role="group" aria-label="File type">
-            {#each KINDS as { k, label } (k)}
+            {#each visibleKinds as { k, label } (k)}
                 {@const n = newCount(k)}
                 <button
                     type="button"

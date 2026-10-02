@@ -266,24 +266,31 @@ Boards write car data to a microSD card; LOGFS pulls those files off over CAN.
 **Read-only — there is no delete.** Served by the *application* firmware, so a
 board sitting in its bootloader will not answer.
 
-The log a board is writing right now does not list until the AMS seals it on
-shutdown, so power-cycle the car to get today's run.
+The file a board is writing right now does not list until the AMS seals it at
+its next boot, so power-cycle the car to get the last few minutes.
+
+Binary logs (`IMUnnnn.BIN`, `CELnnnn.BIN`) are decoded to a `.csv` beside the
+pulled file automatically; the `.BIN` is kept, and a decode problem is a
+warning, never a failed pull.
 
 ```bash
 can-flasher … --node-id 0x02 logs list
 can-flasher … --node-id 0x02 logs pull --index 3 --out ./logs/
+can-flasher … --node-id 0x02 logs pull --index 0x4003 --out ./logs/   # CEL0003.BIN + CEL0003.csv
 can-flasher … --node-id 0x02 logs pull --all --out ./logs/
+can-flasher logs decode ./logs/*.BIN                                  # no adapter needed
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--index N` | Pull one file by its index from `list` |
+| `--index N` | Pull one file by its index from `list` (decimal or `0x` hex) |
 | `--all` | Pull every file — opt-in on purpose |
 | `--out DIR` | Where to write |
 | `--no-verify` | Skip the closing CRC check (not recommended) |
+| `--no-decode` | Keep `.BIN` files as pulled, without the decoded `.csv` |
 
-**`--node-id` is mandatory here** with no default; omitting it fails with the
-generic exit code **99**.
+**`--node-id` is mandatory for `list` and `pull`** with no default; omitting it
+fails with the generic exit code **99**.
 
 Throughput is ~10–20 kB/s, so a 4 MiB file is 3.5–7 minutes and `--all` on a
 full card is 20–35. Commands retry up to three times and the internal timeout

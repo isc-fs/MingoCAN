@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use can_flasher::firmware::crc32;
+use can_flasher::log_decode;
 use can_flasher::logfs_client;
 use can_flasher::protocol::commands::{cmd_logfs_close, cmd_logfs_list, cmd_logfs_open};
 use can_flasher::protocol::logfs;
@@ -161,6 +162,21 @@ pub struct PullResult {
     /// The file is saved, but recording it in the ledger failed — it will
     /// show as new on the next scan. `None` when all is well.
     pub ledger_error: Option<String>,
+    /// For a binary log (`IMUnnnn.BIN`, `CELnnnn.BIN`): the CSV decoded
+    /// beside it (#613). `None` for a file that isn't one, or if decoding
+    /// failed — see `decode_error`.
+    pub decoded: Option<DecodedCsv>,
+    /// Why a binary log couldn't be decoded. The pulled file is still saved.
+    pub decode_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodedCsv {
+    pub path: String,
+    pub records: usize,
+    /// Bytes of a partial last record that were dropped (power cut mid-write).
+    pub torn_bytes: usize,
 }
 
 /// Identifies one card file across scans: LOGFS indices are reused after
@@ -756,8 +772,26 @@ async fn pull_inner(
             logfs_client::PullError::Failed(msg) => format!("{}: {msg}", entry.name),
         })?;
 
-    let path = unique_path(dir, &entry.name);
-    write_atomically(&path, &pulled.data)?;
+    // Writes the file (never clobbering) and, for a binary log, the decoded
+    // CSV beside it. Decoding can't fail the pull.
+    let saved = log_decode::save_pulled(dir, &entry.name, &pulled.data)
+        .map_err(|e| format!("write {} into {}: {e}", entry.name, dir.display()))?;
+    let path = saved.path;
+    let (decoded, decode_error) = match saved.decoded {
+        Some(Ok(d)) => (
+            Some(DecodedCsv {
+                path: d.path.display().to_string(),
+                records: d.records,
+                torn_bytes: d.torn_bytes,
+            }),
+            None,
+        ),
+        Some(Err(e)) => {
+            tracing::warn!("{}: not decoded: {e}", path.display());
+            (None, Some(e))
+        }
+        None => (None, None),
+    };
 
     // Only now, with the bytes CRC-checked and renamed into place, does
     // the file count as downloaded.
@@ -777,47 +811,9 @@ async fn pull_inner(
         bytes: pulled.data.len() as u32,
         crc_verified: pulled.crc_verified,
         ledger_error,
+        decoded,
+        decode_error,
     })
-}
-
-/// Write to `<path>.part`, flush it to the disk, then rename: a crash or a
-/// yanked USB disk leaves a `.part`, never a truncated file under the real
-/// name.
-fn write_atomically(path: &Path, data: &[u8]) -> Result<(), String> {
-    let mut part = path.as_os_str().to_owned();
-    part.push(".part");
-    let part = PathBuf::from(part);
-    let write = || -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&part)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-        std::fs::rename(&part, path)
-    };
-    write().map_err(|e| {
-        let _ = std::fs::remove_file(&part);
-        format!("write {}: {e}", path.display())
-    })
-}
-
-/// Never clobber an existing download: `LOG0001.CSV` → `LOG0001_2.CSV`.
-/// The counter goes before the extension so the copy still opens in a
-/// spreadsheet.
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let base = dir.join(name);
-    if !base.exists() {
-        return base;
-    }
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((stem, ext)) => (stem, format!(".{ext}")),
-        None => (name, String::new()),
-    };
-    for n in 2..1000 {
-        let candidate = dir.join(format!("{stem}_{n}{ext}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    base
 }
 
 /// Show a file (selected) or a folder in the OS file manager.
@@ -1001,29 +997,6 @@ mod tests {
         assert!(!file_on_disk(p, 11));
         assert!(!file_on_disk(dir.to_str().unwrap(), 0));
         assert!(!file_on_disk(dir.join("nope").to_str().unwrap(), 10));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn unique_path_counts_before_the_extension() {
-        let dir = std::env::temp_dir().join(format!("mingocan-logs-uniq-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(unique_path(&dir, "LOG0001.CSV"), dir.join("LOG0001.CSV"));
-        std::fs::write(dir.join("LOG0001.CSV"), b"").unwrap();
-        assert_eq!(unique_path(&dir, "LOG0001.CSV"), dir.join("LOG0001_2.CSV"));
-        std::fs::write(dir.join("LOG0001_2.CSV"), b"").unwrap();
-        assert_eq!(unique_path(&dir, "LOG0001.CSV"), dir.join("LOG0001_3.CSV"));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn write_atomically_leaves_no_part_file() {
-        let dir = std::env::temp_dir().join(format!("mingocan-logs-atomic-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("LOG0001.CSV");
-        write_atomically(&path, b"abc").unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
-        assert!(!dir.join("LOG0001.CSV.part").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
