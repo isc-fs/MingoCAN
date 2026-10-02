@@ -119,10 +119,12 @@
             scan = await logsScan(request);
             scannedAt = new Date();
             savedNow = {};
+            clearSelection();
         } catch (err) {
             scanError = err instanceof Error ? err.message : String(err);
             scan = null;
             scannedAt = null;
+            clearSelection();
         } finally {
             scanning = false;
         }
@@ -136,6 +138,7 @@
         void adapterReady;
         untrack(() => {
             scan = null;
+            clearSelection();
             if (scanTimer !== null) clearTimeout(scanTimer);
             scanTimer = setTimeout(() => void rescan(), 300);
         });
@@ -178,6 +181,110 @@
                 f.status === 'new' &&
                 savedNow[f.index] === undefined,
         ).length;
+    }
+
+    // ---- Bulk selection state ----
+
+    let selected = $state<Record<number, boolean>>({});
+    let lastAnchorIndex = $state<number | null>(null);
+    let headerCheckbox = $state<HTMLInputElement | null>(null);
+
+    // Reset anchor when switching file types (LOG <-> IMU)
+    $effect(() => {
+        void settings.logs.kind;
+        lastAnchorIndex = null;
+    });
+
+    /** Checked unsaved files across both kinds, sorted newest first. */
+    const selectedFiles = $derived(
+        scan === null
+            ? []
+            : scan.files
+                  .filter(
+                      (f) =>
+                          Boolean(selected[f.index]) &&
+                          f.status === 'new' &&
+                          savedNow[f.index] === undefined,
+                  )
+                  .sort(newestFirst),
+    );
+    const selectedCount = $derived(selectedFiles.length);
+
+    /** Tab-scoped selection predicates for header checkbox */
+    const selectedInTab = $derived(
+        toDownload.filter((f) => Boolean(selected[f.index])),
+    );
+    const allTabSelected = $derived(
+        toDownload.length > 0 && selectedInTab.length === toDownload.length,
+    );
+    const someTabSelected = $derived(selectedInTab.length > 0);
+    const isTabIndeterminate = $derived(someTabSelected && !allTabSelected);
+
+    $effect(() => {
+        if (headerCheckbox) {
+            headerCheckbox.indeterminate = isTabIndeterminate;
+        }
+    });
+
+    function clearSelection(): void {
+        selected = {};
+        lastAnchorIndex = null;
+    }
+
+    function toggleSelectAll(e?: MouseEvent): void {
+        if (e) e.preventDefault();
+        if (current !== null || toDownload.length === 0) return;
+        const next = { ...selected };
+        if (allTabSelected) {
+            for (const f of toDownload) {
+                delete next[f.index];
+            }
+        } else {
+            for (const f of toDownload) {
+                next[f.index] = true;
+            }
+        }
+        selected = next;
+        lastAnchorIndex = null;
+    }
+
+    function handleRowCheckboxClick(
+        f: ScannedFile,
+        indexInFresh: number,
+        e: MouseEvent,
+    ): void {
+        if (current !== null || savedNow[f.index] !== undefined) return;
+        e.preventDefault();
+
+        if (e.shiftKey && lastAnchorIndex !== null) {
+            if (typeof window !== 'undefined') {
+                window.getSelection()?.removeAllRanges();
+            }
+            const start = Math.min(lastAnchorIndex, indexInFresh);
+            const end = Math.max(lastAnchorIndex, indexInFresh);
+            const next = { ...selected };
+            for (let k = start; k <= end; k++) {
+                const item = fresh[k];
+                if (item && savedNow[item.index] === undefined) {
+                    next[item.index] = true;
+                }
+            }
+            selected = next;
+        } else {
+            const next = { ...selected };
+            if (next[f.index]) {
+                delete next[f.index];
+            } else {
+                next[f.index] = true;
+            }
+            selected = next;
+            lastAnchorIndex = indexInFresh;
+        }
+    }
+
+    function downloadSelected(): void {
+        if (selectedCount === 0 || current !== null || root === null) return;
+        void download(selectedFiles);
     }
 
     // ---- Download queue ----
@@ -304,6 +411,7 @@
             if (ticker !== null) clearInterval(ticker);
             ticker = null;
             setLogsTransferActive(false);
+            clearSelection();
         }
         if (relist) await rescan();
     }
@@ -338,14 +446,19 @@
             notice = { tone: 'danger', text: `Couldn't update the download list: ${err instanceof Error ? err.message : err}` };
             return;
         }
+        const next = { ...selected };
         for (const f of files) {
-            if (action === 'hide') f.status = 'hidden';
+            if (action === 'hide') {
+                f.status = 'hidden';
+                delete next[f.index];
+            }
             if (action === 'forget') {
                 f.status = 'new';
                 f.path = null;
                 f.pulledAt = null;
             }
         }
+        selected = next;
         // An unhidden file goes back to whatever it really is (new,
         // downloaded or missing) — only a scan knows that.
         if (action === 'unhide') {
@@ -674,6 +787,16 @@
                         <h3>New on the card ({toDownload.length})</h3>
                         <span class="muted small">newest first</span>
                         <span class="spacer"></span>
+                        {#if toDownload.length > 0}
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-primary"
+                                disabled={selectedCount === 0 || current !== null || root === null}
+                                onclick={downloadSelected}
+                            >
+                                Download selected ({selectedCount})
+                            </button>
+                        {/if}
                         {#if toDownload.length > 1}
                             <button
                                 type="button"
@@ -686,10 +809,38 @@
                         {/if}
                     </div>
                     <table class="logs-table">
+                        <thead>
+                            <tr>
+                                <th class="col-check">
+                                    <input
+                                        type="checkbox"
+                                        bind:this={headerCheckbox}
+                                        indeterminate={isTabIndeterminate}
+                                        checked={allTabSelected}
+                                        disabled={current !== null || toDownload.length === 0}
+                                        onclick={toggleSelectAll}
+                                        aria-label="Select all new files"
+                                    />
+                                </th>
+                                <th>File</th>
+                                <th class="num">Size</th>
+                                <th>Status</th>
+                                <th class="actions"></th>
+                            </tr>
+                        </thead>
                         <tbody>
-                            {#each fresh as f (f.index)}
+                            {#each fresh as f, i (f.index)}
                                 {@const saved = savedNow[f.index]}
                                 <tr class:row-active={current?.index === f.index}>
+                                    <td class="col-check">
+                                        <input
+                                            type="checkbox"
+                                            checked={saved !== undefined || Boolean(selected[f.index])}
+                                            disabled={current !== null || saved !== undefined}
+                                            onclick={(e) => handleRowCheckboxClick(f, i, e)}
+                                            aria-label={`Select ${f.name}`}
+                                        />
+                                    </td>
                                     <td class="mono">{f.name}</td>
                                     <td class="num mono">{formatBytes(f.size)}</td>
                                     <td class="muted small">
@@ -1043,12 +1194,39 @@
         border-collapse: collapse;
         font-size: var(--text-sm);
     }
+    .logs-table th {
+        padding: var(--space-2) var(--space-3);
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        font-weight: 500;
+        font-size: var(--text-xs);
+        color: var(--text-muted);
+    }
     .logs-table td {
         padding: var(--space-2) var(--space-3);
         border-bottom: 1px solid var(--border);
     }
     .logs-table tr:last-child td {
         border-bottom: none;
+    }
+    .logs-table .col-check {
+        width: 2.25rem;
+        text-align: center;
+        padding-left: var(--space-2);
+        padding-right: var(--space-2);
+        user-select: none;
+    }
+    .logs-table .col-check input[type='checkbox'] {
+        cursor: pointer;
+        accent-color: var(--accent);
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        vertical-align: middle;
+    }
+    .logs-table .col-check input[type='checkbox']:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
     }
     /* Long paths truncate instead of pushing the buttons off-screen;
        the full path is in the tooltip. */
