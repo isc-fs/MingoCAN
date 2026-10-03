@@ -1,5 +1,9 @@
 //! `can-flasher logs` — list and pull the microSD data logs off a node over CAN.
 //!
+//! Binary logs (`IMUnnnn.BIN`, `CELnnnn.BIN`, `ELEnnnn.BIN`) are decoded to a `.csv` beside
+//! the pulled file automatically (#613, [`crate::log_decode`]); `logs decode`
+//! does the same for files copied off the card by hand.
+//!
 //! Implements the host side of the LOGFS service (IFS08-CE-AMS#406 /
 //! #506) on top of the existing CONNECT session + ISO-TP transport.
 //! Read-only: there is deliberately no `delete` subcommand in v1.
@@ -13,7 +17,7 @@
 //! AMS address, so the pending `0x01 → 0x02` move is a flag change.
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -21,7 +25,9 @@ use clap::{Args, Subcommand};
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
+use super::config::parse_hex_u16;
 use super::GlobalFlags;
+use crate::log_decode::{self, DecodedFile};
 use crate::logfs_client;
 use crate::protocol::commands::cmd_logfs_list;
 use crate::protocol::logfs::{self, LogEntry};
@@ -42,12 +48,25 @@ pub enum LogsCommand {
 
     /// Download log file(s) to a local directory
     Pull(PullArgs),
+
+    /// Decode AMS binary logs (.BIN) to CSV, for files copied off the card
+    /// by hand. `logs pull` already does this for every file it saves.
+    Decode(DecodeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DecodeArgs {
+    /// Binary log files (`IMUnnnn.BIN`, `CELnnnn.BIN`, …). Each one's CSV is
+    /// written beside it as `<stem>.csv`.
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 pub struct PullArgs {
-    /// Log index to pull (from `logs list`).
-    #[arg(long)]
+    /// Log index to pull (from `logs list`), decimal or `0x` hex — e.g.
+    /// `0x4003` for `CEL0003.BIN`.
+    #[arg(long, value_parser = parse_hex_u16)]
     pub index: Option<u16>,
 
     /// Pull every file. Opt-in on purpose: at ~10-20 kB/s a 4 MiB log
@@ -63,12 +82,18 @@ pub struct PullArgs {
     /// Skip the LOGFS_CRC verification step (not recommended)
     #[arg(long)]
     pub no_verify: bool,
+
+    /// Keep binary logs (.BIN) as pulled, without writing the decoded .csv
+    /// beside them
+    #[arg(long)]
+    pub no_decode: bool,
 }
 
 pub async fn run(global: &GlobalFlags, args: &LogsArgs) -> Result<()> {
     match &args.command {
         LogsCommand::List => run_list(global).await,
         LogsCommand::Pull(p) => run_pull(global, p).await,
+        LogsCommand::Decode(d) => run_decode(d),
     }
 }
 
@@ -295,14 +320,20 @@ async fn run_list(global: &GlobalFlags) -> Result<()> {
         println!("no log files on the card");
         return Ok(());
     }
+    // Hex, because the top two bits carry the file kind (0x8003 is
+    // IMU0003.BIN, 0x4003 CEL0003.BIN, 0xC003 ELE0003.BIN) — and `--index`
+    // takes it as printed.
     println!(
-        "{:>5}  {:<12} {:>10}  {:>12}",
+        "{:>6}  {:<12} {:>10}  {:>12}",
         "INDEX", "NAME", "SIZE", "MTIME(mono)"
     );
     for e in &entries {
         println!(
-            "{:>5}  {:<12} {:>10}  {:>12}",
-            e.index, e.name, e.size, e.mtime
+            "{:>6}  {:<12} {:>10}  {:>12}",
+            format!("0x{:04X}", e.index),
+            e.name,
+            e.size,
+            e.mtime
         );
     }
     println!(
@@ -344,7 +375,9 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
         let selected: Vec<&LogEntry> = match args.index {
             Some(i) => match entries.iter().find(|e| e.index == i) {
                 Some(e) => vec![e],
-                None => bail!("no log with index {i} on the card (try `can-flasher logs list`)"),
+                None => {
+                    bail!("no log with index 0x{i:04X} on the card (try `can-flasher logs list`)")
+                }
             },
             None if args.all => entries.iter().collect(),
             None => bail!(
@@ -363,9 +396,21 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
 
         for e in selected {
             let data = pull_one(&session, e, !args.no_verify).await?;
-            let path = unique_path(&args.out, &e.name);
-            std::fs::write(&path, &data).with_context(|| format!("writing {}", path.display()))?;
-            println!("  saved {} ({} B)", path.display(), data.len());
+            let saved = if args.no_decode {
+                let path = log_decode::save_file(&args.out, &e.name, &data)
+                    .with_context(|| format!("writing {} into {}", e.name, args.out.display()))?;
+                log_decode::SavedLog {
+                    path,
+                    decoded: None,
+                }
+            } else {
+                log_decode::save_pulled(&args.out, &e.name, &data)
+                    .with_context(|| format!("writing {} into {}", e.name, args.out.display()))?
+            };
+            println!("  saved {} ({} B)", saved.path.display(), data.len());
+            if let Some(decoded) = saved.decoded {
+                report_decode(&saved.path, decoded);
+            }
         }
         Ok(())
     }
@@ -375,19 +420,76 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
     result
 }
 
-/// Don't clobber an existing download — `LOG0001.CSV` → `LOG0001.CSV.1`.
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let base = dir.join(name);
-    if !base.exists() {
-        return base;
+/// Print what decoding a saved binary log did. A failure is a warning, not
+/// an error: the pulled `.BIN` is the CRC-verified original and is kept.
+fn report_decode(bin: &std::path::Path, decoded: Result<DecodedFile, String>) {
+    match decoded {
+        Ok(d) => {
+            let name = d.path.file_name().unwrap_or_default().to_string_lossy();
+            println!("  decoded -> {name} ({} records)", d.records);
+            if d.torn_bytes > 0 {
+                warn!(
+                    "{}: dropped a partial last record ({} B) — the file was cut short, \
+                     every whole record is in the CSV",
+                    bin.display(),
+                    d.torn_bytes
+                );
+            }
+        }
+        Err(e) => warn!(
+            "{}: not decoded ({e}); the .BIN is kept as pulled",
+            bin.display()
+        ),
     }
-    for n in 1..1000 {
-        let candidate = dir.join(format!("{name}.{n}"));
-        if !candidate.exists() {
-            return candidate;
+}
+
+fn run_decode(args: &DecodeArgs) -> Result<()> {
+    let mut failed = 0usize;
+    for path in &args.files {
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("{}: {e}", path.display());
+                failed += 1;
+                continue;
+            }
+        };
+        match log_decode::decode_beside(path, &data) {
+            None => {
+                eprintln!(
+                    "{}: not an AMS binary log (no AMSBIN1 header)",
+                    path.display()
+                );
+                failed += 1;
+            }
+            Some(Ok(d)) => {
+                println!(
+                    "{}: {} records -> {}",
+                    path.display(),
+                    d.records,
+                    d.path.display()
+                );
+                if d.torn_bytes > 0 {
+                    eprintln!(
+                        "{}: dropped a partial last record ({} B)",
+                        path.display(),
+                        d.torn_bytes
+                    );
+                }
+            }
+            Some(Err(e)) => {
+                eprintln!("{}: {e}", path.display());
+                failed += 1;
+            }
         }
     }
-    base
+    if failed > 0 {
+        bail!(
+            "{failed} of {} file(s) could not be decoded",
+            args.files.len()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -444,18 +546,6 @@ mod tests {
 
         let _ = cancel_tx.send(());
         let _ = handle.await;
-    }
-
-    #[test]
-    fn unique_path_avoids_clobbering() {
-        let dir = std::env::temp_dir().join(format!("cf-logs-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let first = unique_path(&dir, "LOG0001.CSV");
-        assert!(first.ends_with("LOG0001.CSV"));
-        std::fs::write(&first, b"x").unwrap();
-        let second = unique_path(&dir, "LOG0001.CSV");
-        assert!(second.ends_with("LOG0001.CSV.1"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

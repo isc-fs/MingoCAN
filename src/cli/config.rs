@@ -720,7 +720,7 @@ const NVM_KEY_ALIASES: &[(&str, u16)] = &[
     ("node-id", 0x0001),
 ];
 
-fn parse_hex_u16(raw: &str) -> Result<u16, String> {
+pub(crate) fn parse_hex_u16(raw: &str) -> Result<u16, String> {
     let trimmed = raw.trim();
     let (body, radix) = if let Some(rest) = trimmed
         .strip_prefix("0x")

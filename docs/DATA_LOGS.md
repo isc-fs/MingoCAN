@@ -5,6 +5,29 @@ CAN, so you do not have to open anything up or pull the card.
 
 It is **read-only**: files come off, nothing goes on, and nothing is deleted.
 
+## What's on the card
+
+Every 5-minute window gets a set of files that share one number `nnnn`:
+
+| File | What's in it | Index in `logs list` |
+|---|---|---|
+| `LOGnnnn.CSV` | AMS state, cells, temperatures | `nnnn` — e.g. `0x0003` |
+| `IMUnnnn.BIN` | IMU raw counts, 100 Hz | `0x8000 + nnnn` — e.g. `0x8003` |
+| `CELnnnn.BIN` | every cell-voltage read and current sample, 5 Hz | `0x4000 + nnnn` — e.g. `0x4003` |
+| `ELEnnnn.BIN` | pack current oversampled (mean / min / max per window) and DC-bus voltage, 100 Hz | `0xC000 + nnnn` — e.g. `0xC003` |
+
+The `.BIN` files are binary, so **MingoCAN decodes each one to a `.csv` beside
+it as soon as it's saved** — `CEL0003.BIN` comes with `CEL0003.csv`. The
+columns match the AMS's own `tools/log_decode.py`, and all files of one window
+share the `tick_ms` clock, so they line up with `LOGnnnn.CSV`. The `.BIN` is
+kept too: it's the CRC-checked original. If a `.BIN` can't be decoded, the
+download still succeeds and only the `.csv` is missing. A file cut short by a
+power-off loses at most its last partial record.
+
+Older cards (before AMS #598) have `IMUnnnn.CSV` instead, and no CEL or ELE
+files. A stream added to the AMS later decodes the same way with no MingoCAN
+update, because each `.BIN` carries its own layout.
+
 ---
 
 ## Two things that catch everyone
@@ -27,8 +50,9 @@ job. Plan for it rather than assuming the tool has hung.
   **Download newest** (or Enter) and it lands on disk. **Download all new**
   takes everything you don't have yet, newest first, so stopping halfway still
   keeps the most recent data.
-- **LOG and IMU files are separate.** Switch with the *LOG files* / *IMU files*
-  tabs; each shows how many are new.
+- **LOG, IMU, CEL and ELE files are separate.** Switch with the *LOG files* /
+  *IMU files* / *CEL files* / *ELE files* tabs; each shows how many are new. A `.BIN` lands
+  with its decoded `.csv`, and **Show in folder** points at the CSV.
 - **No folder dialog.** Files go to `Documents/MingoCAN Logs/<AMS|ECU|UDV>/<date>/`,
   where the date is the *download* date (the card has no clock). The path is
   shown at the top; **Change…** picks another folder once and remembers it,
@@ -68,15 +92,22 @@ CRC gating the result.
 ```bash
 can-flasher --interface pcan --channel PCAN_USBBUS1 --node-id 0x02 logs list
 can-flasher … --node-id 0x02 logs pull --index 3 --out ./logs/
+can-flasher … --node-id 0x02 logs pull --index 0x4003 --out ./logs/   # CEL0003.BIN (+ CEL0003.csv)
 can-flasher … --node-id 0x02 logs pull --all --out ./logs/
+can-flasher logs decode CEL0003.BIN IMU0003.BIN                       # files copied off the card by hand
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--index N` | Pull one file by its index from `list` |
+| `--index N` | Pull one file by its index from `list` — decimal or `0x` hex, as `list` prints it |
 | `--all` | Pull every file — opt-in on purpose, given the timings above |
 | `--out DIR` | Where to write |
 | `--no-verify` | Skip the closing CRC check (not recommended) |
+| `--no-decode` | Keep `.BIN` files as pulled, without the decoded `.csv` |
+
+`logs decode` needs no adapter or `--node-id`; it writes each file's `.csv`
+beside it. A second copy of a file is saved as `LOG0003_2.CSV` (never
+overwritten).
 
 > **`--node-id` is mandatory for `logs`** and has no default. Omitting it fails
 > with the generic exit code **99** rather than a targeted hint — so if a `logs`
