@@ -107,8 +107,8 @@ export interface LogsSettings {
     /** Save into `<root>/<ROLE>/<YYYY-MM-DD>/` (the download date — the
      *  card has no clock) instead of straight into `<root>/<ROLE>/`. */
     dateFolders: boolean;
-    /** Which files the tab shows: AMS state (LOG), IMU, cell frames (CEL),
-     *  or a stream this version doesn't know yet. */
+    /** Which files the tab shows: AMS state (LOG), IMU, cell frames (CEL)
+     *  or pack current (ELE). */
     kind: LogKind;
 }
 

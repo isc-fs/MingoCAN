@@ -1,6 +1,6 @@
 //! `can-flasher logs` — list and pull the microSD data logs off a node over CAN.
 //!
-//! Binary logs (`IMUnnnn.BIN`, `CELnnnn.BIN`) are decoded to a `.csv` beside
+//! Binary logs (`IMUnnnn.BIN`, `CELnnnn.BIN`, `ELEnnnn.BIN`) are decoded to a `.csv` beside
 //! the pulled file automatically (#613, [`crate::log_decode`]); `logs decode`
 //! does the same for files copied off the card by hand.
 //!
@@ -320,8 +320,9 @@ async fn run_list(global: &GlobalFlags) -> Result<()> {
         println!("no log files on the card");
         return Ok(());
     }
-    // Hex, because the top two bits carry the file kind (0x4003 is
-    // CEL0003.BIN, 0x8003 IMU0003.BIN) — and `--index` takes it as printed.
+    // Hex, because the top two bits carry the file kind (0x8003 is
+    // IMU0003.BIN, 0x4003 CEL0003.BIN, 0xC003 ELE0003.BIN) — and `--index`
+    // takes it as printed.
     println!(
         "{:>6}  {:<12} {:>10}  {:>12}",
         "INDEX", "NAME", "SIZE", "MTIME(mono)"
@@ -374,7 +375,9 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
         let selected: Vec<&LogEntry> = match args.index {
             Some(i) => match entries.iter().find(|e| e.index == i) {
                 Some(e) => vec![e],
-                None => bail!("no log with index {i} on the card (try `can-flasher logs list`)"),
+                None => {
+                    bail!("no log with index 0x{i:04X} on the card (try `can-flasher logs list`)")
+                }
             },
             None if args.all => entries.iter().collect(),
             None => bail!(
@@ -394,9 +397,8 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
         for e in selected {
             let data = pull_one(&session, e, !args.no_verify).await?;
             let saved = if args.no_decode {
-                let path = log_decode::unique_path(&args.out, &e.name);
-                log_decode::write_atomically(&path, &data)
-                    .with_context(|| format!("writing {}", path.display()))?;
+                let path = log_decode::save_file(&args.out, &e.name, &data)
+                    .with_context(|| format!("writing {} into {}", e.name, args.out.display()))?;
                 log_decode::SavedLog {
                     path,
                     decoded: None,

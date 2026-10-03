@@ -257,6 +257,9 @@ pub struct ScannedFile {
     pub path: Option<String>,
     /// Unix seconds of that download.
     pub pulled_at: Option<u64>,
+    /// For a downloaded binary log: its decoded CSV, if it sits beside the
+    /// copy (what "Show" should open).
+    pub csv_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -537,6 +540,18 @@ fn classify(
     )
 }
 
+/// `<stem>.csv` next to a binary log, if it exists — the decoded copy.
+fn csv_beside(path: &Path) -> Option<String> {
+    let is_bin = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("bin"));
+    if !is_bin {
+        return None;
+    }
+    let csv = path.with_extension("csv");
+    csv.is_file().then(|| csv.display().to_string())
+}
+
 fn file_on_disk(path: &str, size: u32) -> bool {
     std::fs::metadata(path)
         .map(|m| m.is_file() && m.len() == u64::from(size))
@@ -640,6 +655,10 @@ pub async fn logs_scan(app: AppHandle, request: LogsRequest) -> Result<ScanResul
         .map(|e| {
             let key = key_of(&e);
             let (status, path, pulled_at) = classify(&key, ledger.get(&key), &file_on_disk);
+            let csv_path = match (status, &path) {
+                (FileStatus::Downloaded, Some(p)) => csv_beside(Path::new(p)),
+                _ => None,
+            };
             ScannedFile {
                 index: e.index,
                 name: e.name,
@@ -647,6 +666,7 @@ pub async fn logs_scan(app: AppHandle, request: LogsRequest) -> Result<ScanResul
                 status,
                 path,
                 pulled_at,
+                csv_path,
             }
         })
         .collect();
@@ -772,29 +792,13 @@ async fn pull_inner(
             logfs_client::PullError::Failed(msg) => format!("{}: {msg}", entry.name),
         })?;
 
-    // Writes the file (never clobbering) and, for a binary log, the decoded
-    // CSV beside it. Decoding can't fail the pull.
-    let saved = log_decode::save_pulled(dir, &entry.name, &pulled.data)
+    let path = log_decode::save_file(dir, &entry.name, &pulled.data)
         .map_err(|e| format!("write {} into {}: {e}", entry.name, dir.display()))?;
-    let path = saved.path;
-    let (decoded, decode_error) = match saved.decoded {
-        Some(Ok(d)) => (
-            Some(DecodedCsv {
-                path: d.path.display().to_string(),
-                records: d.records,
-                torn_bytes: d.torn_bytes,
-            }),
-            None,
-        ),
-        Some(Err(e)) => {
-            tracing::warn!("{}: not decoded: {e}", path.display());
-            (None, Some(e))
-        }
-        None => (None, None),
-    };
 
     // Only now, with the bytes CRC-checked and renamed into place, does
-    // the file count as downloaded.
+    // the file count as downloaded. Recorded *before* decoding, so a crash
+    // mid-decode can't leave a saved file looking new (and the next pull
+    // making a `_2` copy).
     let ledger_error = append_ledger(
         app,
         &[LedgerEvent::Pulled {
@@ -806,10 +810,35 @@ async fn pull_inner(
     )
     .err();
 
+    // A binary log also gets its CSV beside it (#613). CPU-bound for a few
+    // MiB, so off the async executor; it can't fail the pull.
+    let bytes = pulled.data.len() as u32;
+    let crc_verified = pulled.crc_verified;
+    let decode_path = path.clone();
+    let data = pulled.data;
+    let decoded =
+        tokio::task::spawn_blocking(move || log_decode::decode_beside(&decode_path, &data)).await;
+    let (decoded, decode_error) = match decoded {
+        Ok(None) => (None, None),
+        Ok(Some(Ok(d))) => (
+            Some(DecodedCsv {
+                path: d.path.display().to_string(),
+                records: d.records,
+                torn_bytes: d.torn_bytes,
+            }),
+            None,
+        ),
+        Ok(Some(Err(e))) => {
+            tracing::warn!("{}: not decoded: {e}", path.display());
+            (None, Some(e))
+        }
+        Err(e) => (None, Some(format!("decoder stopped: {e}"))),
+    };
+
     Ok(PullResult {
         path: path.display().to_string(),
-        bytes: pulled.data.len() as u32,
-        crc_verified: pulled.crc_verified,
+        bytes,
+        crc_verified,
         ledger_error,
         decoded,
         decode_error,
@@ -1001,6 +1030,21 @@ mod tests {
     }
 
     #[test]
+    fn csv_beside_finds_only_a_decoded_binary_log() {
+        let dir = std::env::temp_dir().join(format!("mingocan-logs-csv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("CEL0003.BIN");
+        assert_eq!(csv_beside(&bin), None);
+        std::fs::write(dir.join("CEL0003.csv"), b"x").unwrap();
+        assert_eq!(
+            csv_beside(&bin),
+            Some(dir.join("CEL0003.csv").display().to_string())
+        );
+        assert_eq!(csv_beside(&dir.join("LOG0003.CSV")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn spot_checks_cover_both_ends_and_the_middle() {
         assert_eq!(pick_spot_checks(vec![]), Vec::<u16>::new());
         assert_eq!(pick_spot_checks(vec![5, 1]), vec![1, 5]);
@@ -1020,6 +1064,7 @@ mod tests {
                 status: FileStatus::Missing,
                 path: Some("/a".into()),
                 pulled_at: Some(3),
+                csv_path: None,
             }],
             card_changed: false,
             ledger_error: None,

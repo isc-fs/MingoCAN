@@ -1,10 +1,10 @@
-//! Decode the AMS binary log files (`IMUnnnn.BIN`, `CELnnnn.BIN`, …) to CSV,
-//! and save pulled log files (#613).
+//! Decode the AMS binary log files (`IMUnnnn.BIN`, `CELnnnn.BIN`,
+//! `ELEnnnn.BIN`, …) to CSV, and save pulled log files (#613).
 //!
 //! A binary log is a 512-byte header that carries its own plain-text schema,
 //! followed by fixed-size little-endian records. The decoder is driven
-//! entirely by that schema, so a new stream (e.g. `ELEnnnn.BIN`) decodes with
-//! no change here. Source of truth: AMS `Core/Inc/app/bin_log.hpp`; the
+//! entirely by that schema, so a new stream decodes with no change here —
+//! `ELEnnnn.BIN` arrived after this was written and needed none. Source of truth: AMS `Core/Inc/app/bin_log.hpp`; the
 //! output matches the AMS reference decoder `tools/log_decode.py` byte for
 //! byte (column names, number formatting, CRLF line ends), so CSVs from
 //! either tool are interchangeable.
@@ -30,12 +30,27 @@ pub const HEADER_LEN: usize = 512;
 /// Where the NUL-terminated schema text starts inside the header.
 const SCHEMA_OFFSET: usize = 64;
 
+/// The only header format version this decoder understands. A newer one may
+/// move fields, so it is refused rather than misread.
+pub const FORMAT_VERSION: u16 = 1;
+
+/// Largest dimension or element count a field may declare. The record size
+/// is a u16, so nothing bigger can be genuine — and capping it keeps a
+/// corrupt schema from overflowing the size check or allocating billions of
+/// column names.
+const MAX_COUNT: usize = u16::MAX as usize;
+
+/// How many `name_N.ext` copies [`unique_path`] tries before giving up.
+const MAX_COPIES: u32 = 999;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DecodeError {
     #[error("not an AMS binary log (bad magic)")]
     BadMagic,
     #[error("file is {0} B, shorter than the {HEADER_LEN}-byte header")]
     ShortHeader(usize),
+    #[error("header format version {0} (this decoder reads version {FORMAT_VERSION})")]
+    UnsupportedVersion(u16),
     #[error("schema text is not ASCII")]
     SchemaNotAscii,
     #[error("schema line {line} malformed: {text:?}")]
@@ -181,24 +196,25 @@ pub fn parse_schema(text: &str) -> Result<Vec<Field>, DecodeError> {
             return Err(bad());
         }
         let ty = FieldType::parse(tok[1]).ok_or_else(bad)?;
+        // Each dimension, and their product, must be 1..=MAX_COUNT.
+        let dim = |n: &str| -> Result<usize, DecodeError> {
+            n.parse::<usize>()
+                .ok()
+                .filter(|d| (1..=MAX_COUNT).contains(d))
+                .ok_or_else(bad)
+        };
         let dims: Vec<usize> = if tok[2].contains('x') {
-            let d: Vec<usize> = tok[2]
-                .split('x')
-                .map(|n| n.parse().map_err(|_| bad()))
-                .collect::<Result<_, _>>()?;
-            if d.len() != 2 {
+            let d: Vec<usize> = tok[2].split('x').map(dim).collect::<Result<_, _>>()?;
+            if d.len() != 2 || d[0] * d[1] > MAX_COUNT {
                 return Err(bad());
             }
             d
         } else {
-            match tok[2].parse::<usize>().map_err(|_| bad())? {
+            match dim(tok[2])? {
                 1 => Vec::new(),
                 n => vec![n],
             }
         };
-        if dims.contains(&0) {
-            return Err(bad());
-        }
         let scale = parse_scale(tok[3])
             .filter(|s| s.is_finite())
             .ok_or_else(bad)?;
@@ -231,13 +247,24 @@ pub fn read_header(bytes: &[u8]) -> Result<Header, DecodeError> {
         |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
     let until_nul = |b: &[u8]| -> Vec<u8> { b.iter().copied().take_while(|&c| c != 0).collect() };
 
+    let version = u16_at(8);
+    if version != FORMAT_VERSION {
+        return Err(DecodeError::UnsupportedVersion(version));
+    }
     let schema_bytes = until_nul(&bytes[SCHEMA_OFFSET..HEADER_LEN]);
     if !schema_bytes.is_ascii() {
         return Err(DecodeError::SchemaNotAscii);
     }
     let schema = parse_schema(&String::from_utf8_lossy(&schema_bytes))?;
     let record_size = usize::from(u16_at(10));
-    let declared: usize = schema.iter().map(|f| f.ty.size() * f.count()).sum();
+    // Counts are capped at parse time, but stay checked: an overflow here
+    // would let a corrupt schema pass the size check.
+    let declared = schema
+        .iter()
+        .try_fold(0usize, |acc, f| {
+            f.ty.size().checked_mul(f.count())?.checked_add(acc)
+        })
+        .unwrap_or(usize::MAX);
     if declared != record_size {
         return Err(DecodeError::RecordSizeMismatch {
             schema: declared,
@@ -245,7 +272,7 @@ pub fn read_header(bytes: &[u8]) -> Result<Header, DecodeError> {
         });
     }
     Ok(Header {
-        version: u16_at(8),
+        version,
         record_size,
         rotation: u32_at(12),
         open_tick_ms: u32_at(16),
@@ -342,23 +369,31 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, DecodeError> {
 
 /// Never clobber an existing file: `LOG0001.CSV` → `LOG0001_2.CSV`. The
 /// counter goes before the extension so the copy still opens in a
-/// spreadsheet.
-pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
+/// spreadsheet. Fails (rather than overwrite) once [`MAX_COPIES`] copies
+/// exist.
+pub fn unique_path(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let base = dir.join(name);
     if !base.exists() {
-        return base;
+        return Ok(base);
     }
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) => (stem, format!(".{ext}")),
         None => (name, String::new()),
     };
-    for n in 2..1000 {
+    for n in 2..=MAX_COPIES {
         let candidate = dir.join(format!("{stem}_{n}{ext}"));
         if !candidate.exists() {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    base
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "{name} and {} numbered copies already exist in {}",
+            MAX_COPIES - 1,
+            dir.display()
+        ),
+    ))
 }
 
 /// Write to `<path>.part`, flush it to the disk, then rename: a crash or a
@@ -411,7 +446,7 @@ pub fn decode_beside(bin_path: &Path, data: &[u8]) -> Option<Result<DecodedFile,
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "decoded".to_string());
-        let path = unique_path(dir, &format!("{stem}.csv"));
+        let path = unique_path(dir, &format!("{stem}.csv")).map_err(|e| e.to_string())?;
         write_atomically(&path, decoded.csv.as_bytes())
             .map_err(|e| format!("write {}: {e}", path.display()))?;
         Ok(DecodedFile {
@@ -422,14 +457,25 @@ pub fn decode_beside(bin_path: &Path, data: &[u8]) -> Option<Result<DecodedFile,
     })())
 }
 
+/// Save `data` into `dir` under `name`, never clobbering, atomically.
+/// Returns where it landed. No decoding — see [`save_pulled`].
+pub fn save_file(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = unique_path(dir, name)?;
+    write_atomically(&path, data)?;
+    Ok(path)
+}
+
 /// Save a pulled file into `dir` under `name` (never clobbering), then, if
 /// it is a binary log, write the decoded CSV beside it. Only the save of the
 /// pulled bytes can fail; a decode problem is reported in
 /// [`SavedLog::decoded`] and the original is kept.
+///
+/// A caller that records the download somewhere (Studio's ledger) should
+/// use [`save_file`], record it, then [`decode_beside`] — so a crash
+/// mid-decode can't leave a saved file unrecorded.
 pub fn save_pulled(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<SavedLog> {
-    std::fs::create_dir_all(dir)?;
-    let path = unique_path(dir, name);
-    write_atomically(&path, data)?;
+    let path = save_file(dir, name, data)?;
     let decoded = decode_beside(&path, data);
     Ok(SavedLog { path, decoded })
 }
@@ -442,6 +488,8 @@ mod tests {
     const IMU_CSV: &str = include_str!("../tests/fixtures/log_decode/IMU0003.csv");
     const CEL_BIN: &[u8] = include_bytes!("../tests/fixtures/log_decode/CEL0003.BIN");
     const CEL_CSV: &str = include_str!("../tests/fixtures/log_decode/CEL0003.csv");
+    const ELE_BIN: &[u8] = include_bytes!("../tests/fixtures/log_decode/ELE0003.BIN");
+    const ELE_CSV: &str = include_str!("../tests/fixtures/log_decode/ELE0003.csv");
 
     const IMU_SCHEMA: &str =
         "tick_ms u32 1 1 ms\na i16 3 6/32768 g\ng i16 3 8.726646259971648/32768 rad/s\n";
@@ -570,6 +618,61 @@ mod tests {
         assert_eq!(cel.csv, CEL_CSV);
         // Two whole records; the 3-byte torn tail is dropped.
         assert_eq!((cel.records, cel.torn_bytes), (2, 3));
+        // ELE: a stream this decoder was never told about, with u32::MAX,
+        // i32::MIN/MAX and negative scaled values, and a 10-byte torn tail.
+        let ele = decode(ELE_BIN).unwrap();
+        assert_eq!(ele.csv, ELE_CSV);
+        assert_eq!(ele.header.stream, "ELE");
+        assert_eq!((ele.records, ele.torn_bytes), (3, 10));
+    }
+
+    /// A count that overflowed the size check used to wrap to a "valid"
+    /// size and then try to allocate 2^62 column names (and abort).
+    #[test]
+    fn huge_counts_are_rejected_not_overflowed() {
+        for bad in [
+            "a u32 4611686018427387905 1 -",
+            "a u32 65536 1 -",
+            "a u8 300x300 1 -",
+            "a u8 1x65536 1 -",
+            "a u8 18446744073709551616 1 -",
+        ] {
+            assert!(
+                matches!(parse_schema(bad), Err(DecodeError::BadSchemaLine { .. })),
+                "{bad:?} should be rejected"
+            );
+        }
+        // At the cap is still fine (and adds up to a u16 record size).
+        assert_eq!(parse_schema("a u8 65535 1 -").unwrap()[0].count(), 65535);
+        // And through the whole header path: the old overflow case, record
+        // size 4.
+        let mut bytes = header("BAD", 4, "a u32 4611686018427387905 1 -\n");
+        bytes.extend([0; 4]);
+        assert!(matches!(
+            decode(&bytes),
+            Err(DecodeError::BadSchemaLine { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_header_version_is_refused() {
+        let mut bytes = header("IMU", 16, IMU_SCHEMA);
+        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+        assert_eq!(decode(&bytes), Err(DecodeError::UnsupportedVersion(2)));
+    }
+
+    #[test]
+    fn unique_path_errors_instead_of_overwriting() {
+        let dir = temp_dir("copies");
+        std::fs::write(dir.join("LOG0001.CSV"), b"").unwrap();
+        for n in 2..=MAX_COPIES {
+            std::fs::write(dir.join(format!("LOG0001_{n}.CSV")), b"").unwrap();
+        }
+        let err = unique_path(&dir, "LOG0001.CSV").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(save_pulled(&dir, "LOG0001.CSV", b"new").is_err());
+        assert_eq!(std::fs::read(dir.join("LOG0001.CSV")).unwrap(), b"");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The CEL fixture's second record has the second IC's 19 cells at 0:

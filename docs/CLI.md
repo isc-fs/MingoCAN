@@ -269,9 +269,10 @@ board sitting in its bootloader will not answer.
 The file a board is writing right now does not list until the AMS seals it at
 its next boot, so power-cycle the car to get the last few minutes.
 
-Binary logs (`IMUnnnn.BIN`, `CELnnnn.BIN`) are decoded to a `.csv` beside the
-pulled file automatically; the `.BIN` is kept, and a decode problem is a
-warning, never a failed pull.
+Binary logs (`IMUnnnn.BIN`, `CELnnnn.BIN`, `ELEnnnn.BIN`) are decoded to a
+`.csv` beside the pulled file automatically; the `.BIN` is kept, and a decode
+problem is a warning, never a failed pull. In `logs list` the index's top two
+bits give the kind: `0x0…` LOG, `0x8…` IMU, `0x4…` CEL, `0xC…` ELE.
 
 ```bash
 can-flasher … --node-id 0x02 logs list

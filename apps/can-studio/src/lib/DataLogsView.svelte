@@ -269,6 +269,7 @@
                     const res = await logsPull(request, file, dir);
                     file.status = 'downloaded';
                     file.path = res.path;
+                    file.csvPath = res.decoded?.path ?? null;
                     file.pulledAt = Math.floor(Date.now() / 1000);
                     // Point "Show" at the spreadsheet when a binary log was
                     // decoded — that's the file people open.
@@ -305,19 +306,16 @@
 
     function savedNotice(file: ScannedFile, res: PullResult): NonNullable<typeof notice> {
         const path = res.decoded?.path ?? res.path;
+        // Both problems can happen on one pull; say both.
+        const problems: string[] = [];
         if (res.ledgerError) {
-            return {
-                tone: 'warning',
-                text: `Saved ${file.name}, but couldn't record it (${res.ledgerError}) — it will show as new next time.`,
-                path,
-            };
+            problems.push(`couldn't record it (${res.ledgerError}), so it will show as new next time`);
         }
         if (res.decodeError) {
-            return {
-                tone: 'warning',
-                text: `Saved ${file.name}, but couldn't turn it into a CSV (${res.decodeError}). The file itself is fine and kept.`,
-                path,
-            };
+            problems.push(`couldn't turn it into a CSV (${res.decodeError}) — the file itself is fine and kept`);
+        }
+        if (problems.length > 0) {
+            return { tone: 'warning', text: `Saved ${file.name}, but ${problems.join('; and ')}.`, path };
         }
         let text = `Saved ${file.name}${res.crcVerified ? ' · CRC verified' : ''}`;
         if (res.decoded) {
@@ -427,17 +425,8 @@
         { k: 'log', label: 'LOG files', word: 'log' },
         { k: 'imu', label: 'IMU files', word: 'IMU log' },
         { k: 'cel', label: 'CEL files', word: 'cell log' },
-        { k: 'other', label: 'Other files', word: 'file' },
+        { k: 'ele', label: 'ELE files', word: 'current log' },
     ];
-    /** "Other" (a stream newer than this app) only shows when the card has one. */
-    const visibleKinds = $derived(
-        KINDS.filter(
-            (x) =>
-                x.k !== 'other' ||
-                kind === 'other' ||
-                (scan?.files.some((f) => kindOf(f.index) === 'other') ?? false),
-        ),
-    );
 
     const kindWord = $derived(KINDS.find((x) => x.k === kind)?.word ?? 'file');
     const listedAt = $derived(
@@ -530,7 +519,7 @@
         </div>
 
         <div class="segmented kind-tabs" role="group" aria-label="File type">
-            {#each visibleKinds as { k, label } (k)}
+            {#each KINDS as { k, label } (k)}
                 {@const n = newCount(k)}
                 <button
                     type="button"
@@ -664,7 +653,7 @@
                             Download newest · {estimate(newest.size)}
                         </button>
                     {:else}
-                        <button type="button" class="btn" onclick={() => reveal(newest.path)}>
+                        <button type="button" class="btn" onclick={() => reveal(newest.csvPath ?? newest.path)}>
                             Show in folder
                         </button>
                     {/if}
@@ -812,7 +801,7 @@
                                     <td class="num mono">{formatBytes(f.size)}</td>
                                     <td class="muted small">{formatPulledAt(f.pulledAt)}</td>
                                     <td class="actions">
-                                        <button type="button" class="btn btn-sm" onclick={() => reveal(f.path)}>
+                                        <button type="button" class="btn btn-sm" onclick={() => reveal(f.csvPath ?? f.path)}>
                                             Show
                                         </button>
                                         <button

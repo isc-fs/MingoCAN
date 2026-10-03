@@ -29,6 +29,8 @@ export interface ScannedFile {
     path: string | null;
     /** Unix seconds of that download. */
     pulledAt: number | null;
+    /** A downloaded binary log's decoded CSV, when it sits beside it. */
+    csvPath: string | null;
 }
 
 export interface ScanResult {
@@ -126,9 +128,9 @@ export function onPullProgress(
 
 /** What a card file holds, from the top two bits of its LOGFS index
  *  (IFS08-CE-AMS log_names.hpp): `00` LOG (`LOGnnnn.CSV`), `10` IMU
- *  (`IMUnnnn.BIN`, `.CSV` on older cards), `01` CEL (`CELnnnn.BIN`), `11`
- *  reserved for the next stream. */
-export type LogKind = 'log' | 'imu' | 'cel' | 'other';
+ *  (`IMUnnnn.BIN`, `.CSV` on older cards), `01` CEL (`CELnnnn.BIN`, cell
+ *  frames), `11` ELE (`ELEnnnn.BIN`, oversampled pack current). */
+export type LogKind = 'log' | 'imu' | 'cel' | 'ele';
 
 export function kindOf(index: number): LogKind {
     switch (index & 0xc000) {
@@ -139,12 +141,12 @@ export function kindOf(index: number): LogKind {
         case 0x4000:
             return 'cel';
         default:
-            return 'other';
+            return 'ele';
     }
 }
 
 /** Rotation number (low 14 bits) — a new set of files every 5 min / 4 MiB,
- *  counting up, shared by the LOG, IMU and CEL files of one window. */
+ *  counting up, shared by the LOG, IMU, CEL and ELE files of one window. */
 export function runNumber(index: number): number {
     return index & 0x3fff;
 }

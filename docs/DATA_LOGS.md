@@ -14,6 +14,7 @@ Every 5-minute window gets a set of files that share one number `nnnn`:
 | `LOGnnnn.CSV` | AMS state, cells, temperatures | `nnnn` — e.g. `0x0003` |
 | `IMUnnnn.BIN` | IMU raw counts, 100 Hz | `0x8000 + nnnn` — e.g. `0x8003` |
 | `CELnnnn.BIN` | every cell-voltage read and current sample, 5 Hz | `0x4000 + nnnn` — e.g. `0x4003` |
+| `ELEnnnn.BIN` | pack current oversampled (mean / min / max per window) and DC-bus voltage, 100 Hz | `0xC000 + nnnn` — e.g. `0xC003` |
 
 The `.BIN` files are binary, so **MingoCAN decodes each one to a `.csv` beside
 it as soon as it's saved** — `CEL0003.BIN` comes with `CEL0003.csv`. The
@@ -23,7 +24,9 @@ kept too: it's the CRC-checked original. If a `.BIN` can't be decoded, the
 download still succeeds and only the `.csv` is missing. A file cut short by a
 power-off loses at most its last partial record.
 
-Older cards (before AMS #598) have `IMUnnnn.CSV` instead, and no CEL files.
+Older cards (before AMS #598) have `IMUnnnn.CSV` instead, and no CEL or ELE
+files. A stream added to the AMS later decodes the same way with no MingoCAN
+update, because each `.BIN` carries its own layout.
 
 ---
 
@@ -47,8 +50,8 @@ job. Plan for it rather than assuming the tool has hung.
   **Download newest** (or Enter) and it lands on disk. **Download all new**
   takes everything you don't have yet, newest first, so stopping halfway still
   keeps the most recent data.
-- **LOG, IMU and CEL files are separate.** Switch with the *LOG files* /
-  *IMU files* / *CEL files* tabs; each shows how many are new. A `.BIN` lands
+- **LOG, IMU, CEL and ELE files are separate.** Switch with the *LOG files* /
+  *IMU files* / *CEL files* / *ELE files* tabs; each shows how many are new. A `.BIN` lands
   with its decoded `.csv`, and **Show in folder** points at the CSV.
 - **No folder dialog.** Files go to `Documents/MingoCAN Logs/<AMS|ECU|UDV>/<date>/`,
   where the date is the *download* date (the card has no clock). The path is
