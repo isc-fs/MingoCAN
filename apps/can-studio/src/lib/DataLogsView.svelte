@@ -192,7 +192,7 @@
     let lastAnchorIndex = $state<number | null>(null);
     let headerCheckbox = $state<HTMLInputElement | null>(null);
 
-    // Reset anchor when switching file types (LOG <-> IMU)
+    // Reset anchor when switching file types (LOG / IMU / CEL / ELE)
     $effect(() => {
         void settings.logs.kind;
         lastAnchorIndex = null;
@@ -234,9 +234,28 @@
         lastAnchorIndex = null;
     }
 
+    /*
+        Checkbox clicks are NOT preventDefault()ed. A cancelled click makes
+        the browser restore the box's old checked state *after* Svelte has
+        already rendered the new one, so the box you clicked showed the
+        opposite of the selection (only boxes filled in by a shift-click
+        range stayed right). Instead the browser toggles natively and each
+        handler then writes the box's real state back onto it, which also
+        covers a shift-click on an already-checked box.
+    */
+    function syncBox(e: MouseEvent | undefined, checked: boolean, indeterminate = false): void {
+        const box = e?.currentTarget;
+        if (box instanceof HTMLInputElement) {
+            box.checked = checked;
+            box.indeterminate = indeterminate;
+        }
+    }
+
     function toggleSelectAll(e?: MouseEvent): void {
-        if (e) e.preventDefault();
-        if (current !== null || toDownload.length === 0) return;
+        if (current !== null || toDownload.length === 0) {
+            syncBox(e, allTabSelected, isTabIndeterminate);
+            return;
+        }
         const next = { ...selected };
         if (allTabSelected) {
             for (const f of toDownload) {
@@ -249,6 +268,7 @@
         }
         selected = next;
         lastAnchorIndex = null;
+        syncBox(e, allTabSelected, isTabIndeterminate);
     }
 
     function handleRowCheckboxClick(
@@ -256,8 +276,10 @@
         indexInFresh: number,
         e: MouseEvent,
     ): void {
-        if (current !== null || savedNow[f.index] !== undefined) return;
-        e.preventDefault();
+        if (current !== null || savedNow[f.index] !== undefined) {
+            syncBox(e, savedNow[f.index] !== undefined || Boolean(selected[f.index]));
+            return;
+        }
 
         if (e.shiftKey && lastAnchorIndex !== null) {
             if (typeof window !== 'undefined') {
@@ -283,6 +305,7 @@
             selected = next;
             lastAnchorIndex = indexInFresh;
         }
+        syncBox(e, Boolean(selected[f.index]));
     }
 
     function downloadSelected(): void {
