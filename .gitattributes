@@ -1,0 +1,3 @@
+# Binary logs and the reference decoder's CSV output (CRLF line ends):
+# byte-exact fixtures, never normalise them.
+tests/fixtures/log_decode/** binary

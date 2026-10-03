@@ -29,6 +29,8 @@ export interface ScannedFile {
     path: string | null;
     /** Unix seconds of that download. */
     pulledAt: number | null;
+    /** A downloaded binary log's decoded CSV, when it sits beside it. */
+    csvPath: string | null;
 }
 
 export interface ScanResult {
@@ -54,6 +56,11 @@ export interface PullResult {
     crcVerified: boolean;
     /** Saved, but not recorded — it will show as new on the next scan. */
     ledgerError: string | null;
+    /** A binary log (`IMUnnnn.BIN`, `CELnnnn.BIN`) decoded to a CSV beside
+     *  it (#613). `null` for other files, or when decoding failed. */
+    decoded: { path: string; records: number; tornBytes: number } | null;
+    /** Why a binary log couldn't be decoded; the pulled file is kept. */
+    decodeError: string | null;
 }
 
 /** Backend marker for an operator-cancelled pull (not a failure). */
@@ -119,15 +126,29 @@ export function onPullProgress(
 
 // ---- Card file helpers ----
 
-/** The AMS lists `IMUnnnn.CSV` at index `0x8000 | nnnn` and `LOGnnnn.CSV`
- *  at `nnnn` (IFS08-CE-AMS log_names.hpp). */
-export function kindOf(index: number): 'log' | 'imu' {
-    return (index & 0x8000) !== 0 ? 'imu' : 'log';
+/** What a card file holds, from the top two bits of its LOGFS index
+ *  (IFS08-CE-AMS log_names.hpp): `00` LOG (`LOGnnnn.CSV`), `10` IMU
+ *  (`IMUnnnn.BIN`, `.CSV` on older cards), `01` CEL (`CELnnnn.BIN`, cell
+ *  frames), `11` ELE (`ELEnnnn.BIN`, oversampled pack current). */
+export type LogKind = 'log' | 'imu' | 'cel' | 'ele';
+
+export function kindOf(index: number): LogKind {
+    switch (index & 0xc000) {
+        case 0x0000:
+            return 'log';
+        case 0x8000:
+            return 'imu';
+        case 0x4000:
+            return 'cel';
+        default:
+            return 'ele';
+    }
 }
 
-/** Rotation number — a new file every 5 min / 4 MiB, counting up. */
+/** Rotation number (low 14 bits) — a new set of files every 5 min / 4 MiB,
+ *  counting up, shared by the LOG, IMU, CEL and ELE files of one window. */
 export function runNumber(index: number): number {
-    return index & 0x7fff;
+    return index & 0x3fff;
 }
 
 /** Sort comparator: newest rotation first. The card lists in directory
