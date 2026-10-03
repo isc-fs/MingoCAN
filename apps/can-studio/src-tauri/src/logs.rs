@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use can_flasher::firmware::crc32;
+use can_flasher::log_decode;
 use can_flasher::logfs_client;
 use can_flasher::protocol::commands::{cmd_logfs_close, cmd_logfs_list, cmd_logfs_open};
 use can_flasher::protocol::logfs;
@@ -161,6 +162,21 @@ pub struct PullResult {
     /// The file is saved, but recording it in the ledger failed — it will
     /// show as new on the next scan. `None` when all is well.
     pub ledger_error: Option<String>,
+    /// For a binary log (`IMUnnnn.BIN`, `CELnnnn.BIN`): the CSV decoded
+    /// beside it (#613). `None` for a file that isn't one, or if decoding
+    /// failed — see `decode_error`.
+    pub decoded: Option<DecodedCsv>,
+    /// Why a binary log couldn't be decoded. The pulled file is still saved.
+    pub decode_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodedCsv {
+    pub path: String,
+    pub records: usize,
+    /// Bytes of a partial last record that were dropped (power cut mid-write).
+    pub torn_bytes: usize,
 }
 
 /// Identifies one card file across scans: LOGFS indices are reused after
@@ -241,6 +257,9 @@ pub struct ScannedFile {
     pub path: Option<String>,
     /// Unix seconds of that download.
     pub pulled_at: Option<u64>,
+    /// For a downloaded binary log: its decoded CSV, if it sits beside the
+    /// copy (what "Show" should open).
+    pub csv_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -521,6 +540,18 @@ fn classify(
     )
 }
 
+/// `<stem>.csv` next to a binary log, if it exists — the decoded copy.
+fn csv_beside(path: &Path) -> Option<String> {
+    let is_bin = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("bin"));
+    if !is_bin {
+        return None;
+    }
+    let csv = path.with_extension("csv");
+    csv.is_file().then(|| csv.display().to_string())
+}
+
 fn file_on_disk(path: &str, size: u32) -> bool {
     std::fs::metadata(path)
         .map(|m| m.is_file() && m.len() == u64::from(size))
@@ -624,6 +655,10 @@ pub async fn logs_scan(app: AppHandle, request: LogsRequest) -> Result<ScanResul
         .map(|e| {
             let key = key_of(&e);
             let (status, path, pulled_at) = classify(&key, ledger.get(&key), &file_on_disk);
+            let csv_path = match (status, &path) {
+                (FileStatus::Downloaded, Some(p)) => csv_beside(Path::new(p)),
+                _ => None,
+            };
             ScannedFile {
                 index: e.index,
                 name: e.name,
@@ -631,6 +666,7 @@ pub async fn logs_scan(app: AppHandle, request: LogsRequest) -> Result<ScanResul
                 status,
                 path,
                 pulled_at,
+                csv_path,
             }
         })
         .collect();
@@ -756,11 +792,13 @@ async fn pull_inner(
             logfs_client::PullError::Failed(msg) => format!("{}: {msg}", entry.name),
         })?;
 
-    let path = unique_path(dir, &entry.name);
-    write_atomically(&path, &pulled.data)?;
+    let path = log_decode::save_file(dir, &entry.name, &pulled.data)
+        .map_err(|e| format!("write {} into {}: {e}", entry.name, dir.display()))?;
 
     // Only now, with the bytes CRC-checked and renamed into place, does
-    // the file count as downloaded.
+    // the file count as downloaded. Recorded *before* decoding, so a crash
+    // mid-decode can't leave a saved file looking new (and the next pull
+    // making a `_2` copy).
     let ledger_error = append_ledger(
         app,
         &[LedgerEvent::Pulled {
@@ -772,52 +810,39 @@ async fn pull_inner(
     )
     .err();
 
+    // A binary log also gets its CSV beside it (#613). CPU-bound for a few
+    // MiB, so off the async executor; it can't fail the pull.
+    let bytes = pulled.data.len() as u32;
+    let crc_verified = pulled.crc_verified;
+    let decode_path = path.clone();
+    let data = pulled.data;
+    let decoded =
+        tokio::task::spawn_blocking(move || log_decode::decode_beside(&decode_path, &data)).await;
+    let (decoded, decode_error) = match decoded {
+        Ok(None) => (None, None),
+        Ok(Some(Ok(d))) => (
+            Some(DecodedCsv {
+                path: d.path.display().to_string(),
+                records: d.records,
+                torn_bytes: d.torn_bytes,
+            }),
+            None,
+        ),
+        Ok(Some(Err(e))) => {
+            tracing::warn!("{}: not decoded: {e}", path.display());
+            (None, Some(e))
+        }
+        Err(e) => (None, Some(format!("decoder stopped: {e}"))),
+    };
+
     Ok(PullResult {
         path: path.display().to_string(),
-        bytes: pulled.data.len() as u32,
-        crc_verified: pulled.crc_verified,
+        bytes,
+        crc_verified,
         ledger_error,
+        decoded,
+        decode_error,
     })
-}
-
-/// Write to `<path>.part`, flush it to the disk, then rename: a crash or a
-/// yanked USB disk leaves a `.part`, never a truncated file under the real
-/// name.
-fn write_atomically(path: &Path, data: &[u8]) -> Result<(), String> {
-    let mut part = path.as_os_str().to_owned();
-    part.push(".part");
-    let part = PathBuf::from(part);
-    let write = || -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&part)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-        std::fs::rename(&part, path)
-    };
-    write().map_err(|e| {
-        let _ = std::fs::remove_file(&part);
-        format!("write {}: {e}", path.display())
-    })
-}
-
-/// Never clobber an existing download: `LOG0001.CSV` → `LOG0001_2.CSV`.
-/// The counter goes before the extension so the copy still opens in a
-/// spreadsheet.
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let base = dir.join(name);
-    if !base.exists() {
-        return base;
-    }
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((stem, ext)) => (stem, format!(".{ext}")),
-        None => (name, String::new()),
-    };
-    for n in 2..1000 {
-        let candidate = dir.join(format!("{stem}_{n}{ext}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    base
 }
 
 /// Show a file (selected) or a folder in the OS file manager.
@@ -1005,25 +1030,17 @@ mod tests {
     }
 
     #[test]
-    fn unique_path_counts_before_the_extension() {
-        let dir = std::env::temp_dir().join(format!("mingocan-logs-uniq-{}", std::process::id()));
+    fn csv_beside_finds_only_a_decoded_binary_log() {
+        let dir = std::env::temp_dir().join(format!("mingocan-logs-csv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(unique_path(&dir, "LOG0001.CSV"), dir.join("LOG0001.CSV"));
-        std::fs::write(dir.join("LOG0001.CSV"), b"").unwrap();
-        assert_eq!(unique_path(&dir, "LOG0001.CSV"), dir.join("LOG0001_2.CSV"));
-        std::fs::write(dir.join("LOG0001_2.CSV"), b"").unwrap();
-        assert_eq!(unique_path(&dir, "LOG0001.CSV"), dir.join("LOG0001_3.CSV"));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn write_atomically_leaves_no_part_file() {
-        let dir = std::env::temp_dir().join(format!("mingocan-logs-atomic-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("LOG0001.CSV");
-        write_atomically(&path, b"abc").unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
-        assert!(!dir.join("LOG0001.CSV.part").exists());
+        let bin = dir.join("CEL0003.BIN");
+        assert_eq!(csv_beside(&bin), None);
+        std::fs::write(dir.join("CEL0003.csv"), b"x").unwrap();
+        assert_eq!(
+            csv_beside(&bin),
+            Some(dir.join("CEL0003.csv").display().to_string())
+        );
+        assert_eq!(csv_beside(&dir.join("LOG0003.CSV")), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1047,6 +1064,7 @@ mod tests {
                 status: FileStatus::Missing,
                 path: Some("/a".into()),
                 pulled_at: Some(3),
+                csv_path: None,
             }],
             card_changed: false,
             ledger_error: None,

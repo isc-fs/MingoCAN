@@ -12,7 +12,8 @@
         each scan says which files are already safely on this disk. Those
         fold into a collapsed group — but only while the copy really
         exists at the listed size; a deleted copy shows up as "missing",
-        never hidden. LOG and IMU files are shown separately.
+        never hidden. LOG, IMU and CEL files are shown separately; binary
+        logs (.BIN) are decoded to a CSV beside them as they're saved.
 
         Transfers run at classic-CAN speeds (10–20 kB/s), so a 4 MiB file
         is minutes: the top card turns into a progress panel with rate,
@@ -42,7 +43,9 @@
         formatDuration,
         formatPulledAt,
         estimate,
+        type LogKind,
         type LogsRequest,
+        type PullResult,
         type ScanResult,
         type ScannedFile,
     } from './logs';
@@ -119,10 +122,12 @@
             scan = await logsScan(request);
             scannedAt = new Date();
             savedNow = {};
+            clearSelection();
         } catch (err) {
             scanError = err instanceof Error ? err.message : String(err);
             scan = null;
             scannedAt = null;
+            clearSelection();
         } finally {
             scanning = false;
         }
@@ -136,12 +141,13 @@
         void adapterReady;
         untrack(() => {
             scan = null;
+            clearSelection();
             if (scanTimer !== null) clearTimeout(scanTimer);
             scanTimer = setTimeout(() => void rescan(), 300);
         });
     });
 
-    // ---- Grouping for the selected kind (LOG or IMU) ----
+    // ---- Grouping for the selected kind (LOG, IMU, CEL…) ----
 
     /** Rows downloaded since the last scan stay where they were (marked
      *  saved) instead of jumping into the collapsed group under the cursor. */
@@ -170,7 +176,7 @@
     const newest = $derived(ofKind.find((f) => f.status !== 'hidden') ?? null);
     const toDownloadBytes = $derived(toDownload.reduce((n, f) => n + f.size, 0));
 
-    function newCount(k: 'log' | 'imu'): number {
+    function newCount(k: LogKind): number {
         if (scan === null) return 0;
         return scan.files.filter(
             (f) =>
@@ -178,6 +184,133 @@
                 f.status === 'new' &&
                 savedNow[f.index] === undefined,
         ).length;
+    }
+
+    // ---- Bulk selection state ----
+
+    let selected = $state<Record<number, boolean>>({});
+    let lastAnchorIndex = $state<number | null>(null);
+    let headerCheckbox = $state<HTMLInputElement | null>(null);
+
+    // Reset anchor when switching file types (LOG / IMU / CEL / ELE)
+    $effect(() => {
+        void settings.logs.kind;
+        lastAnchorIndex = null;
+    });
+
+    /** Checked unsaved files across both kinds, sorted newest first. */
+    const selectedFiles = $derived(
+        scan === null
+            ? []
+            : scan.files
+                  .filter(
+                      (f) =>
+                          Boolean(selected[f.index]) &&
+                          f.status === 'new' &&
+                          savedNow[f.index] === undefined,
+                  )
+                  .sort(newestFirst),
+    );
+    const selectedCount = $derived(selectedFiles.length);
+
+    /** Tab-scoped selection predicates for header checkbox */
+    const selectedInTab = $derived(
+        toDownload.filter((f) => Boolean(selected[f.index])),
+    );
+    const allTabSelected = $derived(
+        toDownload.length > 0 && selectedInTab.length === toDownload.length,
+    );
+    const someTabSelected = $derived(selectedInTab.length > 0);
+    const isTabIndeterminate = $derived(someTabSelected && !allTabSelected);
+
+    $effect(() => {
+        if (headerCheckbox) {
+            headerCheckbox.indeterminate = isTabIndeterminate;
+        }
+    });
+
+    function clearSelection(): void {
+        selected = {};
+        lastAnchorIndex = null;
+    }
+
+    /*
+        Checkbox clicks are NOT preventDefault()ed. A cancelled click makes
+        the browser restore the box's old checked state *after* Svelte has
+        already rendered the new one, so the box you clicked showed the
+        opposite of the selection (only boxes filled in by a shift-click
+        range stayed right). Instead the browser toggles natively and each
+        handler then writes the box's real state back onto it, which also
+        covers a shift-click on an already-checked box.
+    */
+    function syncBox(e: MouseEvent | undefined, checked: boolean, indeterminate = false): void {
+        const box = e?.currentTarget;
+        if (box instanceof HTMLInputElement) {
+            box.checked = checked;
+            box.indeterminate = indeterminate;
+        }
+    }
+
+    function toggleSelectAll(e?: MouseEvent): void {
+        if (current !== null || toDownload.length === 0) {
+            syncBox(e, allTabSelected, isTabIndeterminate);
+            return;
+        }
+        const next = { ...selected };
+        if (allTabSelected) {
+            for (const f of toDownload) {
+                delete next[f.index];
+            }
+        } else {
+            for (const f of toDownload) {
+                next[f.index] = true;
+            }
+        }
+        selected = next;
+        lastAnchorIndex = null;
+        syncBox(e, allTabSelected, isTabIndeterminate);
+    }
+
+    function handleRowCheckboxClick(
+        f: ScannedFile,
+        indexInFresh: number,
+        e: MouseEvent,
+    ): void {
+        if (current !== null || savedNow[f.index] !== undefined) {
+            syncBox(e, savedNow[f.index] !== undefined || Boolean(selected[f.index]));
+            return;
+        }
+
+        if (e.shiftKey && lastAnchorIndex !== null) {
+            if (typeof window !== 'undefined') {
+                window.getSelection()?.removeAllRanges();
+            }
+            const start = Math.min(lastAnchorIndex, indexInFresh);
+            const end = Math.max(lastAnchorIndex, indexInFresh);
+            const next = { ...selected };
+            for (let k = start; k <= end; k++) {
+                const item = fresh[k];
+                if (item && savedNow[item.index] === undefined) {
+                    next[item.index] = true;
+                }
+            }
+            selected = next;
+        } else {
+            const next = { ...selected };
+            if (next[f.index]) {
+                delete next[f.index];
+            } else {
+                next[f.index] = true;
+            }
+            selected = next;
+            lastAnchorIndex = indexInFresh;
+        }
+        syncBox(e, Boolean(selected[f.index]));
+    }
+
+    function downloadSelected(): void {
+        if (selectedCount === 0 || current !== null || root === null) return;
+        void download(selectedFiles);
     }
 
     // ---- Download queue ----
@@ -266,20 +399,13 @@
                     const res = await logsPull(request, file, dir);
                     file.status = 'downloaded';
                     file.path = res.path;
+                    file.csvPath = res.decoded?.path ?? null;
                     file.pulledAt = Math.floor(Date.now() / 1000);
-                    savedNow[file.index] = res.path;
+                    // Point "Show" at the spreadsheet when a binary log was
+                    // decoded — that's the file people open.
+                    savedNow[file.index] = res.decoded?.path ?? res.path;
                     queueDone += 1;
-                    notice = res.ledgerError
-                        ? {
-                              tone: 'warning',
-                              text: `Saved ${file.name}, but couldn't record it (${res.ledgerError}) — it will show as new next time.`,
-                              path: res.path,
-                          }
-                        : {
-                              tone: 'success',
-                              text: `Saved ${file.name}${res.crcVerified ? ' · CRC verified' : ''}`,
-                              path: res.path,
-                          };
+                    notice = savedNotice(file, res);
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     if (msg.includes(CANCELLED_MSG)) {
@@ -304,8 +430,34 @@
             if (ticker !== null) clearInterval(ticker);
             ticker = null;
             setLogsTransferActive(false);
+            clearSelection();
         }
         if (relist) await rescan();
+    }
+
+    function savedNotice(file: ScannedFile, res: PullResult): NonNullable<typeof notice> {
+        const path = res.decoded?.path ?? res.path;
+        // Both problems can happen on one pull; say both.
+        const problems: string[] = [];
+        if (res.ledgerError) {
+            problems.push(`couldn't record it (${res.ledgerError}), so it will show as new next time`);
+        }
+        if (res.decodeError) {
+            problems.push(`couldn't turn it into a CSV (${res.decodeError}) — the file itself is fine and kept`);
+        }
+        if (problems.length > 0) {
+            return { tone: 'warning', text: `Saved ${file.name}, but ${problems.join('; and ')}.`, path };
+        }
+        let text = `Saved ${file.name}${res.crcVerified ? ' · CRC verified' : ''}`;
+        if (res.decoded) {
+            text += ` · decoded to ${baseName(res.decoded.path)} (${res.decoded.records.toLocaleString()} records)`;
+            if (res.decoded.tornBytes > 0) text += ' · last partial record dropped (cut short by a power-off)';
+        }
+        return { tone: 'success', text, path };
+    }
+
+    function baseName(path: string): string {
+        return path.split(/[\\/]/).pop() ?? path;
     }
 
     async function cancelNow(): Promise<void> {
@@ -338,14 +490,19 @@
             notice = { tone: 'danger', text: `Couldn't update the download list: ${err instanceof Error ? err.message : err}` };
             return;
         }
+        const next = { ...selected };
         for (const f of files) {
-            if (action === 'hide') f.status = 'hidden';
+            if (action === 'hide') {
+                f.status = 'hidden';
+                delete next[f.index];
+            }
             if (action === 'forget') {
                 f.status = 'new';
                 f.path = null;
                 f.pulledAt = null;
             }
         }
+        selected = next;
         // An unhidden file goes back to whatever it really is (new,
         // downloaded or missing) — only a scan knows that.
         if (action === 'unhide') {
@@ -357,7 +514,7 @@
     async function hideAllNew(): Promise<void> {
         const list = toDownload;
         const ok = await ask(
-            `Hide ${list.length} ${kind === 'imu' ? 'IMU ' : ''}file${list.length === 1 ? '' : 's'} on this laptop? Nothing is deleted from the card or the disk — they move to "Hidden", where you can bring them back.`,
+            `Hide ${list.length} ${kindWord}${list.length === 1 ? '' : 's'} on this laptop? Nothing is deleted from the card or the disk — they move to "Hidden", where you can bring them back.`,
             { title: 'Hide all new files', kind: 'info', okLabel: 'Hide', cancelLabel: 'Keep' },
         );
         if (ok) await mark('hide', list);
@@ -400,12 +557,14 @@
         heroButton?.focus();
     });
 
-    const KINDS = [
-        { k: 'log', label: 'LOG files' },
-        { k: 'imu', label: 'IMU files' },
-    ] as const;
+    const KINDS: ReadonlyArray<{ k: LogKind; label: string; word: string }> = [
+        { k: 'log', label: 'LOG files', word: 'log' },
+        { k: 'imu', label: 'IMU files', word: 'IMU log' },
+        { k: 'cel', label: 'CEL files', word: 'cell log' },
+        { k: 'ele', label: 'ELE files', word: 'current log' },
+    ];
 
-    const kindWord = $derived(kind === 'imu' ? 'IMU log' : 'log');
+    const kindWord = $derived(KINDS.find((x) => x.k === kind)?.word ?? 'file');
     const listedAt = $derived(
         scannedAt?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? null,
     );
@@ -630,7 +789,7 @@
                             Download newest · {estimate(newest.size)}
                         </button>
                     {:else}
-                        <button type="button" class="btn" onclick={() => reveal(newest.path)}>
+                        <button type="button" class="btn" onclick={() => reveal(newest.csvPath ?? newest.path)}>
                             Show in folder
                         </button>
                     {/if}
@@ -674,6 +833,16 @@
                         <h3>New on the card ({toDownload.length})</h3>
                         <span class="muted small">newest first</span>
                         <span class="spacer"></span>
+                        {#if toDownload.length > 0}
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-primary"
+                                disabled={selectedCount === 0 || current !== null || root === null}
+                                onclick={downloadSelected}
+                            >
+                                Download selected ({selectedCount})
+                            </button>
+                        {/if}
                         {#if toDownload.length > 1}
                             <button
                                 type="button"
@@ -686,10 +855,38 @@
                         {/if}
                     </div>
                     <table class="logs-table">
+                        <thead>
+                            <tr>
+                                <th class="col-check">
+                                    <input
+                                        type="checkbox"
+                                        bind:this={headerCheckbox}
+                                        indeterminate={isTabIndeterminate}
+                                        checked={allTabSelected}
+                                        disabled={current !== null || toDownload.length === 0}
+                                        onclick={toggleSelectAll}
+                                        aria-label="Select all new files"
+                                    />
+                                </th>
+                                <th>File</th>
+                                <th class="num">Size</th>
+                                <th>Status</th>
+                                <th class="actions"></th>
+                            </tr>
+                        </thead>
                         <tbody>
-                            {#each fresh as f (f.index)}
+                            {#each fresh as f, i (f.index)}
                                 {@const saved = savedNow[f.index]}
                                 <tr class:row-active={current?.index === f.index}>
+                                    <td class="col-check">
+                                        <input
+                                            type="checkbox"
+                                            checked={saved !== undefined || Boolean(selected[f.index])}
+                                            disabled={current !== null || saved !== undefined}
+                                            onclick={(e) => handleRowCheckboxClick(f, i, e)}
+                                            aria-label={`Select ${f.name}`}
+                                        />
+                                    </td>
                                     <td class="mono">{f.name}</td>
                                     <td class="num mono">{formatBytes(f.size)}</td>
                                     <td class="muted small">
@@ -778,7 +975,7 @@
                                     <td class="num mono">{formatBytes(f.size)}</td>
                                     <td class="muted small">{formatPulledAt(f.pulledAt)}</td>
                                     <td class="actions">
-                                        <button type="button" class="btn btn-sm" onclick={() => reveal(f.path)}>
+                                        <button type="button" class="btn btn-sm" onclick={() => reveal(f.csvPath ?? f.path)}>
                                             Show
                                         </button>
                                         <button
@@ -1043,12 +1240,39 @@
         border-collapse: collapse;
         font-size: var(--text-sm);
     }
+    .logs-table th {
+        padding: var(--space-2) var(--space-3);
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        font-weight: 500;
+        font-size: var(--text-xs);
+        color: var(--text-muted);
+    }
     .logs-table td {
         padding: var(--space-2) var(--space-3);
         border-bottom: 1px solid var(--border);
     }
     .logs-table tr:last-child td {
         border-bottom: none;
+    }
+    .logs-table .col-check {
+        width: 2.25rem;
+        text-align: center;
+        padding-left: var(--space-2);
+        padding-right: var(--space-2);
+        user-select: none;
+    }
+    .logs-table .col-check input[type='checkbox'] {
+        cursor: pointer;
+        accent-color: var(--accent);
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        vertical-align: middle;
+    }
+    .logs-table .col-check input[type='checkbox']:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
     }
     /* Long paths truncate instead of pushing the buttons off-screen;
        the full path is in the tooltip. */
