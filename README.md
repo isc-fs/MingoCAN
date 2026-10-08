@@ -2,7 +2,7 @@
 
 # ISC MingoCAN
 
-**The pit-lane tool for the IFS08.** One window that flashes firmware over CAN,
+**The pit-lane tool for the team's cars.** One window that flashes firmware over CAN,
 watches the car's boards live, pulls the data logs off them, and tells you why a
 board is unhappy — for the ISC Racing Team's Formula Student ECUs.
 
@@ -30,7 +30,8 @@ Windows and Linux.
 ## What's in the app
 
 The sidebar splits in two, and the split is the point: **Program** writes to a
-board, **Observe** only reads. Anything in Observe is safe to open on a live car.
+board, **Observe** does not write. A few Observe controls (and Data logs) still
+transmit; [SAFETY.md](docs/SAFETY.md) lists them.
 
 ```
 Adapters              ← pinned top; nothing else works until you pick one
@@ -113,7 +114,7 @@ or later over CAN with [`provision`](docs/CLI.md#provision--assign-a-node-id-by-
 git clone https://github.com/isc-fs/MingoCAN.git
 cd MingoCAN
 cargo build --release          # the CLI
-cd apps/can-studio && npm install && npm run tauri build   # the app
+cd apps/can-studio && npm install && npx tauri icon src-tauri/icons/icon.png && npm run tauri build   # the app
 ```
 
 Full details, including the Linux system packages the app needs, are in

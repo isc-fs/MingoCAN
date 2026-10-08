@@ -27,8 +27,10 @@ OBSERVE   (read-only)
 Settings              ← pinned bottom
 ```
 
-**Everything under Observe is safe to open on a live car.** Nothing in that
-group transmits. That is the whole reason the sidebar is grouped this way.
+**Nothing under Observe writes to a board.** Data logs queries the board over
+CAN as soon as it opens, and the arm / Activate telemetry / DTC buttons
+transmit — see [SAFETY.md](SAFETY.md). That is the whole reason the sidebar is
+grouped this way.
 
 The sidebar also shows the running version under the product name. It reads the
 same field the release workflow's version gate compares the git tag against, so
@@ -76,7 +78,8 @@ Builds and flashes firmware over CAN. This is the tool's main job and has its
 own guide: **[FLASHING.md](FLASHING.md)**.
 
 The short version: pick **Build profile** (Release or Debug), point at a
-**Build directory**, choose the **Target board** by role, press Flash. The build
+**Build directory**, choose the **Target board** by role, then press **Build &
+Flash** (or **Flash (skip build)** to reuse the existing artifact). The build
 command and artifact path live in Settings, not here, because you set them once
 per project and then stop thinking about them.
 
@@ -113,6 +116,10 @@ bootloader's default, which is the **ECU's** address — so on a shared bus it
 collides with the ECU until provisioned; the view warns when you leave it on
 *Don't provision*. Either way, Flash works normally afterwards.
 
+The bootloader image can be a local file or fetched by tag from
+`isc-fs/stm32-can-bootloader` releases (**Fetch**; blank = latest). **Erase
+chip** wipes everything — see [SAFETY.md](SAFETY.md).
+
 ---
 
 ## Observe
@@ -143,9 +150,10 @@ keyed on interface *plus* channel — so a DBC chosen for the powertrain bus doe
 not follow you to a different adapter, or to a different channel on the same
 one.
 
-Live frames keeps 5000 rows by default and drops the oldest beyond that, which
-bounds memory on a busy bus. Raise it in Settings if you're chasing something
-rare, and expect the window to get heavier.
+Live frames keeps the newest 5000 rows and drops older ones, which bounds memory
+on a busy bus. Signals, By ID and **Save…** still see every frame. There is no
+UI control for the limit: with the app closed, change `all.busMonitor.maxRows`
+in `settings.json` (see [Where settings live](#where-settings-live)).
 
 ### Telemetry
 
@@ -179,8 +187,8 @@ is no Save button, and that is not an oversight.
 | Section | What's in it |
 |---|---|
 | **Selected adapter** | Which adapter is active, mirrored from the Adapters view |
-| **Bus parameters** | Bitrate, default node ID, reply timeout |
-| **Firmware build** | Build command, build directory, artifact path, build profile |
+| **Bus parameters** | Default target board, bitrate, frame timeout |
+| **Firmware build** | Build command, build working directory, built firmware path (the Release/Debug choice is on the Flash tab) |
 | **DBC files (per-adapter)** | The interface+channel → `.dbc` associations |
 | **About** | Version, links, update check |
 
@@ -190,10 +198,10 @@ is no Save button, and that is not an oversight.
 |---|---|---|
 | Bitrate | `500000` | |
 | Node ID | `0x3` | uDV. The fallback where a view doesn't ask you explicitly. |
-| Reply timeout | `500` ms | Per command, covering a whole reassembled message — not per CAN frame. |
-| Artifact path | `build/{profile}/firmware.elf` | `{profile}` is substituted with the chosen build profile |
+| Frame timeout | `500` ms | Per command, covering a whole reassembled message — not per CAN frame. |
+| Built firmware path | `build/{profile}/firmware.elf` | `{profile}` becomes `Release` or `Debug` (capitalised). Use an **absolute** path — a relative one is not resolved against the build directory |
 | Build command | `cmake --build build --config {profile}` | Same substitution |
-| Build profile | `release` | |
+| Build profile (Flash tab) | Release | |
 | Bus monitor rows | `5000` | |
 | Bus monitor tab | `signals` | Which tab you land on after a restart |
 

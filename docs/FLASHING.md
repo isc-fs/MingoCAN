@@ -24,7 +24,8 @@ In the sidebar: **Program → Flash**.
    build command and the artifact path, so one control switches the whole build.
 2. Point at your **Build directory** — the firmware repo.
 3. Pick the **Target board** by role: ECU, AMS or uDV.
-4. Press **Flash**.
+4. Press **Build & Flash**. To reflash the artifact already on disk without
+   rebuilding, use **Flash (skip build)**.
 
 The app builds first, then flashes. Progress is per sector, and the log below
 the button is the same output the CLI prints.
@@ -78,9 +79,9 @@ Set these once per firmware repo, in **Settings → Firmware build**.
 | Setting | Default | Notes |
 |---|---|---|
 | Build command | `cmake --build build --config {profile}` | Runs before flashing |
-| Build directory | *(empty)* | Where the command runs |
-| Artifact path | `build/{profile}/firmware.elf` | Relative to the build directory |
-| Build profile | `release` | Substituted for `{profile}` in both fields above |
+| Build directory | *(empty → the artifact's folder)* | Where the build command runs |
+| Built firmware path | `build/{profile}/firmware.elf` | Use an **absolute** path. A relative path is not resolved against the build directory (only a repo's committed `iscFs.firmwareArtifact` is) |
+| Build profile (Flash tab) | Release | Substituted as `Release`/`Debug` for `{profile}` in both fields above |
 
 `{profile}` is substituted in **both** the command and the artifact path, so
 switching Release ↔ Debug on the Flash tab switches the whole build without
@@ -90,13 +91,21 @@ touching Settings.
 > generic CMake invocation, not a recommendation. If Flash fails immediately
 > with a build error, this is almost always why.
 
+> **A repo's committed config wins.** If the Build directory contains
+> `.vscode/settings.json` with `iscFs.buildCommand` and/or
+> `iscFs.firmwareArtifact` (the keys the VS Code extension uses), Flash uses
+> those instead of the Settings fields. A relative `iscFs.firmwareArtifact` is
+> resolved against that directory and is not `{profile}`-substituted. Settings →
+> Firmware build then shows *✓ Using committed config from …*. The target board
+> is never taken from the repo.
+
 ### Firmware formats
 
 | Format | Load address |
 |---|---|
 | `.elf` | Carried in the file |
 | `.hex` | Carried in the file |
-| `.bin` | **You must supply it** — a raw binary has no address of its own |
+| `.bin` | **CLI only** (`flash --address 0x08020000`). The app has no address field and rejects a `.bin` artifact |
 
 ---
 
@@ -108,7 +117,7 @@ No adapter selected. The Adapters view is the fix.
 
 ### "Set a firmware artifact path in Settings first."
 
-Settings → Firmware build → Artifact path.
+Settings → Firmware build → Built firmware path.
 
 ### The build fails before anything reaches the board
 
@@ -159,7 +168,8 @@ A board fresh off the bench is commissioned in **one SWD step**: the bootloader
 and its node ID go on together.
 
 - **App:** *Burn bootloader*, with **Provision node-id** set to the board's role.
-- **CLI:** `can-flasher swd-flash CAN_BL.elf --provision <role>` — see
+- **CLI:** `can-flasher swd-flash CAN_BL.elf --provision <role>` (needs a CLI
+  built with `--features swd`) — see
   [`swd-flash --provision`](CLI.md#swd-flash---provision-role0xn--burn-and-provision-in-one-step).
 
 The node ID is written as a provisioning seed that the bootloader adopts into

@@ -3,15 +3,21 @@
 Most of MingoCAN only listens. This page lists everything that does not, what
 each one changes, and what actually stands between you and it.
 
-The app makes the split visible: the **Program** sidebar group writes, the
-**Observe** group does not. There are no exceptions — nothing in Observe
-transmits.
+The app makes the split visible: the **Program** sidebar group writes firmware,
+the **Observe** group does not write to a board. Observe is not silent, though.
+**Data logs** queries the selected board over CAN (LOGFS, read-only) as soon as
+it opens and whenever you download. These explicit buttons also transmit: Board
+health's **Refresh** / **Read DTCs** / **Clear DTCs** (Clear writes),
+Telemetry's arm, and Bus monitor's **⚡ Activate telemetry**. Board health, Bus
+monitor and Telemetry are listen-only until you press one of those.
 
 ---
 
 ## Rules of thumb
 
-1. **Anything in Observe is safe on a live car.** On the CLI, the equivalent is
+1. **Opening Board health, Bus monitor or Telemetry is safe on a live car.**
+   Their arm / Activate telemetry / DTC buttons are not, and Data logs talks to
+   the board as soon as it opens. On the CLI, the listen-only equivalent is
    `pit-diag listen`, which is send-silent by design. `enable` and `stream` arm
    a stream, so they transmit and are not in that category.
 2. **On stands for anything that writes.**
@@ -41,6 +47,16 @@ cannot touch it — an image whose linker script tries is rejected with exit 3.
 
 First-boot only, over SWD rather than CAN. A blank board has nothing listening
 on the bus, so this is the only way in.
+
+## Chip erase (SWD)
+
+**Burn bootloader** view → **Erase chip**
+
+Erases the whole flash: bootloader, application and NVM (node ID and stored
+pedal calibration). The board is dead on CAN until the bootloader is burned
+again.
+
+**Guard:** a confirm banner, *Erase the entire chip?* → **Yes, erase**.
 
 ## Node-ID provisioning
 
@@ -118,13 +134,15 @@ and the tool auto-fills the brick-safety token so you do not have to handle it.
 
 ## Arming a telemetry stream
 
-**Telemetry** view (the arm control) · `can-flasher pit-diag enable` / `stream`
+**Telemetry** view (arm control) · **Bus monitor** (⚡ Activate telemetry) ·
+`can-flasher pit-diag enable` / `stream`
 
 Does not write to storage, but **does transmit**: it tells a board to start
 emitting its full diagnostic frame set, which adds real load to the bus.
 
-**Guard:** none. It is reversible — disarm, or reboot the board — but it is not
-a passive act. Use `listen` when the car is live.
+**Guard:** Telemetry asks **Yes, arm** first; Bus monitor's Activate telemetry
+and the CLI have none. It is reversible — disarm, or reboot the board — but it is
+not a passive act. Use `listen` when the car is live.
 
 ---
 
