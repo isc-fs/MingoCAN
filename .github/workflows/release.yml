@@ -95,10 +95,10 @@ jobs:
   # would otherwise happen if three build jobs all tried to create
   # the same release from parallel runners.
   #
-  # The body intentionally points at the in-repo release notes
-  # (docs/RELEASE_NOTES_<version>.md if present, else the
-  # auto-generated compare link). Operators reading the Releases
-  # page get a quick install snippet for each surface inline.
+  # The body is a fixed install snippet for each surface. The real
+  # notes (docs/RELEASE_NOTES_<version>.md) are applied afterwards by
+  # hand: `gh release edit vX.Y.Z --notes-file docs/RELEASE_NOTES_vX.Y.Z.md`
+  # (see docs/CONTRIBUTING.md, Releasing).
 
   create-release:
     name: create unified GitHub Release
