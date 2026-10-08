@@ -106,13 +106,14 @@ transmit. Full flag reference:
 | Board | Arm ID | ACK ID | Stream range |
 |---|---|---|---|
 | AMS | `0x7F0` | `0x7F1` | `0x680`–`0x6CA` |
-| ECU | `0x7E0` | `0x7E1` | `0x700`–`0x708` |
-| uDV | `0x7DE` | `0x7DF` | `0x7A0`–`0x7A9` |
+| ECU | `0x7E0` | `0x7E1` | `0x700`–`0x70D` |
+| uDV | `0x7DE` | — (none) | `0x7A0`–`0x7A9` |
 
 The arm payload is `DE AD BE EF`; disarm is all zeros. An ACK whose first byte
 is anything other than `0x01` — including an empty payload — means **disabled**.
 `stream` disarms on exit including on Ctrl-C, and a board clears the flag on
-reboot if the tool dies first.
+reboot if the tool dies first. The uDV has no ACK and no disarm frame: once
+armed it streams until it reboots.
 
 ---
 

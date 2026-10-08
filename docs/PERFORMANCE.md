@@ -1,6 +1,6 @@
 # Flash performance — v1.1.x baseline and v1.2.0 outcome
 
-Investigation doc for why `cf flash` takes ~52 s to program a
+Investigation doc for why `can-flasher flash` takes ~52 s to program a
 26 KB application on real hardware, and what we learned about how
 to (and how *not* to) speed it up. Builds on the `--profile` flag
 from PR #82.
@@ -22,7 +22,7 @@ for why. We dropped fix/19 (precise pacing) after measurement.
 
 ## The question
 
-Hardware-observed end-to-end wall time for a full `cf flash
+Hardware-observed end-to-end wall time for a full `can-flasher flash
 --verify-after --no-jump --no-diff` of the 26 KB `MAIN_IFS08_DEMO`
 binary: **~52 seconds**. That works out to ~500 bytes/second on a
 500 kbps bus with a theoretical ~60 KB/s ceiling. Bus utilisation:
@@ -34,7 +34,7 @@ under 1 %. Something upstream of the wire is holding us back.
 
 ### 1. Virtual backend (floor)
 
-`cf flash --interface virtual … --profile` runs the full flash
+`can-flasher flash --interface virtual … --profile` runs the full flash
 engine against an in-process stub — no serial, no USB, no adapter,
 no firmware, no CAN wire. Everything from the CLI layer through
 ISO-TP segmentation to the flash manager still executes. Just the
@@ -132,7 +132,7 @@ noise by comparison.
 
 ## What the hardware bench actually said (fix/19 + fix/20)
 
-When we actually tried the changes above on the IFS08 bench
+When we actually tried the changes above on the bench
 (STM32H733 + Protofusion Labs CANable 2.0 @ 500 kbps), the
 numbers told a different story than §3 predicted. Sharing them so
 the next person doesn't chase the same ghosts.
@@ -239,14 +239,14 @@ they can measure and lower it.
 
 ```sh
 # Virtual floor (host + engine overhead only):
-cf --interface virtual --node-id 0x3 \
+can-flasher --interface virtual --node-id 0x3 \
    flash demo/MAIN_IFS08_DEMO.bin --address 0x08020000 \
-   --verify-after --no-jump --no-diff --profile
+   --verify-after --no-jump --no-diff --profile --yes
 
 # Hardware (adapter + BL + wire):
-cf --interface slcan --channel /dev/ttyACM0 --bitrate 500000 --node-id 0x1 \
+can-flasher --interface slcan --channel /dev/ttyACM0 --bitrate 500000 --node-id 0x1 \
    flash demo/MAIN_IFS08_DEMO.bin --address 0x08020000 \
-   --verify-after --no-jump --no-diff --timeout 10000 --profile
+   --verify-after --no-jump --no-diff --timeout 10000 --profile --yes
 ```
 
 `--profile` prints a per-phase breakdown to stderr at flash
