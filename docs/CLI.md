@@ -48,8 +48,8 @@ can-flasher [GLOBAL OPTIONS] <COMMAND> [ARGS]
 | `--node-id <ID>` | Target node, hex `0x0A` or decimal `10`. See below. |
 | `--timeout <MS>` | Reply timeout *(default `500`)* |
 | `--json` | Machine-readable output on stdout |
-| `--log <PATH>` | Append the session to a SQLite audit log |
-| `--operator <NAME>` | Override the operator name recorded in that log |
+| `--log <PATH>` | Accepted but currently ignored — the audit log is not implemented |
+| `--operator <NAME>` | Accepted but currently ignored (see `--log`) |
 | `--verbose` | Trace-level logging |
 
 > `--timeout` is **per command**, covering a whole reassembled ISO-TP message —
