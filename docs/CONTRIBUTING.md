@@ -206,7 +206,8 @@ the "wrong" counter; that warning is expected and safe to ignore.
 
 ### Tracking issues
 
-Every branch auto-creates a GitHub Issue on its first push (via
+Every `feat/` or `fix/` branch auto-creates a GitHub Issue on its first push
+(release branches do not; via
 `.github/workflows/branch-issue.yml`):
 
 - Title: `[feat/N-short-title]` or `[fix/N-short-title]`

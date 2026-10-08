@@ -236,7 +236,7 @@ pub trait CanBackend: Send + Sync {
     /// Whether this backend supports hardware timestamps.
     fn has_hw_timestamps(&self) -> bool;
 
-    /// Human-readable adapter description for display and audit log.
+    /// Human-readable adapter description for display.
     fn description(&self) -> String;
 }
 ```
@@ -415,7 +415,7 @@ impl VectorBackend {
   `_TX_REQUEST`) and error / remote frames; only 11-bit standard data
   frames make it to the host session.
 - `description()` reports the XL channel name (e.g. `"Vector VN1610 1
-  Channel 1 (channel 0, 500000 bps)"`) for the audit log.
+  Channel 1 (channel 0, 500000 bps)"`) for display (adapter lists, JSON output).
 - `has_hw_timestamps()` returns `false` today even though the XL API
   provides nanosecond timestamps — the flasher doesn't currently
   consume them.
@@ -581,7 +581,7 @@ deliberate:
 | Subcommand | Omitted `--node-id` |
 |---|---|
 | `flash` | **error** — it must never guess which board to overwrite |
-| `logs` | **error**, but reported through the generic exit code 99 rather than a targeted hint |
+| `logs list`, `logs pull` | **error** (targeted message, catch-all exit code 99); `logs decode` needs no node id |
 | `verify`, `diagnose`, `config` | `0x3` |
 | `provision` | target defaults to `0x3`; the value *written* comes from the role argument |
 | `discover`, `pit-diag`, `replay`, `adapters` | unused — broadcast or passive |
@@ -1483,9 +1483,10 @@ must tolerate a `can-flasher` binary of a different version.
 
 Deliberately absent: no `src/security/` (Phase 5 is deferred) and no
 `src/debug/` (there is no `CMD_MEM_READ` / `CMD_MEM_WRITE` to wrap). The
-`audit`, `output/summary` and `protection/wrp` modules from early planning
-drafts never materialised — that functionality is inlined into the subcommand
-that needs it.
+`output/summary` and `protection/wrp` modules from early planning drafts never
+materialised — that functionality is inlined into the subcommand that needs
+it. The `audit` module was never built; see
+[§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5).
 
 ---
 
