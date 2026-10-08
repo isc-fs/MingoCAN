@@ -1,5 +1,5 @@
 # ---- Rust ----
-# Cargo build artefacts (single binary crate; no workspace yet).
+# Cargo build artefacts (workspace target dir).
 /target/
 # Cross-compile output dir (e.g. Raspberry Pi builds).
 /target-pi/
@@ -57,7 +57,7 @@ Thumbs.db
 *.su
 *.idb
 *.pdb
-*.mod*
+*.mod.c
 *.cmd
 .tmp_versions/
 modules.order

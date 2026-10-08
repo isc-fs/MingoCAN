@@ -40,16 +40,6 @@ pub struct DbcState {
     inner: Mutex<Option<LoadedDbc>>,
 }
 
-impl DbcState {
-    /// Snapshot the parsed DBC for borrow-free read-only use in
-    /// the bus-monitor reader task. Returns `None` when no file
-    /// is loaded. The returned `Arc<Dbc>` outlives the lock so
-    /// callers don't have to hold the mutex across decode work.
-    pub async fn snapshot(&self) -> Option<Arc<Dbc>> {
-        self.inner.lock().await.as_ref().map(|d| d.dbc.clone())
-    }
-}
-
 struct LoadedDbc {
     path: PathBuf,
     dbc: Arc<Dbc>,
@@ -81,7 +71,6 @@ pub struct DbcSummary {
 pub enum DbcStatusEvent {
     Loaded(DbcSummary),
     Unloaded,
-    Error { message: String },
 }
 
 /// Schema dump returned to the Signals view. A flat list of every

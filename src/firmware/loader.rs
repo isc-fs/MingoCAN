@@ -898,14 +898,4 @@ mod tests {
         let out = extract_fw_info(BL_APP_BASE, &data);
         assert!(out.is_none());
     }
-
-    // ---- ELF end-to-end ----
-    //
-    // Hand-crafting a minimum viable ELF in a unit test is gnarly
-    // (ELF header + program header + a data segment, all
-    // byte-precise). The format-detection test above covers the
-    // magic path, and format-level ELF parsing is exercised at
-    // smoke-test time via user-supplied firmware. TODO(feat/15):
-    // bundle a small pre-built `.elf` under `tests/fixtures/` and
-    // wire an end-to-end load-elf-parses-known-segments test here.
 }
