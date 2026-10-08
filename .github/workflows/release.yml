@@ -2,12 +2,12 @@ name: Release
 
 # Unified release pipeline for **all three** product surfaces:
 #
-#   - `can-flasher` CLI — built on all four targets as a compile
-#     gate, but NOT attached to the Release (install via `cargo
-#     install --git … --tag …`; operators wanted installer packages
-#     only, not raw binary tarballs).
+#   - `can-flasher` CLI — per-target archives attached to the
+#     Release (the VS Code extension downloads its version-matched
+#     binary from them; humans install via `cargo install --git …
+#     --tag …`).
 #   - VS Code extension (.vsix)
-#   - ISC CAN Studio (Tauri desktop installers — .dmg / .deb / .rpm /
+#   - ISC MingoCAN (Tauri desktop installers — .dmg / .deb / .rpm /
 #     .AppImage / .exe (NSIS); .msi excluded. AppImage is back so the
 #     in-app auto-updater can self-update on Linux, and updater `.sig`
 #     bundles + a `latest.json` manifest ship alongside — see
@@ -62,7 +62,7 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Compare versions across all surfaces
         run: |
           set -eu
@@ -106,9 +106,9 @@ jobs:
     if: github.ref_type == 'tag' && (needs.verify-version.result == 'success')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           draft: false
@@ -192,7 +192,7 @@ jobs:
             bin_ext: ''
             apt_deps: libudev-dev pkg-config
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux build deps
         if: matrix.apt_deps != ''
@@ -252,7 +252,7 @@ jobs:
       # `can-flasher-<tag>-<target>.{tar.gz,zip}` for the extension to
       # fetch. Still kept as workflow artifacts for debugging too.
       - name: Upload as workflow artifact (always)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cli-${{ matrix.target }}
           path: ${{ env.archive }}
@@ -260,7 +260,7 @@ jobs:
 
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.archive }}
           fail_on_unmatched_files: true
@@ -276,12 +276,12 @@ jobs:
       run:
         working-directory: editor/vscode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -300,7 +300,7 @@ jobs:
           ls -lh "${VSIX_NAME}"
 
       - name: Upload as workflow artifact (always)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: editor-vsix
           path: editor/vscode/vscode-stm32-can-*.vsix
@@ -308,12 +308,12 @@ jobs:
 
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: editor/vscode/vscode-stm32-can-*.vsix
           fail_on_unmatched_files: true
 
-  # ---- ISC CAN Studio bundles ---------------------------------
+  # ---- ISC MingoCAN bundles ---------------------------------
 
   studio-build:
     name: studio (${{ matrix.os }})
@@ -340,16 +340,16 @@ jobs:
       run:
         working-directory: apps/can-studio
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux WebKit / GTK build deps
         if: matrix.apt_deps != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_deps }}
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -402,7 +402,7 @@ jobs:
   # manifest, with its `url`s rewritten to the iskApps assets — the
   # signatures are unchanged since the bundles are byte-identical).
   # The app's updater polls that manifest (see tauri.conf.json
-  # endpoints); we also keep publishing to the can-flasher release so
+  # endpoints); we also keep publishing to the MingoCAN release so
   # already-installed builds with the old endpoint don't lose updates.
   #
   # Needs a cross-repo token: GITHUB_TOKEN can't write to iskApps.
@@ -431,7 +431,7 @@ jobs:
           APP_TAG="mingocan-${TAG}"
 
           # 1. Pull the Studio bundles + manifest the studio-build job
-          #    just attached to the can-flasher release.
+          #    just attached to the MingoCAN release.
           mkdir -p dist && cd dist
           GH_TOKEN="${CF_TOKEN}" gh release download "${TAG}" \
             --repo isc-fs/MingoCAN \
@@ -499,7 +499,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: dev
           fetch-depth: 0
