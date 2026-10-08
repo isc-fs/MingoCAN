@@ -79,7 +79,7 @@ Set these once per firmware repo, in **Settings → Firmware build**.
 | Setting | Default | Notes |
 |---|---|---|
 | Build command | `cmake --build build --config {profile}` | Runs before flashing |
-| Build directory | *(empty → the artifact's folder)* | Where the build command runs |
+| Build working directory (Flash tab: Build directory) | *(empty → the artifact's folder)* | Where the build command runs |
 | Built firmware path | `build/{profile}/firmware.elf` | Use an **absolute** path. A relative path is not resolved against the build directory (only a repo's committed `iscFs.firmwareArtifact` is) |
 | Build profile (Flash tab) | Release | Substituted as `Release`/`Debug` for `{profile}` in both fields above |
 

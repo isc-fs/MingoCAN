@@ -4,20 +4,22 @@ Most of MingoCAN only listens. This page lists everything that does not, what
 each one changes, and what actually stands between you and it.
 
 The app makes the split visible: the **Program** sidebar group writes firmware,
-the **Observe** group does not write to a board. Observe is not silent, though.
+the **Observe** group never flashes firmware. Observe is not silent, though.
 **Data logs** queries the selected board over CAN (LOGFS, read-only) as soon as
 it opens and whenever you download. These explicit buttons also transmit: Board
 health's **Refresh** / **Read DTCs** / **Clear DTCs** (Clear writes),
-Telemetry's arm, and Bus monitor's **⚡ Activate telemetry**. Board health, Bus
-monitor and Telemetry are listen-only until you press one of those.
+Telemetry's arm and the uDV tab's **Calibrate steering…** (moves the steering
+and saves the calibration on the uDV), and Bus monitor's **⚡ Activate
+telemetry**. Board health, Bus monitor and Telemetry are listen-only until you
+press one of those.
 
 ---
 
 ## Rules of thumb
 
 1. **Opening Board health, Bus monitor or Telemetry is safe on a live car.**
-   Their arm / Activate telemetry / DTC buttons are not, and Data logs talks to
-   the board as soon as it opens. On the CLI, the listen-only equivalent is
+   Their arm / Activate telemetry / DTC buttons and the uDV's **Calibrate
+   steering…** are not, and Data logs talks to the board as soon as it opens. On the CLI, the listen-only equivalent is
    `pit-diag listen`, which is send-silent by design. `enable` and `stream` arm
    a stream, so they transmit and are not in that category.
 2. **On stands for anything that writes.**
@@ -143,6 +145,20 @@ emitting its full diagnostic frame set, which adds real load to the bus.
 **Guard:** Telemetry asks **Yes, arm** first; Bus monitor's Activate telemetry
 and the CLI have none. It is reversible — disarm, or reboot the board — but it is
 not a passive act. Use `listen` when the car is live.
+
+---
+
+## Steering calibration (uDV)
+
+**Telemetry** view → uDV → **Calibrate steering…** (the uDV stream must be armed
+first)
+
+**Moves the car and writes to the uDV.** You turn the wheel to each end-stop and
+back to centre; the uDV then homes the steering motor and sweeps it, and stores
+the centre, half-range and soft limits in its non-volatile memory.
+
+**Guard:** the dialog asks **Car elevated?** before it starts — the steering
+motor moves on its own during the homing sweep. Never on a car on the ground.
 
 ---
 

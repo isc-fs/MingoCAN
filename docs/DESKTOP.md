@@ -18,7 +18,7 @@ PROGRAM   (writes to the car)
   Flash                 Build & flash firmware over CAN
   Burn bootloader       First-boot bootloader via SWD
 
-OBSERVE   (read-only)
+OBSERVE   (mostly listens)
   Board health          DTCs & session health
   Bus monitor           Live CAN frames & DBC signals
   Telemetry             Live AMS / ECU / uDV telemetry
@@ -27,9 +27,10 @@ OBSERVE   (read-only)
 Settings              ← pinned bottom
 ```
 
-**Nothing under Observe writes to a board.** Data logs queries the board over
-CAN as soon as it opens, and the arm / Activate telemetry / DTC buttons
-transmit — see [SAFETY.md](SAFETY.md). That is the whole reason the sidebar is
+**Nothing under Observe flashes firmware.** Data logs queries the board over
+CAN as soon as it opens, the arm / Activate telemetry / DTC buttons transmit,
+and **Clear DTCs** and the uDV's **Calibrate steering…** change board state —
+see [SAFETY.md](SAFETY.md). That is the whole reason the sidebar is
 grouped this way.
 
 The sidebar also shows the running version under the product name. It reads the

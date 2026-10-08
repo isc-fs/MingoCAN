@@ -29,9 +29,10 @@ Windows and Linux.
 
 ## What's in the app
 
-The sidebar splits in two, and the split is the point: **Program** writes to a
-board, **Observe** does not write. A few Observe controls (and Data logs) still
-transmit; [SAFETY.md](docs/SAFETY.md) lists them.
+The sidebar splits in two, and the split is the point: **Program** flashes a
+board, **Observe** never flashes firmware. A few Observe controls (and Data
+logs) still transmit, and two of them — Clear DTCs and the uDV's steering
+calibration — change board state; [SAFETY.md](docs/SAFETY.md) lists them.
 
 ```
 Adapters              ← pinned top; nothing else works until you pick one
@@ -40,7 +41,7 @@ PROGRAM   (writes to the car)
   Flash                 Build & flash firmware over CAN
   Burn bootloader       First-boot bootloader via SWD
 
-OBSERVE   (read-only)
+OBSERVE   (mostly listens)
   Board health          DTCs & session health
   Bus monitor           Live CAN frames & DBC-decoded signals
   Telemetry             Live AMS / ECU / uDV telemetry
