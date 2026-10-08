@@ -3,7 +3,8 @@
 The host-side specification: what the tool must implement to talk to the
 STM32 CAN bootloader at
 [`isc-fs/stm32-can-bootloader`](https://github.com/isc-fs/stm32-can-bootloader)
-**v1.0.0** (Phase 1–4 feature-complete; Phase 5 security is deferred — see
+**v1.0.0** protocol (v1.7.0+ for SWD seed provisioning; Phase 1–4
+feature-complete; Phase 5 security is deferred — see
 [§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5)).
 
 ## What this document is, and is not
@@ -199,11 +200,9 @@ same fail-soft contract as PCAN.
 | `ihex` | Intel HEX parsing |
 | `crc` | CRC32 for flash verification (ISO-HDLC / IEEE 802.3 polynomial — match the bootloader's HAL CRC unit) |
 | `serde` + `serde_json` | Structured JSON output |
-| `rusqlite` | Audit log (SQLite) |
 | `tracing` + `tracing-subscriber` | Structured logging |
 | `indicatif` | Progress bars for flash operations |
 | `anyhow` + `thiserror` | Error handling |
-| `tabled` | Terminal table rendering for device reports |
 
 Crates deferred to v2 (security scope — see end of file):
 `ed25519-dalek`, `aes`, `ctr`, `blake2`.
@@ -432,7 +431,8 @@ future SDK shifts the slot stride.
 
 In-process loopback for testing and CI. Two `VirtualBackend`
 instances created from the same `VirtualBus` share a pair of
-`tokio::sync::broadcast` channels.
+`tokio::sync::mpsc` channels (host→device, device→host); see
+[ARCHITECTURE.md](ARCHITECTURE.md) for why not broadcast.
 
 ```rust
 pub struct VirtualBus {
@@ -559,10 +559,13 @@ Deliberately absent:
       --node-id <ID>        Target node ID, hex `0x0A` or decimal `10`
       --timeout <MS>        Reply timeout in ms [default: 500]
       --json                Machine-readable JSON output on stdout
-      --log <PATH>          Append session to audit log (SQLite)
+      --log <PATH>          Audit log path — accepted, currently ignored (not implemented)
       --verbose             Trace-level logging
-      --operator <NAME>     Override operator name in audit log
+      --operator <NAME>     Audit operator name — accepted, currently ignored (not implemented)
 ```
+
+`--log` and `--operator` are parsed but have no effect: the audit log is not
+implemented (see [§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5)).
 
 `--timeout` is **per command**, covering a whole reassembled ISO-TP message —
 not per CAN frame. Subcommands whose transport cannot complete inside a short
@@ -583,8 +586,10 @@ deliberate:
 | `provision` | target defaults to `0x3`; the value *written* comes from the role argument |
 | `discover`, `pit-diag`, `replay`, `adapters` | unused — broadcast or passive |
 
-Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`. An uncommissioned board answers on
-`0xF`.
+Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`. A board that has never been
+commissioned answers on the bootloader's compile-time default, `0x01` for a
+stock build (the ECU's address), so it collides with the ECU on a shared bus
+until provisioned. `0xF` is broadcast: it reaches a lone board whatever its ID.
 
 #### `--channel` format by adapter and OS
 
@@ -646,6 +651,13 @@ Options:
   --jump                  Jump to application after successful flash [default: true]
   --no-jump               Stay in bootloader mode after flash
   --keepalive-ms <MS>     Session keepalive interval [default: 5000]
+  --enter-bootloader <auto|always|never>
+                          Reboot a running app into the BL before CONNECT
+                          (0x002 + per-node magic; auto = only after a
+                          CONNECT timeout) [default: auto]
+  --profile               Print per-phase timing
+  --yes                   Skip the pre-flight confirmation (a non-TTY stdin
+                          otherwise auto-declines)
 ```
 
 Removed relative to the earlier draft:
@@ -714,8 +726,7 @@ Subcommands:
   `NACK(UNSUPPORTED)`.
 - Live-data is emitted as a **fixed 32-byte packed struct** (see
   § CAN protocol specification below). Field interpretation is a
-  host-side concern; the flasher ships a signal-definition TOML
-  checked in under `signals/bl_live_v1.toml`.
+  host-side concern, decoded by `protocol::records::LiveDataSnapshot`.
 - Reset modes: `hard` (0), `soft` (1 — same as 0 on H7), `bootloader`
   (2, sets RTC BKP0R magic then resets), `app` (3, direct jump
   without reset; validated against `Bootloader_CheckApplication`).
@@ -766,17 +777,21 @@ matches one — the file is never opened, only its name is read, so
 | `--no-reset` | Skip the post-write reset. For chaining several writes; the last must still reset, or the new ID does not take effect. |
 | `--yes` | Skip the confirmation. **Required for non-interactive use** — a piped stdin auto-declines rather than proceeding unattended. |
 
-Commissioning a bare board takes two steps over two transports: the bootloader
-arrives over SWD, then the node-id is written over CAN *by the now-running
-bootloader*. `swd-flash --provision <role>` chains them, and is therefore
-incompatible with `--no-reset`.
+A bare board is commissioned in one SWD step: `swd-flash --provision <role|0xN>`
+burns the bootloader and programs a provisioning seed (`src/provision_seed.rs`,
+mirror of `bl_provision_seed_t`, at `0x080FFFC0`), which the bootloader moves
+into NVM on first boot. It needs a bootloader built with seed support
+(stm32-can-bootloader v1.7.0+), which is checked before the chip is touched, and
+it conflicts with `--sector-erase`. `provision` (this subcommand) re-assigns a
+board that already runs the bootloader, over CAN.
 
 ### `logs` subcommand
 
 ```
 can-flasher logs list                    List files on the node's microSD card
-can-flasher logs pull --index N|--all    Download to a local directory
-can-flasher logs finalize                Seal the log currently being written
+can-flasher logs pull --index N|0xNNNN | --all [--out DIR] [--no-verify] [--no-decode]
+                                         Download to a local directory
+can-flasher logs decode <FILE.BIN>...    Decode binary logs copied off the card by hand
 ```
 
 **Served by the application firmware, not the bootloader.** A board sitting in
@@ -787,9 +802,13 @@ probe distinguishes them.
 Requirements:
 
 - **Read-only.** No delete opcode is issued under any flag.
-- `--node-id` is **mandatory**; there is no default.
-- An unsealed log must not appear in a listing. `finalize` seals it without a
-  power cycle.
+- `--node-id` is **mandatory** for `list` and `pull`; there is no default.
+- The log currently being written appears only after the logger closes it
+  (power-cycle the car); the host has no seal command.
+- A pulled binary log (`IMU/CEL/ELE nnnn.BIN`) is decoded to `<stem>.csv` beside
+  it (`src/log_decode.rs`); a decode failure never fails the pull, and
+  `--no-decode` skips it. `logs decode` works offline and needs no adapter or
+  `--node-id`.
 - Idempotent opcodes (LIST, READ) **must** retry — up to three attempts with
   linear backoff. A multi-MB pull is thousands of round trips over minutes, and
   without retry a single blip on a shared bus discards the whole transfer.
@@ -816,7 +835,8 @@ See [§ Telemetry observers](#telemetry-observers) for the wire contract.
 is what makes the mode safe to point at a running car, and the app's entire
 Observe group depends on it holding.
 
-`stream` must disarm on exit including on SIGINT. The firmware also clears the
+`stream` must disarm on exit including on SIGINT (AMS and ECU; the uDV arm is
+sticky and has no disarm). The firmware also clears the
 flag on reboot, so a crashed tool cannot leave a board streaming forever.
 
 ### `replay` subcommand
@@ -838,8 +858,9 @@ Built only with `--features swd`; drives an ST-LINK V2/V3 through
 [probe-rs](https://probe.rs). Exists because a never-programmed board has
 nothing listening on CAN, making SWD the only way in.
 
-Currently a feasibility spike: ST-LINK only, no auto-download of the bootloader
-artifact, no GDB/RTT pass-through.
+ST-LINK only. `--release [TAG]` fetches the bootloader from the
+stm32-can-bootloader releases (cached); `--provision` sets the node-id; no
+GDB/RTT pass-through.
 
 ---
 
@@ -866,10 +887,12 @@ split into Program and Observe.
 | Board | Arm ID | ACK ID | Stream range | Frames per scan |
 |---|---|---|---|---|
 | AMS | `0x7F0` | `0x7F1` | `0x680`–`0x6CA` | 58 |
-| ECU | `0x7E0` | `0x7E1` | `0x700`–`0x708` | 7 |
-| uDV | `0x7DE` | `0x7DF` | `0x7A0`–`0x7A9` | 4 |
+| ECU | `0x7E0` | `0x7E1` | `0x700`–`0x70D` | 13 |
+| uDV | `0x7DE` | — (sticky: no ACK, no disarm) | `0x7A0`–`0x7A9` | 5 |
 
-Arm payload `DE AD BE EF`; disarm all zeros. **An ACK whose first byte is
+Arm payload `DE AD BE EF`; disarm all zeros. (AMS and ECU only — the uDV arm is
+sticky until reboot; `0x7DF` is its steering-calibration trigger, not an ACK.)
+**An ACK whose first byte is
 anything other than `0x01` means disabled** — including an empty payload, which
 must not be treated as an error or as success.
 
@@ -918,6 +941,10 @@ Six decode drifts accumulated behind that gap before the watch existed.
 - **Metadata FLASHWORD** at `0x080FFFE0` carries
   `[magic, crc32, size, version, reserved…]` for the installed
   image. `CMD_FLASH_VERIFY` rewrites it on success.
+- **Provision seed flashword** at `0x080FFFC0`–`0x080FFFDF` (32 B, top of the
+  NVM sector, just below Metadata): written over SWD by `swd-flash
+  --provision`, consumed by the bootloader on first boot (stm32-can-bootloader
+  v1.7.0+). See `src/provision_seed.rs`.
 
 The flash manager must **never** erase or write `0x08000000`–`0x0801FFFF`
 under any circumstances. The bootloader enforces this independently
@@ -1226,8 +1253,7 @@ reserved for v2 / Phase-5 reactivation and never emitted by v1.0.0.
 - **Raw binary**: requires explicit `--address`. Default behaviour
   when no address is given is to reject with exit code 8.
 - **Build metadata**: read the `__firmware_info` symbol or section
-  at `BL_APP_BASE + 0x400 = 0x08020400`. Display on connect, embed
-  in the audit-log row.
+  at `BL_APP_BASE + 0x400 = 0x08020400`. Display on connect.
 - **Address validation**: validate **all** segments before sending
   any frame. Fail immediately (exit code 3) if any segment overlaps
   `0x08000000`–`0x0801FFFF` or goes past `0x080DFFFF`.
@@ -1240,6 +1266,9 @@ reserved for v2 / Phase-5 reactivation and never emitted by v1.0.0.
 ---
 
 ## Multi-node orchestration
+
+*Not implemented — `--node-id` takes one node; run one process per node for
+parallel flashing.*
 
 - `--node-id` accepts a comma-separated list or `all`.
 - Flash operations for multiple nodes run concurrently, interleaved
@@ -1265,9 +1294,8 @@ reserved for v2 / Phase-5 reactivation and never emitted by v1.0.0.
   the device-reported ones, and filters below `--severity` on the
   host too (defensive — bootloader already filters at the drain).
 - **Live data**: `CMD_LIVE_DATA_START(rate_hz)` begins flowing 32-byte
-  snapshots via `NOTIFY_LIVE_DATA` at 1–50 Hz. Signal definitions
-  live in `signals/bl_live_v1.toml`, checked into this repo; hosts
-  decode by offset + type + scale.
+  snapshots via `NOTIFY_LIVE_DATA` at 1–50 Hz. Signal layout is
+  decoded by `protocol::records::LiveDataSnapshot`.
 - **Health report**: one-shot `CMD_GET_HEALTH` returning the 32-byte
   record. Decoded to a human-readable table that includes reset
   cause, uptime, flags (session active, valid app, WRP protected),
@@ -1342,25 +1370,6 @@ No `device_uid` field in v1 — the bootloader doesn't expose a UID
 read opcode. Identity is established by node ID + `__firmware_info`
 content.
 
-### Audit log (SQLite)
-
-```sql
-CREATE TABLE sessions (
-  id            INTEGER PRIMARY KEY,
-  timestamp     TEXT NOT NULL,
-  operation     TEXT NOT NULL,
-  adapter_type  TEXT,
-  adapter_chan  TEXT,
-  node_id       TEXT,
-  fw_hash       TEXT,
-  fw_version    TEXT,
-  result        TEXT NOT NULL,
-  error         TEXT,
-  operator      TEXT,
-  git_user      TEXT
-);
-```
-
 ### GitHub Actions — CANable
 
 ```yaml
@@ -1372,10 +1381,7 @@ CREATE TABLE sessions (
       --bitrate 500000 \
       --require-wrp \
       --apply-wrp \
-      --json \
-      --log flash_audit.sqlite
-  env:
-    CAN_FLASHER_OPERATOR: ${{ github.actor }}
+      --json
 ```
 
 ### GitHub Actions — PCAN (Linux runner with peak_usb)
@@ -1393,16 +1399,8 @@ CREATE TABLE sessions (
       --interface pcan \
       --channel can0 \
       --bitrate 500000 \
-      --json \
-      --log flash_audit.sqlite
-  env:
-    CAN_FLASHER_OPERATOR: ${{ github.actor }}
+      --json
 ```
-
-When `GITHUB_STEP_SUMMARY` is set, a markdown flash report is
-written automatically: adapter type + channel, node ID, firmware
-version, git hash, product name, sectors touched, WRP status,
-duration, result.
 
 ---
 
@@ -1444,7 +1442,6 @@ docs/
   UPDATES.md            the app's auto-updater
   CONTRIBUTING.md       toolchain, tests, CI, release flow
   PERFORMANCE.md        flash-speed baseline + --profile
-  dbc/                  DBC references
 
 src/                    the engine — see ARCHITECTURE.md for the full tree
   cli/                  12 subcommands
@@ -1454,10 +1451,12 @@ src/                    the engine — see ARCHITECTURE.md for the full tree
   firmware/  flash/     image loading + the flash state machine
   pit_diag/             AMS / ECU / uDV decoders + vendored DBC snapshots
   swd/                  probe-rs driver                    [feature = "swd"]
-  logfs_client.rs       LOGFS session driver
+  logfs_client.rs       LOGFS pull driver
+  log_decode.rs         AMS .BIN log → CSV decoder
+  provision_seed.rs     SWD provisioning seed (mirror of bl_provision_seed_t)
   app_control.rs        app-level commands (reboot-to-BL)
 
-tests/                  13 integration tests against VirtualBus + StubDevice
+tests/                  14 integration tests against VirtualBus + StubDevice
 apps/can-studio/        MingoCAN — Tauri 2, links the crate by path
 editor/vscode/          VS Code extension — shells out to the binary
 demo/MAIN_IFS08_DEMO    reference STM32H733 application
@@ -1502,18 +1501,17 @@ strategy:
         target: aarch64-unknown-linux-gnu    # Raspberry Pi / ARM SBCs on the car
       - os: macos-latest
         target: aarch64-apple-darwin         # Apple Silicon
-      - os: macos-latest
-        target: x86_64-apple-darwin          # Intel Mac
       - os: windows-latest
         target: x86_64-pc-windows-msvc
 ```
 
-Release artifacts: pre-built binaries for all five targets on GitHub
-Releases. Optional: Homebrew tap for macOS/Linux, winget manifest
+Release artifacts: pre-built binaries for all four targets (Linux
+x86_64/aarch64, macOS aarch64, Windows x86_64) on GitHub Releases. Optional: Homebrew tap for macOS/Linux, winget manifest
 for Windows.
 
-`PcanBackend` compiles on all targets but is a runtime no-op on
-Linux (replaced by `SocketCanBackend`). `SocketCanBackend` is
+`PcanBackend` is compiled only on Windows/macOS
+(`#[cfg(any(target_os = "windows", target_os = "macos"))]`); on Linux
+`--interface pcan` routes to `SocketCanBackend`. `SocketCanBackend` is
 excluded from Windows/macOS builds via `#[cfg(target_os = "linux")]`.
 The PCAN SDK is never a compile-time dependency — it is loaded at
 runtime via `libloading`, so the binary works on machines without
@@ -1606,8 +1604,29 @@ compile error, never a silent no-op.
   challenge-response key derivation) the tool's `discover` table
   grows a `UID` column at that time.
 
-The `signals/bl_live_v1.toml` file and the `bl_live_v1` signal set
-name are versioned with `_v1` so that a future snapshot layout
-change (inevitable if Phase 5 adds authenticated-session flags or
-a signature-verify-result counter) can ship a `_v2` file side-by-
-side without breaking old hosts.
+### Audit log — not implemented; `--log` / `--operator` are accepted but currently ignored
+
+Planned, never built: no SQLite file is written and no error is raised
+when the flags are passed. The intended schema:
+
+```sql
+CREATE TABLE sessions (
+  id            INTEGER PRIMARY KEY,
+  timestamp     TEXT NOT NULL,
+  operation     TEXT NOT NULL,
+  adapter_type  TEXT,
+  adapter_chan  TEXT,
+  node_id       TEXT,
+  fw_hash       TEXT,
+  fw_version    TEXT,
+  result        TEXT NOT NULL,
+  error         TEXT,
+  operator      TEXT,
+  git_user      TEXT
+);
+```
+
+Also planned with it: when `GITHUB_STEP_SUMMARY` is set, a markdown
+flash report would be written automatically (adapter type + channel,
+node ID, firmware version, git hash, product name, sectors touched,
+WRP status, duration, result).

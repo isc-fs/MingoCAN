@@ -31,7 +31,7 @@ cargo build                              # debug build
 cargo build --release                    # optimised build (LTO, strip)
 cargo test                               # full suite (lib + integration + doc)
 cargo fmt                                # auto-format
-cargo clippy --all-targets -- -D warnings  # lints as errors
+cargo clippy --all-targets --all-features -- -D warnings  # same as CI (includes the swd feature)
 ```
 
 ### Test coverage
@@ -41,7 +41,8 @@ Three test flavours all run under `cargo test`:
 - **Unit tests** in each module's `#[cfg(test)] mod tests { … }` — the
   bulk of the coverage (~90 % of tests). Pure functions, parsers,
   encoders.
-- **Integration tests** under `tests/` — one file per subcommand plus
+- **Integration tests** under `tests/` — CLI-contract files for six
+  subcommands (`*_subcommand.rs`), engine/pipeline tests, plus
   `virtual_pipeline.rs` for the end-to-end stack. They spin up the
   `VirtualBus` + `StubDevice` + `Session` and round-trip commands
   through the full pipeline, or spawn the real binary via
@@ -60,6 +61,10 @@ every PR into them:
 - `rustfmt --check`
 - `clippy --all-targets --all-features -- -D warnings`
 - `build + test` matrix: Linux / macOS / Windows
+
+The app and extension have their own path-filtered workflows:
+`can-studio-ci.yml` (frontend + Tauri build) and `editor-ci.yml`
+(tsc + vsce package).
 
 Docs-only changes (README / REQUIREMENTS / ARCHITECTURE / ROADMAP /
 `docs/**`) skip CI via path filters — no runner minutes for comment
@@ -156,7 +161,8 @@ intentionally **off** at the repo level — see the post-mortem
 note below. Use `gh pr merge --delete-branch` (or click "Delete
 branch" in the GitHub UI after merge) to clean feat/fix branches
 yourself. Long-lived branches (`dev`, `main`) must never be
-auto-deleted.
+auto-deleted. **Never** pass `--delete-branch` (or click "Delete
+branch") on a `dev → main` release PR — its head branch is `dev`.
 
 > **Why off**: GitHub's `delete_branch_on_merge` flag is
 > repo-wide and applies to *every* PR's head branch on merge,
@@ -178,13 +184,25 @@ in the right state — open a PR instead.
 ### Branch naming
 
 ```
-feat/<n>-<short-title>   new functionality  (feat/9-session-lifecycle, …)
-fix/<n>-<short-title>    bug or doc fix      (fix/1-workflow-titled-branches, …)
+feat/<issue#>-<short-title>   new functionality for an issue  (feat/613-decode-bin-logs, …)
+fix/<issue#>-<short-title>    bug or doc fix for an issue     (fix/560-remove-seal-active-log, …)
+feat/<n>-<short-title>        new functionality, no issue     (feat/9-session-lifecycle, …)
+fix/<n>-<short-title>         bug or doc fix, no issue        (fix/1-workflow-titled-branches, …)
+release-X.Y.Z                 release cut                     (release-3.1.1)
 ```
 
-`feat` and `fix` have independent counters — `feat/2` and `fix/2`
-can coexist. The short kebab-case title is mandatory so the purpose
-is visible at a glance.
+- `feat/<issue#>-<slug>` / `fix/<issue#>-<slug>` for work on a GitHub
+  issue (use the issue number).
+- `feat/<n>-<slug>` / `fix/<n>-<slug>` for work with no issue, where
+  `n` is the next per-category counter (run `git branch -a` first;
+  `feat` and `fix` count independently, so `feat/2` and `fix/2` can
+  coexist).
+- `release-X.Y.Z` for release cuts (see
+  [Cutting a release](#cutting-a-release)).
+
+The short kebab-case title is mandatory so the purpose is visible at
+a glance. `branch-issue.yml` warns that an issue-numbered branch has
+the "wrong" counter; that warning is expected and safe to ignore.
 
 ### Tracking issues
 
@@ -217,12 +235,13 @@ Don't hand-edit `ROADMAP.md` — update the YAML instead.
 # 1. Make sure dev is current
 git checkout dev && git pull origin dev
 
-# 2. Cut a branch (use the next feat/fix number + a short kebab title)
-git checkout -b feat/10-discover-subcommand
+# 2. Cut a branch (the issue number — or the next feat/fix counter
+#    when there is no issue — + a short kebab title)
+git checkout -b feat/613-decode-bin-logs
 
 # 3. Work, commit, push
 git commit -m "short description"
-git push origin feat/10-discover-subcommand
+git push origin feat/613-decode-bin-logs
 
 # 4. Open PR against dev (use `Closes #<issue>` in the body so the
 #    tracking issue auto-closes on merge)
@@ -231,32 +250,30 @@ gh pr create --base dev --title "..." --body "Closes #NN …"
 # 5. Squash-merge after review; the tracking issue closes itself
 ```
 
-Phase boundaries (every few merged branches) trigger a `dev → main`
-**merge commit** (not squash) + a milestone tag + a GitHub Release.
-The roadmap table tracks which tag closes each phase.
-
 ### Cutting a release
 
 **One tag, three surfaces, one Release page.** From v2.0.0 onward
-the `can-flasher` CLI, the VS Code extension, and ISC CAN Studio
-all ship together at the **same version** from a single `v*` tag
+the `can-flasher` CLI, the VS Code extension, and the MingoCAN
+desktop app all ship together at the **same version** from a single `v*` tag
 (e.g. `v2.0.0`). The retired `editor-v*` and `can-studio-v*` tag
 namespaces are not used for new cuts; one tag triggers one
 GitHub Release page carrying the CLI binaries, the VSIX, and the
-Studio bundles side-by-side.
+app bundles side-by-side.
 
-**No release branches.** Releases are tagged directly on `main`;
-we don't cut `release/v*` branches at any point. Flow: land
-everything on `dev`, fast-forward `dev → main`, tag on `main`.
+**Release branches.** Cut `release-X.Y.Z` from `dev`. It carries the
+version bump and `docs/RELEASE_NOTES_vX.Y.Z.md`, and is squash-merged
+into `dev`. Then open a `dev → main` PR and merge it as a **merge
+commit** (never `--delete-branch`). Tag that merge commit.
 
-When cutting `vX.Y.Z`, bump **all six** version files in the same
-commit on `dev`. Five of them are checked by CI; `Cargo.lock` is not,
-so it is the one that silently drifts:
+When cutting `vX.Y.Z`, bump **all six** version files (seven lines —
+`Cargo.lock` has two entries) in the same commit on the release
+branch. Five of them are checked by CI; `Cargo.lock` is not, so it is
+the one that silently drifts:
 
 | File | Field |
 |---|---|
 | `Cargo.toml` (root) | `version = "X.Y.Z"` |
-| `Cargo.lock` | `can-flasher` package entry's `version = "X.Y.Z"` — **not gated**, bump it by hand or let `cargo build` do it |
+| `Cargo.lock` | `can-flasher` **and** `can-studio` package entries' `version = "X.Y.Z"` — **not gated**, bump them by hand (only those two entries) or let `cargo build` do it |
 | `editor/vscode/package.json` | `"version": "X.Y.Z"` |
 | `apps/can-studio/src-tauri/Cargo.toml` | `version = "X.Y.Z"` |
 | `apps/can-studio/package.json` | `"version": "X.Y.Z"` |
@@ -264,9 +281,12 @@ so it is the one that silently drifts:
 
 Then:
 
-1. PR the bump + any last changes to `dev`; merge.
-2. Open a `dev → main` release PR and merge it.
-3. Tag `main` with `git tag -a vX.Y.Z -m "…"` and push.
+1. PR `release-X.Y.Z` (version bump + `docs/RELEASE_NOTES_vX.Y.Z.md`)
+   into `dev`; squash-merge.
+2. Open a `dev → main` PR titled `Release vX.Y.Z` and merge it with
+   a **merge commit** — never `--delete-branch`.
+3. Tag the `dev → main` merge commit with `git tag -a vX.Y.Z -m "…"`
+   and push the tag.
 4. The consolidated [`release.yml`](../.github/workflows/release.yml)
    triggers. Its `verify-version` gate compares the tag's
    `X.Y.Z` against the five gated files. Any mismatch fails the
@@ -288,8 +308,13 @@ the same class of mistake across all three surfaces in lockstep.
      `appimage`, `rpm`, `nsis` — the Windows installer is the NSIS
      `-setup.exe`, not an `.msi`), plus their updater `.sig` files
 
-   All twelve assets land on **one** GitHub Release page, named
-   after the tag.
+   All assets (CLI archives, VSIX, app bundles + `.sig`,
+   `latest.json`; 17 for v3.1.1) land on **one** GitHub Release
+   page, named after the tag.
+
+   `publish-iskapps` then mirrors the app installers + `latest.json`
+   to isc-fs/iskapps (the updater's first manifest source; needs the
+   `ISKAPPS_TOKEN` secret — see [UPDATES.md](UPDATES.md)).
 
 6. **Dev re-syncs automatically.** The inline `sync-dev` job in
    `release.yml` fast-forwards `dev` to `main` (or creates a
@@ -298,10 +323,9 @@ the same class of mistake across all three surfaces in lockstep.
    stays as a manual-dispatch recovery handle for the rare case
    where the inline job didn't run.
 
-7. **Edit the Release notes on GitHub** with the per-surface
-   "what's new" highlights. The auto-generated body sets up the
-   install snippets for each surface; the operator-facing summary
-   of *changes* lives in your handwriting on top.
+7. **Set the Release notes from the file.** `release.yml` creates
+   the page with a fixed install-snippet body; replace it with
+   `gh release edit vX.Y.Z --notes-file docs/RELEASE_NOTES_vX.Y.Z.md`.
 
 ---
 
@@ -327,7 +351,7 @@ you add modules:
   Keep subprocess tests for CLI contracts (args, exit codes,
   stdout shape) and in-process tests for behaviour.
 - **Don't commit to `dev` or `main` directly.** Everything lands
-  via a PR from a `feat/` or `fix/` branch.
+  via a PR from a `feat/`, `fix/` or `release-` branch.
 - **No `Co-Authored-By` trailers.** Commits go out under the
   author's single authorship.
 
