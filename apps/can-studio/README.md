@@ -201,4 +201,4 @@ mindmap
 
 ## License
 
-MIT — declared in the crate manifests (`license = "MIT"`).
+MIT — see [LICENSE](../../LICENSE).

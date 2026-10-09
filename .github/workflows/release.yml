@@ -284,7 +284,7 @@ jobs:
           node-version: '22'
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Compile TypeScript
         run: npm run compile
@@ -364,7 +364,7 @@ jobs:
           workspaces: '. -> target'
 
       - name: Install frontend dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Generate icons (required for Windows .ico bundle)
         run: npx --yes @tauri-apps/cli@^2 icon src-tauri/icons/icon.png

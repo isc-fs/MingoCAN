@@ -64,4 +64,3 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
-/editor/vscode/package-lock.json

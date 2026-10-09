@@ -38,13 +38,9 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '22'
-          # No package-lock.json yet — `npm install` resolves
-          # devDependencies fresh. When the extension grows real
-          # runtime deps we'll commit a lockfile and switch to
-          # `npm ci` here.
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Compile TypeScript
         run: npm run compile

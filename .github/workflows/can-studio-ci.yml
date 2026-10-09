@@ -82,7 +82,7 @@ jobs:
           workspaces: '. -> target'
 
       - name: Install frontend dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Generate platform icon variants
         # `tauri-build` requires `icons/icon.ico` on Windows for the
