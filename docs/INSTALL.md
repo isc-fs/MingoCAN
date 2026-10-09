@@ -21,7 +21,7 @@ Download the installer for your platform from the
 |---|---|
 | macOS (Apple Silicon) | `ISC.MingoCAN_<version>_aarch64.dmg` |
 | Windows | `ISC.MingoCAN_<version>_x64-setup.exe` |
-| Linux | `ISC.MingoCAN_<version>_amd64.AppImage`, `_amd64.deb`, or `-1.x86_64.rpm` |
+| Linux | `ISC.MingoCAN_<version>_amd64.AppImage`, `ISC.MingoCAN_<version>_amd64.deb`, or `ISC.MingoCAN-<version>-1.x86_64.rpm` |
 
 The app bundles the flashing engine — there is no separate CLI to install
 alongside it — and it keeps itself up to date. See [UPDATES.md](UPDATES.md).
@@ -50,10 +50,10 @@ freshly quarantined. [UPDATES.md](UPDATES.md) covers that case.
 The same release carries standalone `can-flasher` binaries:
 
 ```
-can-flasher-<version>-aarch64-apple-darwin.tar.gz
-can-flasher-<version>-x86_64-unknown-linux-gnu.tar.gz
-can-flasher-<version>-aarch64-unknown-linux-gnu.tar.gz
-can-flasher-<version>-x86_64-pc-windows-msvc.zip
+can-flasher-v<version>-aarch64-apple-darwin.tar.gz
+can-flasher-v<version>-x86_64-unknown-linux-gnu.tar.gz
+can-flasher-v<version>-aarch64-unknown-linux-gnu.tar.gz
+can-flasher-v<version>-x86_64-pc-windows-msvc.zip
 ```
 
 Extract, put the binary on your `PATH`, and check it runs:
@@ -61,6 +61,10 @@ Extract, put the binary on your `PATH`, and check it runs:
 ```bash
 can-flasher --version
 ```
+
+> The release binaries are built **without** SWD support, so they have no
+> `swd-flash`. To burn a bootloader, use the app's **Burn bootloader** view, or
+> build the CLI with `cargo install --path . --features swd`.
 
 The VS Code extension ships in the same release as
 `vscode-stm32-can-<version>.vsix`.
@@ -107,6 +111,7 @@ layout, CI hooks) are in [CONTRIBUTING.md](CONTRIBUTING.md).
 ```bash
 cd apps/can-studio
 npm install
+npx tauri icon src-tauri/icons/icon.png   # once: generates the gitignored platform icons
 npm run tauri dev        # hot-reloading dev build
 npm run tauri build      # production bundle
 ```
@@ -198,7 +203,8 @@ on the roadmap. macOS isn't supported by Vector at all.
 
 Only needed for **Burn bootloader** / `swd-flash`, which is how a
 never-programmed board gets its first firmware. Driven through
-[probe-rs](https://probe.rs). In the CLI this is behind the `swd` Cargo feature.
+[probe-rs](https://probe.rs). In the CLI this is behind the `swd` Cargo feature,
+which the release binaries do not enable — build with `--features swd`.
 
 | OS | Setup |
 |---|---|
@@ -265,7 +271,7 @@ On the CLI:
 
 ```bash
 dd if=/dev/urandom of=/tmp/fw.bin bs=1K count=128
-can-flasher --interface virtual flash --dry-run --address 0x08020000 /tmp/fw.bin
+can-flasher --interface virtual --node-id 0x3 flash --dry-run --address 0x08020000 /tmp/fw.bin
 ```
 
 What the virtual backend does and doesn't model is documented in
