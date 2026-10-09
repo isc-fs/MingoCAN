@@ -35,7 +35,9 @@ src/
   logging.rs             tracing bootstrap
   app_control.rs         app-level (non-bootloader) commands, e.g. reboot-to-BL
   bootloader_fetch.rs    bootloader artifact retrieval        [feature = "swd"]
-  logfs_client.rs        LOGFS session driver: list / read / finalize
+  logfs_client.rs        LOGFS pull driver: OPEN/READ/CRC/CLOSE with retry + session recovery
+  log_decode.rs          AMS .BIN log → CSV decoder + save_pulled()
+  provision_seed.rs      SWD provisioning seed (mirror of bl_provision_seed_t)
 
   cli/
     mod.rs               Cli + GlobalFlags + ExitCodeHint
@@ -46,7 +48,7 @@ src/
     diagnose.rs          DTC / log / live-data / health / reset
     config.rs            NVM + option bytes + WRP
     provision.rs         role → node-id write + reset
-    logs.rs              microSD car-data log pulls
+    logs.rs              microSD log list / pull / decode
     pit_diag.rs          telemetry observer (listen / enable / stream)
     send_raw.rs          single raw frame
     replay.rs            candump record/play
@@ -79,7 +81,7 @@ src/
 
   pit_diag/              telemetry decoders
     mod.rs               AMS observer (0x680–0x6CA)
-    ecu.rs               ECU observer (0x700–0x708)
+    ecu.rs               ECU observer (0x700–0x70D)
     udv.rs               uDV observer (0x7A0–0x7A9)
     testdata/            vendored DBC snapshots + PROVENANCE.txt
 ```
@@ -149,8 +151,8 @@ bridges frames over stdio. If the driver faults, only the helper dies; the
 parent sees the pipe close and reports `Disconnected`. The app survives and
 shows "adapter disconnected".
 
-Only the native FFI backends need this. SLCAN already errors cleanly on a serial
-unplug, and SocketCAN is in-kernel; both stay in-process.
+Only PCAN (Windows/macOS) is isolated today; Vector, SLCAN and SocketCAN run
+in-process. `CANFLASHER_NO_ISOLATE=1` forces in-process PCAN for A/B debugging.
 
 ### 3. `session/` — handshake, keepalive, notifications
 
@@ -339,17 +341,18 @@ concurrency — multi-node flash — spawns one task per node, each with its own
 **Unit tests** live in-file as `#[cfg(test)] mod tests`. The pure modules
 (protocol, session) carry the bulk of the count.
 
-**Integration tests** under `tests/`, thirteen files:
+**Integration tests** under `tests/`, fourteen files:
 
 | Test | Covers |
 |---|---|
 | `virtual_pipeline.rs` | End-to-end `VirtualBus` + `StubDevice` + `Session` — frame IDs, ISO-TP both ways, response parsing, handshake, broadcast |
 | `flash_manager.rs` | The flash state machine in isolation |
 | `logfs_pipeline.rs` | LOGFS list / read / finalize round trips |
+| `log_decode_pipeline.rs` | .BIN → CSV decoding against fixtures in `tests/fixtures/log_decode` |
 | `isolation_host.rs` | The out-of-process backend bridge |
 | `reboot_to_bootloader.rs` | The app-level reboot trigger |
 | `ecu_dbc_conformance.rs`, `pitdiag_dbc_conformance.rs` | Decoders vs. vendored DBC snapshots |
-| `*_subcommand.rs` | One per CLI subcommand, some spawning the real binary via `CARGO_BIN_EXE_can-flasher` |
+| `*_subcommand.rs` | CLI contracts for flash, verify, discover, diagnose, config, replay — some spawning the real binary via `CARGO_BIN_EXE_can-flasher` |
 
 **CI** (`ci.yml`) runs `rustfmt --check`, `clippy --all-targets --all-features
 -D warnings` on Linux (which reaches the `socketcan` cfg path macOS and Windows
