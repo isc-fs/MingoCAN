@@ -3,7 +3,7 @@ name        = "can-studio"
 version     = "3.1.1"
 edition     = "2021"
 rust-version = "1.95"
-description = "ISC CAN Studio — desktop application for flashing, monitoring, and debugging CAN messages."
+description = "ISC MingoCAN — desktop application for flashing, monitoring, and debugging CAN messages."
 license     = "MIT"
 repository  = "https://github.com/isc-fs/MingoCAN"
 publish     = false
@@ -26,7 +26,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 
 # Persistent key-value store, JSON-backed. Used for adapter
-# selection, flash defaults, and live-data view config — anything
+# selection, flash defaults, DBC paths and log settings — anything
 # operators expect to survive an app restart. Filesystem location
 # is platform-managed by the plugin (AppConfig on each OS).
 tauri-plugin-store = { version = "2" }
@@ -54,14 +54,12 @@ tauri-plugin-process = { version = "2" }
 can-flasher = { path = "../../..", features = ["swd"] }
 
 # Async runtime. Tauri commands are async-capable; we want a real
-# multi-threaded scheduler so the flash pipeline + a future bus
-# monitor can run concurrently.
+# multi-threaded scheduler so the flash pipeline, bus monitor and pit-diag
+# readers can run concurrently.
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util"] }
 
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-anyhow     = "1.0"
-thiserror  = "2.0"
 tracing    = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
@@ -70,12 +68,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # byte-order + sign extension) so a Vector-/BusMaster-exported DBC
 # can populate the Signals view in real time.
 can-dbc    = "9"
-
-# Release profile mirrors the can-flasher binary's: thin LTO, single
-# codegen unit, stripped symbols, panic=abort. Keeps the .app /
-# .AppImage / .msi small.
-[profile.release]
-lto           = "thin"
-codegen-units = 1
-strip         = "symbols"
-panic         = "abort"

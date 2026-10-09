@@ -33,7 +33,7 @@ export interface AdapterSettings {
      *  just the channel index after a restart. */
     label: string;
     bitrate: number;
-    /** 0..=15 (4-bit). `null` means broadcast. */
+    /** 0..=15 (4-bit). `null` = unset. */
     nodeId: number | null;
     timeoutMs: number;
 }
@@ -86,14 +86,6 @@ export interface DbcSettings {
 export function currentDbcKey(): string | null {
     if (settings.adapter.interface === null) return null;
     return `${settings.adapter.interface}|${settings.adapter.channel}`;
-}
-
-/** Lookup the persisted DBC path for the current adapter, or null
- *  when none is associated. */
-export function currentDbcPath(): string | null {
-    const key = currentDbcKey();
-    if (key === null) return null;
-    return settings.dbc.paths[key] ?? null;
 }
 
 export interface LogsSettings {

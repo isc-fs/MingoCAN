@@ -3,13 +3,12 @@
     that's also editable in the workflow views.
 
     All fields here read/write the same `settings.*` store as the
-    Flash + Live-data views, so changes here flow to those views
+    Flash and Diagnostics views, so changes here flow to those views
     automatically and vice versa (via the autosave $effect in
     App.svelte). The view exists because some fields don't belong
     to any single workflow:
 
       - Bitrate / nodeId / frame timeout (applied to every CAN op)
-      - Live-data defaults (rate + window) for new sessions
       - About info (version, settings-file path)
 
     Adapter selection itself stays in the Adapters view — this view
@@ -256,13 +255,13 @@
             <h3>Bus parameters</h3>
         </div>
         <p class="muted small section-hint">
-            Applied to every flash, discover, diagnose, and live-data call.
+            Applied to every flash, discover, diagnose, bus-monitor, pit-diag and data-logs call.
         </p>
         <div class="field">
             <span class="field-label">Default target board</span>
             <NodeIdRolePicker bind:value={settings.adapter.nodeId} />
             <p class="muted small">
-                Default node-id for every flash / diagnose / live-data call.
+                Default node-id for every flash / diagnose call.
                 ECU and AMS use different reboot-to-bootloader magic, so the
                 role must match the board; the Flash tab can override it per
                 run.

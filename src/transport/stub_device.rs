@@ -331,14 +331,6 @@ impl StubDevice {
         self.expected_verify = expected;
     }
 
-    /// Snapshot the current flash buffer (`BL_APP_BASE..=BL_APP_END`).
-    /// Integration tests read this after a `FlashManager::run` to
-    /// confirm the stub ended up with the same bytes the host
-    /// composed.
-    pub fn flash_snapshot(&self) -> &[u8] {
-        &self.flash_buffer
-    }
-
     /// Override the CRC the stub returns for reads covering exactly
     /// sector `sector`'s whole range. `None` clears the override so
     /// real CRCs flow again. Used by tests that need to simulate a
