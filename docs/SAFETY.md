@@ -25,8 +25,8 @@ press one of those.
 2. **On stands for anything that writes.**
 3. **`--yes` removes the only guard some CLI commands have.** Use it in scripts,
    not at the car.
-4. **The reboot-to-bootloader trigger is a real state change.** It opens the
-   board's HV relays and resets it. It is on by default in Flash, correctly —
+4. **The reboot-to-bootloader trigger is a real state change.** It resets the
+   board into its bootloader, and the AMS opens its HV relays first. It is on by default in Flash, correctly —
    but it is a reason to be on stands.
 
 ---

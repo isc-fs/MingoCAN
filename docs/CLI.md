@@ -163,8 +163,9 @@ can-flasher --json --interface virtual \
 > only on timeout, sends the app-level reboot-to-bootloader trigger, waits, and
 > retries. `always` sends it up front; `never` fails instead.
 >
-> **That trigger opens the board's HV relays and then resets it.** By hand:
-> `can-flasher send-raw 0x002 B0 07 AD 11`.
+> **That trigger resets the board into its bootloader; the AMS opens its HV
+> relays first.** By hand — the payload selects the board: `can-flasher send-raw
+> 0x002 B0 07 AD 11` (AMS) or `… B0 07 AD 12` (ECU).
 
 Full guide, including what to do when it fails: [FLASHING.md](FLASHING.md).
 
@@ -365,7 +366,7 @@ The generic escape hatch: app-level commands, bench probes, anything the
 protocol layer doesn't model.
 
 ```bash
-can-flasher … send-raw 0x002 B0 07 AD 11    # app reboot-to-bootloader
+can-flasher … send-raw 0x002 B0 07 AD 11    # AMS app → bootloader (ECU: … AD 12)
 ```
 
 ## `replay` — record and read sessions
