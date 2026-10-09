@@ -133,8 +133,9 @@ Two cards.
 state, and how the current session is doing.
 
 **Diagnostic Trouble Codes** lists what the board has stored and lets you clear
-them. Reading is free; clearing is the one thing in this view that changes
-anything on the board, and it asks first.
+them. Reading only asks the bootloader (the board must be in its bootloader,
+and the view uses the Target board from Flash / Settings); clearing is the one
+thing in this view that changes anything on the board, and it asks first.
 
 ### Bus monitor
 

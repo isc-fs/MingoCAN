@@ -12,7 +12,9 @@ Three things have to be true:
 1. **An adapter is selected** — the Adapters view, with a channel.
 2. **The bootloader is on the board.** Flash speaks the *bootloader* protocol.
    A never-programmed board has nothing listening on the bus; it needs
-   **Burn bootloader** over SWD first, exactly once in its life.
+   **Burn bootloader** over SWD first, exactly once in its life. The burn
+   always chip-erases: the application, the node-id and anything else stored
+   on the chip (e.g. pedal calibration) are wiped.
 3. **The build settings point at your firmware.** See
    [Build configuration](#build-configuration) below.
 
@@ -57,8 +59,9 @@ A board running its *application* does not answer the bootloader's `CONNECT`.
 this: on a connect timeout, the host sends the app-level reboot trigger, waits
 for the bootloader to come up, and retries.
 
-> **That trigger opens the board's HV relays and then resets it.** On a car,
-> that is a real state change, not just a software reset. It is the correct
+> **That trigger resets the board into its bootloader — and the AMS opens its
+> HV relays first.** On a car, that is a real state change, not just a software
+> reset. It is the correct
 > thing to do before flashing — but it is a reason to be on stands.
 
 **The ECU can refuse.** If the car is in the drive ladder it declines the
@@ -68,7 +71,9 @@ and the refusal shows up on the ECU telemetry tab as
 power-cycle; forcing `--enter-bootloader always` will not help, because the
 refusal is the ECU's decision, not a missed trigger.
 
-To do it by hand from the CLI: `can-flasher send-raw 0x002 B0 07 AD 11`.
+To do it by hand from the CLI, the payload selects the board (AMS and ECU share
+the ID): `can-flasher send-raw 0x002 B0 07 AD 11` for the AMS,
+`can-flasher send-raw 0x002 B0 07 AD 12` for the ECU.
 
 ---
 
