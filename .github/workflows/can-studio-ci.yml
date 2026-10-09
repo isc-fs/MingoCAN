@@ -1,19 +1,19 @@
-name: ISC CAN Studio CI
+name: ISC MingoCAN CI
 
-# Compile + bundle smoke check for the Tauri desktop app.
-# Runs only when the app's own files change — the main Rust CI
-# (ci.yml) and the editor CI (editor-ci.yml) have inverse paths
-# filters, so the three never overlap and a PR that doesn't touch
-# the Studio doesn't pay the cross-platform Tauri build tax.
+# Lint + test smoke check for the Tauri desktop app (svelte-check, frontend
+# build, clippy -D warnings, cargo test). Bundling only happens in release.yml.
+# Runs when the app, or the can-flasher library it links by path
+# (src/**), changes.
 #
 # Matrix: ubuntu-latest, macos-latest, windows-latest — all three
-# target platforms get exercised on every PR that changes the app.
+# target platforms get exercised on every PR that changes the app or the library.
 
 on:
   push:
     branches: [dev, main]
     paths:
       - 'apps/can-studio/**'
+      - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/can-studio-ci.yml'
@@ -21,6 +21,7 @@ on:
     branches: [dev, main]
     paths:
       - 'apps/can-studio/**'
+      - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/can-studio-ci.yml'
@@ -54,21 +55,22 @@ jobs:
       run:
         working-directory: apps/can-studio
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux WebKit / GTK build deps
         if: matrix.apt_deps != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_deps }}
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          components: clippy
           cache: false
           rustflags: ''
 
@@ -96,11 +98,18 @@ jobs:
       - name: Build frontend (production)
         run: npm run build
 
-      - name: Cargo check Tauri Rust crate
+      - name: Clippy Tauri Rust crate
         # `cargo build` for the full Tauri app produces a native
         # bundle (.dmg / .deb / .msi) which is large and slow on
-        # every PR. The scaffold's check job verifies the crate
-        # compiles + links + the frontend builds; full bundling
-        # lands in a separate workflow when we cut a release.
-        run: cargo check -p can-studio
+        # every PR. Clippy verifies the crate compiles with no
+        # warnings and the test step runs its unit tests; full
+        # bundling lands in a separate workflow when we cut a release.
+        # `-p can-studio` is required: the root package is not a
+        # virtual workspace, so ci.yml's clippy/test only cover
+        # can-flasher.
+        run: cargo clippy -p can-studio --all-targets -- -D warnings
+        working-directory: ${{ github.workspace }}
+
+      - name: Test Tauri Rust crate
+        run: cargo test -p can-studio
         working-directory: ${{ github.workspace }}
