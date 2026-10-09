@@ -58,7 +58,7 @@ pub struct SwdFlashArgs {
     pub chip: String,
 
     /// Serial number of the probe to use, if multiple ST-LINKs are
-    /// attached. Run `can-flasher swd-probes` to list them. With
+    /// attached (`probe-rs list` shows their serials). With
     /// a single probe attached this can be omitted.
     #[arg(long)]
     pub probe_serial: Option<String>,
