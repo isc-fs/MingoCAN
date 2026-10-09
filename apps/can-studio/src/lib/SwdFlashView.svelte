@@ -285,7 +285,7 @@
                 The team's CAN bootloader has to be programmed onto the
                 STM32H733 over SWD before any over-CAN flashing can work — a
                 bare chip can't yet speak the bootloader's wire protocol.
-                Burn it once when commissioning a new ECU; from then on,
+                Burn it once when commissioning a new board; from then on,
                 every app update uses the <strong>Flash</strong> tab over CAN.
             </p>
         </div>
@@ -364,9 +364,10 @@
             </div>
         </label>
         <p class="muted small">
-            <code>.elf</code>, <code>.hex</code>, or <code>.bin</code>. For raw
-            <code>.bin</code> the load address comes from <em>Base address</em>;
+            <code>.elf</code>, <code>.hex</code>, or <code>.bin</code>. A raw
+            <code>.bin</code> is written at the start of flash (0x08000000);
             <code>.elf</code> and <code>.hex</code> carry their own addresses.
+            Provisioning a node-id needs the <code>.elf</code>.
         </p>
 
         <hr class="divider" />
