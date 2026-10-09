@@ -3,8 +3,7 @@
    Every view should reach for these tokens before defining its
    own local CSS. The utility classes below cover ~90 % of common
    shapes (buttons, cards, fields, pills); view-local styles only
-   handle truly view-specific layouts (cell-V grids, log windows,
-   chart canvases).
+   handle truly view-specific layouts (cell-V grids, log windows).
 
    Design intent — quiet by default, accent used sparingly:
      - One card surface (--surface), not three elevation levels

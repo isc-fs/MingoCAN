@@ -221,7 +221,7 @@
         "iscFs.timeoutMs": {
           "type": "number",
           "default": 500,
-          "description": "Per-frame timeout in milliseconds (--timeout)"
+          "description": "Per-command reply timeout in milliseconds (--timeout)"
         },
         "iscFs.requireWrp": {
           "type": "boolean",

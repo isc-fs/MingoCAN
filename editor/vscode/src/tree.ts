@@ -3,7 +3,7 @@
 // Two-level tree:
 //
 //   ADAPTER (collapsed by default — `active` adapter expanded)
-//     ├── Node 0x3 · MAIN_IFS08 v1.2.0
+//     ├── Node 0x1 · MAIN_ECU v1.2.0
 //     └── Node 0x5 · OTHER_BOARD v0.9.1
 //   ADAPTER (other, no children)
 //

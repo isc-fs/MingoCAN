@@ -81,8 +81,7 @@ export function onBusMonitorStatus(
 export type BusMonitorCaptureEvent =
     | { kind: 'started'; path: string }
     | { kind: 'stopped'; path: string; frames: number }
-    | { kind: 'progress'; path: string; frames: number }
-    | { kind: 'error'; message: string };
+    | { kind: 'progress'; path: string; frames: number };
 
 export function startBusMonitorCapture(path: string): Promise<void> {
     return invoke<void>('bus_monitor_capture_start', { request: { path } });

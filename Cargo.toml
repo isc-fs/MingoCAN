@@ -19,20 +19,12 @@ readme      = "README.md"
 keywords    = ["can", "stm32", "bootloader", "flasher", "canbus"]
 categories  = ["command-line-utilities", "embedded"]
 
-# Binaries the release pipeline ships. `can-flasher` is the single
-# binary produced in v1; future auxiliaries (e.g. a daemon / bus
-# monitor) land here as additional [[bin]] entries.
+# The single shipped binary.
 [[bin]]
 name = "can-flasher"
 path = "src/main.rs"
 
 # ---- Runtime dependencies ----
-#
-# Kept minimal in feat/2 — only what the CLI skeleton needs. Transport
-# crates (serialport, socketcan, libloading) land with their respective
-# backend branches; protocol crates (crc, object, ihex) land with the
-# firmware loader; output crates (rusqlite, tabled, indicatif) land as
-# the features that use them do.
 
 [dependencies]
 anyhow             = "1.0"
@@ -54,8 +46,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # `swd-flash` subcommand to lay the bootloader onto a bare STM32
 # via ST-LINK V2 / V3. Gated behind the `swd` Cargo feature so
 # the existing CAN flasher binary stays small for operators who
-# only ever do over-CAN app updates. Disabled by default until
-# the spike confirms the libusb story across all three OSes.
+# only ever do over-CAN app updates. Off in the CLI release binary;
+# the desktop app (apps/can-studio) enables it.
 probe-rs           = { version = "0.31", optional = true }
 
 # Blocking HTTP client with bundled rustls TLS. Used by the
@@ -81,13 +73,11 @@ default = []
 # Opt-in SWD/JTAG flashing via probe-rs. Pulls in libusb + a
 # handful of additional crates (~2 MB binary growth, target
 # database). Build with `cargo install … --features swd` or
-# `cargo build --features swd`. Release binaries from
-# `release.yml` will turn this on once the spike validates on
-# all three platforms.
+# `cargo build --features swd`. The CLI release archives are
+# built without it; the desktop app always enables it.
 swd = ["dep:probe-rs", "dep:ureq", "dep:dirs"]
 
 [dev-dependencies]
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "sync"] }
 # Test-only: parse the vendored AMS DBC in the pit-diag conformance
 # test so the hardcoded decoder layout is machine-checked against the
 # AMS wire definition. NOT a runtime dependency — the shipped decoder

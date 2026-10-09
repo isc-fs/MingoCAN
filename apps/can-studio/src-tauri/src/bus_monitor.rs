@@ -7,7 +7,7 @@
 // doesn't speak CONNECT, doesn't attach a Session, doesn't filter
 // by ID. It just shows what the wire shows.
 //
-// State management mirrors live_data.rs: a `tauri::manage`d slot
+// State management: a `tauri::manage`d slot
 // holds the running task's stop-signal + JoinHandle so the stop
 // command can signal a clean shutdown and wait for the task to
 // actually exit (vs. just aborting it, which would leak the
@@ -69,9 +69,6 @@ pub struct BusMonitorState {
 struct Running {
     stop_signal: Arc<Notify>,
     task: JoinHandle<()>,
-    /// Logical channel name we emit into the candump line (column
-    /// 2). Falls back to "can0" when the operator didn't pick one.
-    capture_channel: String,
     /// TX side of the monitor's transmit channel. Commands push a
     /// frame here and the monitor task sends it through the adapter
     /// it already owns — so we can transmit (e.g. the pit-diag arm
@@ -154,7 +151,6 @@ pub enum BusMonitorCaptureEvent {
     Started { path: String },
     Stopped { path: String, frames: u64 },
     Progress { path: String, frames: u64 },
-    Error { message: String },
 }
 
 // ---- Commands ----
@@ -348,7 +344,6 @@ pub async fn bus_monitor_start(
     *slot = Some(Running {
         stop_signal,
         task,
-        capture_channel,
         tx_frames,
     });
     Ok(())
@@ -392,8 +387,7 @@ pub async fn bus_monitor_stop(
 ) -> Result<(), String> {
     let mut slot = state.inner.lock().await;
     let Some(prev) = slot.take() else {
-        // No-op when nothing is running — matches live_data_stop's
-        // idempotent contract.
+        // No-op when nothing is running — idempotent by contract.
         return Ok(());
     };
     prev.stop_signal.notify_waiters();
