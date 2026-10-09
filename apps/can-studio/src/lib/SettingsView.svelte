@@ -309,8 +309,7 @@
                 ✓ Using committed config from
                 <code>{repoFlashConfig.source}</code>. The Build directory's
                 repo defines
-                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && repoFlashConfig.artifactPath}
-                    and {/if}{#if repoFlashConfig.artifactPath}<code
+                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && repoFlashConfig.artifactPath}{' '}and{' '}{/if}{#if repoFlashConfig.artifactPath}<code
                         >firmwareArtifact</code
                     >{/if}
                 — used when flashing, so every developer builds this repo the

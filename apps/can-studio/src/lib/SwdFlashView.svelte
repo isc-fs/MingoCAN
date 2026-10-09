@@ -518,8 +518,7 @@
         <div class="banner banner-success">
             <div>
                 ✓ Bootloader burned in {flashState.durationMs} ms{#if flashState.report
-                    .provisionedNodeId !== null}
-                    and provisioned as
+                    .provisionedNodeId !== null}{' '}and provisioned as
                     <strong>{roleForNode(flashState.report.provisionedNodeId)}</strong>
                     (node 0x{flashState.report.provisionedNodeId.toString(16).toUpperCase()})
                     over SWD{/if}. The chip is ready to be flashed over CAN from the

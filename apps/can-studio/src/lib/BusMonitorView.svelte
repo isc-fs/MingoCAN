@@ -228,13 +228,25 @@
         );
     });
 
+    // Both read `sigValuesTick` so every row re-renders on each tick:
+    // `sigValues` is a plain Map (not reactive), and a keyed {#each}
+    // does not re-run rows whose item is unchanged — so without this
+    // read the table froze on the values it had when it was built.
     function formatValue(key: string): string {
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+        sigValuesTick;
         const v = sigValues.get(key);
         if (v === undefined) return '—';
         if (Math.abs(v) >= 1000) return v.toFixed(0);
         if (Math.abs(v) >= 10) return v.toFixed(1);
         if (Math.abs(v) >= 1) return v.toFixed(2);
         return v.toFixed(4);
+    }
+
+    function hasValue(key: string): boolean {
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+        sigValuesTick;
+        return sigValues.has(key);
     }
 
     // ---- ID filter ----
@@ -699,7 +711,7 @@
                     </thead>
                     <tbody>
                         {#each filteredSchema as sig (sig.signalKey)}
-                            <tr class:has-value={sigValues.has(sig.signalKey)}>
+                            <tr class:has-value={hasValue(sig.signalKey)}>
                                 <td class="col-message mono">
                                     <span class="msg-name">{sig.messageName}</span>
                                     <span class="msg-id mono">0x{sig.messageId.toString(16).toUpperCase().padStart(3, '0')}</span>
