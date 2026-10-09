@@ -255,7 +255,7 @@
             <h3>Bus parameters</h3>
         </div>
         <p class="muted small section-hint">
-            Applied to every flash, discover, diagnose, bus-monitor, pit-diag and data-logs call.
+            Applied to every flash, discover, diagnose, bus-monitor and pit-diag call. (Data logs keeps its own board choice.)
         </p>
         <div class="field">
             <span class="field-label">Default target board</span>
@@ -263,8 +263,8 @@
             <p class="muted small">
                 Default node-id for every flash / diagnose call.
                 ECU and AMS use different reboot-to-bootloader magic, so the
-                role must match the board; the Flash tab can override it per
-                run.
+                role must match the board. The Flash tab's Target board is the
+                same setting — changing it there changes it here too.
             </p>
         </div>
         <div class="grid-two">
@@ -309,8 +309,7 @@
                 ✓ Using committed config from
                 <code>{repoFlashConfig.source}</code>. The Build directory's
                 repo defines
-                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && repoFlashConfig.artifactPath}
-                    and {/if}{#if repoFlashConfig.artifactPath}<code
+                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && repoFlashConfig.artifactPath}{' '}and{' '}{/if}{#if repoFlashConfig.artifactPath}<code
                         >firmwareArtifact</code
                     >{/if}
                 — used when flashing, so every developer builds this repo the

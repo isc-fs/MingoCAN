@@ -350,6 +350,22 @@ impl DtcEntry {
     pub fn severity(&self) -> DtcSeverity {
         DtcSeverity::from_byte(self.severity)
     }
+
+    /// Parse a whole `CMD_DTC_READ` ACK body (opcode already stripped):
+    /// `[count_le16, entry_0, entry_1, …]`. The count comes first — read
+    /// it, don't infer it from the length, or every entry lands two bytes
+    /// off.
+    pub fn parse_list(payload: &[u8]) -> Result<Vec<Self>, ParseError> {
+        ensure_len(payload, 2)?;
+        let count = usize::from(read_u16_le(payload, 0));
+        ensure_len(payload, 2 + count * Self::SIZE)?;
+        (0..count)
+            .map(|i| {
+                let off = 2 + i * Self::SIZE;
+                Self::parse(&payload[off..off + Self::SIZE])
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,6 +456,46 @@ pub const NVM_FORMAT_TOKEN: u32 = 0x0054_4D46;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dtc_bytes(code: u16, severity: u8, count: u8, first: u32, last: u32, ctx: u32) -> Vec<u8> {
+        let mut b = code.to_le_bytes().to_vec();
+        b.extend([severity, count]);
+        for v in [first, last, ctx, 0] {
+            b.extend(v.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn dtc_list_reads_the_count_before_the_entries() {
+        let mut body = 2u16.to_le_bytes().to_vec();
+        body.extend(dtc_bytes(0x0040, 1, 2, 3519, 3790, 2));
+        body.extend(dtc_bytes(0x0030, 2, 1, 412, 412, 0x0322_0201));
+        let list = DtcEntry::parse_list(&body).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(
+            (
+                list[0].code,
+                list[0].occurrence_count,
+                list[0].last_seen_uptime_seconds
+            ),
+            (0x0040, 2, 3790)
+        );
+        assert_eq!((list[1].code, list[1].context_data), (0x0030, 0x0322_0201));
+        assert_eq!(list[1].severity(), DtcSeverity::Error);
+    }
+
+    #[test]
+    fn dtc_list_empty_and_truncated() {
+        assert!(DtcEntry::parse_list(&[0, 0]).unwrap().is_empty());
+        assert!(DtcEntry::parse_list(&[1]).is_err());
+        let mut body = 2u16.to_le_bytes().to_vec();
+        body.extend(dtc_bytes(0x0040, 1, 1, 1, 1, 0));
+        assert!(
+            DtcEntry::parse_list(&body).is_err(),
+            "count says 2, only 1 entry present"
+        );
+    }
 
     fn le32(n: u32) -> [u8; 4] {
         n.to_le_bytes()
