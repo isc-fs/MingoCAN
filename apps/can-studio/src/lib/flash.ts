@@ -31,29 +31,6 @@ export interface FlashRequest {
     enterBootloader: boolean;
 }
 
-export function defaultFlashRequest(
-    interfaceType: InterfaceType,
-    channel: string,
-): FlashRequest {
-    return {
-        artifactPath: '',
-        buildCommand: null,
-        buildCwd: null,
-        interface: interfaceType,
-        channel: channel.length > 0 ? channel : null,
-        bitrate: 500_000,
-        nodeId: 0x3,
-        timeoutMs: 500,
-        keepaliveMs: 5_000,
-        diff: true,
-        dryRun: false,
-        verifyAfter: true,
-        finalCommit: true,
-        jump: true,
-        enterBootloader: true,
-    };
-}
-
 // ---- Streamed events from backend ----
 
 export type FlashEvent =
@@ -80,35 +57,6 @@ export interface JsonReport {
 
 export function runFlash(request: FlashRequest): Promise<JsonReport> {
     return invoke<JsonReport>('flash', { request });
-}
-
-/**
- * Run only the build step (no firmware load, no adapter, no flash).
- * Streams `flash:event` build_line / build_exited events just like
- * the full pipeline. Useful for configure-from-scratch CMake projects
- * where the artifact doesn't yet exist.
- */
-export function runBuildOnly(
-    command: string,
-    cwd: string | null,
-): Promise<void> {
-    return invoke<void>('build_only', { command, cwd });
-}
-
-/**
- * A CMake build preset surfaced from `<cwd>/CMakePresets.json`.
- * `command` is the synthesised `cmake --preset X && cmake --build --preset X`
- * one-liner; `artifactHint` is a best-effort guess at the preset's
- * binaryDir (with `${sourceDir}` / `${presetName}` expanded).
- */
-export interface CmakePresetInfo {
-    name: string;
-    command: string;
-    artifactHint: string | null;
-}
-
-export function readCmakePresets(cwd: string): Promise<CmakePresetInfo[]> {
-    return invoke<CmakePresetInfo[]>('read_cmake_presets', { cwd });
 }
 
 /**

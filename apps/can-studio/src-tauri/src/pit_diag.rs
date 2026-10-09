@@ -17,7 +17,7 @@
 //                              the reader task. Idempotent — calling
 //                              when nothing's running is a no-op.
 //
-// State management mirrors live_data.rs / bus_monitor.rs: a
+// State management mirrors bus_monitor.rs: a
 // `tauri::manage`d slot holds the running task's stop-signal +
 // JoinHandle so the stop command can signal a clean shutdown and
 // wait for the task to actually exit.

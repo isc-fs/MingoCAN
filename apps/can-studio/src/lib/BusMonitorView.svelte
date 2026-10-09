@@ -377,9 +377,6 @@
                 } else if (evt.kind === 'progress') {
                     capturePath = evt.path;
                     captureFrames = evt.frames;
-                } else if (evt.kind === 'error') {
-                    captureError = evt.message;
-                    captureActive = false;
                 }
             });
 

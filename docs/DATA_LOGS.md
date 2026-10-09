@@ -50,13 +50,17 @@ job. Plan for it rather than assuming the tool has hung.
   **Download newest** (or Enter) and it lands on disk. **Download all new**
   takes everything you don't have yet, newest first, so stopping halfway still
   keeps the most recent data.
+- **Pick files.** Tick files in the new-files list (or the header box to select
+  all) and press **Download selected** to take just those.
 - **LOG, IMU, CEL and ELE files are separate.** Switch with the *LOG files* /
   *IMU files* / *CEL files* / *ELE files* tabs; each shows how many are new. A `.BIN` lands
   with its decoded `.csv`, and **Show in folder** points at the CSV.
 - **No folder dialog.** Files go to `Documents/MingoCAN Logs/<AMS|ECU|UDV>/<date>/`,
   where the date is the *download* date (the card has no clock). The path is
-  shown at the top; **Change…** picks another folder once and remembers it,
-  **Open folder** shows it, and *one folder per day* turns the date level off.
+  shown at the top; **Change…** picks another folder once and remembers it
+  (**Use default** goes back), **Open folder** shows it, and unticking *one
+  folder per day* drops the date level (files go straight into the board
+  folder).
 - **Logs from** picks the board. It defaults to the AMS and is separate from the
   node ID on the Adapters page.
 
@@ -109,13 +113,13 @@ can-flasher logs decode CEL0003.BIN IMU0003.BIN                       # files co
 beside it. A second copy of a file is saved as `LOG0003_2.CSV` (never
 overwritten).
 
-> **`--node-id` is mandatory for `logs`** and has no default. Omitting it fails
-> with the generic exit code **99** rather than a targeted hint — so if a `logs`
-> command exits 99 with a message that reads oddly, check the node ID first.
+> **`--node-id` is mandatory for `logs list` / `logs pull`** and has no default.
+> Omitting it prints a message naming the flag, but exits with the catch-all
+> code **99**, not a dedicated code.
 
 Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`.
 
-Commands retry up to three times, and the internal timeout floor is 2000 ms — a
+Each command is tried up to three times, and the internal timeout floor is 2000 ms — a
 `--timeout` smaller than that is raised to it rather than honoured, because a
 shorter deadline cannot outlast a FatFs read on a shared bus.
 
@@ -127,7 +131,7 @@ shorter deadline cannot outlast a FatFs read on a shared bus.
 invisible until it is sealed at the next boot. Power-cycle the car, then check
 again.
 
-**It exits 99 with a confusing message.** Check `--node-id` is present.
+**It exits 99.** Check `--node-id` is present — the message says so.
 
 **Nothing works at all.** LOGFS is served by the **application** firmware, not
 the bootloader. A board sitting in its bootloader has nothing listening for
