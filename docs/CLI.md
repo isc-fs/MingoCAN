@@ -32,7 +32,7 @@ can-flasher [GLOBAL OPTIONS] <COMMAND> [ARGS]
 | [`diagnose`](#diagnose--dtcs-logs-live-data-health) | DTCs, log stream, live data, health, reset |
 | [`config`](#config--nvm-and-option-bytes) | NVM key-value store + option bytes / WRP |
 | [`provision`](#provision--assign-a-node-id-by-role) | Assign a board's node ID by role name |
-| [`logs`](#logs--pull-microsd-car-data-logs) | List / seal / pull microSD car-data logs |
+| [`logs`](#logs--pull-microsd-car-data-logs) | List / pull / decode microSD car-data logs |
 | [`pit-diag`](#pit-diag--telemetry-observer) | Observe AMS / ECU / uDV telemetry |
 | [`send-raw`](#send-raw--one-raw-frame) | Send one raw CAN frame |
 | [`replay`](#replay--record-and-read-sessions) | Record or replay a CAN session |
@@ -48,8 +48,8 @@ can-flasher [GLOBAL OPTIONS] <COMMAND> [ARGS]
 | `--node-id <ID>` | Target node, hex `0x0A` or decimal `10`. See below. |
 | `--timeout <MS>` | Reply timeout *(default `500`)* |
 | `--json` | Machine-readable output on stdout |
-| `--log <PATH>` | Append the session to a SQLite audit log |
-| `--operator <NAME>` | Override the operator name recorded in that log |
+| `--log <PATH>` | Accepted but currently ignored — the audit log is not implemented |
+| `--operator <NAME>` | Accepted but currently ignored (see `--log`) |
 | `--verbose` | Trace-level logging |
 
 > `--timeout` is **per command**, covering a whole reassembled ISO-TP message —
@@ -64,10 +64,10 @@ no single default.
 | Command | If you omit `--node-id` |
 |---|---|
 | `flash` | **error** — the one command that will not guess which board to overwrite |
-| `logs` | **error** — but the message is generic and the exit code is the catch-all **99**, not a targeted hint |
+| `logs list`, `logs pull` | **error** — the message names the flag, but the exit code is the catch-all **99** |
 | `verify`, `diagnose`, `config` | defaults to `0x3` |
 | `provision` | *target* defaults to `0x3`; the value *written* comes from the role argument |
-| `discover`, `pit-diag`, `replay`, `adapters` | not used — broadcast or passive |
+| `discover`, `pit-diag`, `replay`, `adapters`, `send-raw`, `logs decode`, `swd-flash` | not used — broadcast, passive, raw or offline |
 
 Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`. A board that has never been
 commissioned answers on the bootloader's compile-time default — **`0x01` for a
@@ -188,8 +188,9 @@ can-flasher … diagnose health            # one-shot session health record
 can-flasher … diagnose reset             # reset the device
 ```
 
-`read-dtc`, `log`, `live-data` and `health` are read-only. `clear-dtc` and
-`reset` change the board's state and prompt unless you pass `--yes`.
+`read-dtc`, `log`, `live-data` and `health` are read-only. `clear-dtc` changes
+the board's state and prompts unless you pass `--yes`; `reset` resets
+immediately, with no prompt (`--mode hard|soft|bootloader|app`, default `hard`).
 
 ## `config` — NVM and option bytes
 
@@ -291,10 +292,10 @@ can-flasher logs decode ./logs/*.BIN                                  # no adapt
 | `--no-decode` | Keep `.BIN` files as pulled, without the decoded `.csv` |
 
 **`--node-id` is mandatory for `list` and `pull`** with no default; omitting it
-fails with the generic exit code **99**.
+prints a message naming the flag, but exits with the catch-all code **99**.
 
 Throughput is ~10–20 kB/s, so a 4 MiB file is 3.5–7 minutes and `--all` on a
-full card is 20–35. Commands retry up to three times and the internal timeout
+full card is 20–35. Each command is tried up to three times and the internal timeout
 floor is 2000 ms — a smaller `--timeout` is raised to it rather than honoured,
 because a shorter deadline cannot outlast a FatFs read on a shared bus.
 
@@ -306,7 +307,7 @@ Boards can be flipped into a diagnostic stream by the host. `pit-diag` is the
 terminal-side driver: it sends the arm command, waits for the ACK, and decodes.
 
 Three boards: `--profile ams` (arm `0x7F0`, ACK `0x7F1`, stream `0x680`–`0x6CA`),
-`ecu` (`0x7E0` / `0x7E1`, `0x700`–`0x708`), `udv` (`0x7DE` / `0x7DF`,
+`ecu` (`0x7E0` / `0x7E1`, `0x700`–`0x70D`), `udv` (arm `0x7DE`, no ACK,
 `0x7A0`–`0x7A9`).
 
 ### `listen` — passive, never transmits
@@ -340,7 +341,7 @@ can-flasher --json … pit-diag stream --profile ams --duration 5 \
   | jq -c 'select(.kind == "cellVoltage" and .firstCell == 0)'
 
 # CI smoke check — non-zero if a 1 Hz window has the wrong frame count.
-# Expected totals per profile: 58 AMS, 7 ECU, 4 uDV.
+# Expected totals per profile: 58 AMS, 13 ECU, 5 uDV.
 can-flasher … pit-diag stream --profile ams --duration 5 --strict-scan
 ```
 
@@ -351,6 +352,10 @@ The arm payload is `DE AD BE EF`; disarm is all zeros. An ACK whose first byte i
 anything other than `0x01` — including an empty payload — means **disabled**.
 `stream` disarms on exit including on Ctrl-C, and a board clears the flag on
 reboot if the tool dies without disarming.
+
+The uDV is the exception: its arm has no ACK and it has no disarm frame —
+`disable --profile udv` sends nothing, and the uDV keeps streaming until it
+reboots.
 
 Operator guide: [TELEMETRY.md](TELEMETRY.md).
 
@@ -367,6 +372,11 @@ can-flasher … send-raw 0x002 B0 07 AD 11    # app reboot-to-bootloader
 
 A passive bus recorder. Writes every frame in Linux `candump -l` format; `run`
 reads one back and pretty-prints it, or emits JSON. Recording transmits nothing.
+
+```bash
+can-flasher … replay record --out session.log --duration-ms 10000   # omit --duration-ms to stop on Ctrl-C
+can-flasher replay run session.log
+```
 
 ---
 

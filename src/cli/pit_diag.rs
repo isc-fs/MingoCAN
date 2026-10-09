@@ -22,8 +22,8 @@
 //!    ever splits further, this CLI is the canonical implementation).
 //!
 //! The `--profile` flag selects the board: `ams` (arm `0x7F0`, decode
-//! `0x680–0x6CA`), `ecu` (arm `0x7E0`, decode `0x700–0x707`), or `udv`
-//! (arm `0x7DE`, decode `0x7A0–0x7A6`).
+//! `0x680–0x6CA`), `ecu` (arm `0x7E0`, decode `0x700–0x70D`), or `udv`
+//! (arm `0x7DE`, decode `0x7A0–0x7A9`).
 
 use std::time::{Duration, Instant};
 
@@ -89,6 +89,8 @@ pub enum PitDiagCommand {
     /// Disarm the pit-diag stream — sends `0x7F0#00000000` and waits
     /// for the `0x7F1` ACK. The firmware also clears the flag on
     /// reboot, so this is belt-and-braces against a tool crash.
+    /// (`--profile ecu` uses `0x7E0` / `0x7E1`; the uDV has no disarm
+    /// frame, so `--profile udv` sends nothing.)
     Disable(ProfileArgs),
 
     /// Arm, decode the stream to stdout, then disarm on exit.
@@ -101,7 +103,9 @@ pub enum PitDiagCommand {
     ///   - Ctrl-C (SIGINT)              → exit 0, with disarm
     ///   - Bus error                    → exit non-zero
     ///   - Schema drift (frames/scan
-    ///     diverges from expected 58)   → exit non-zero
+    ///     diverges from the profile's
+    ///     expected count, with
+    ///     `--strict-scan`)             → exit non-zero
     Stream(StreamArgs),
 
     /// Passively decode the stream to stdout WITHOUT arming.
@@ -138,7 +142,7 @@ pub struct StreamArgs {
     pub duration: Option<u64>,
 
     /// Fail the run if any 1-second window's frame count drifts from
-    /// the expected per-profile total (58 AMS, 7 ECU, 4 uDV) by more
+    /// the expected per-profile total (58 AMS, 13 ECU, 5 uDV) by more
     /// than ±2. Off by default because operators inspecting a
     /// known-broken bus want to *see* the wrong count, not have the
     /// tool bail. Enable in CI / scripted bench checks.
@@ -148,9 +152,9 @@ pub struct StreamArgs {
 
 #[derive(Debug, Args)]
 pub struct ListenArgs {
-    /// Which board's frames to decode: `ecu` (0x700–0x707), `ams`
-    /// (incl. the ungated 0x6CA health), or `all`/`both` to decode
-    /// whichever is on the bus. Defaults to `all` — a passive listen
+    /// Which board's frames to decode: `ecu` (0x700–0x70D), `ams`
+    /// (incl. the ungated 0x6CA health), `udv` (0x7A0–0x7A9), or
+    /// `all`/`both` to decode whichever is on the bus. Defaults to `all` — a passive listen
     /// wants to hear any board's ungated health (ECU 0x704 / AMS 0x6CA).
     #[arg(long, default_value = "all")]
     pub profile: String,
