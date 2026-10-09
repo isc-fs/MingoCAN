@@ -7,11 +7,10 @@ covers in-editor flashing for developers; this app is the surface for everyone
 else — mechanics at a workbench, hardware engineers at a test bench, race-day
 operators in the pit.
 
-**Status: v0.3.0 — Tier 2 live.** Seven views in the sidebar — Adapters,
-Flash, Diagnostics, Live data, Bus monitor, Signals, Settings — driving
-real `can-flasher` functionality plus a generic CAN bus monitor with
-candump-format capture-to-file and DBC-decoded signal display.
-Per-view config + per-adapter DBC associations persist across restarts.
+Ships in lockstep with the CLI and VS Code extension (same version). Eight
+views: Adapters; Program → Flash, Burn bootloader; Observe → Board health, Bus
+monitor (Signals / By ID / Live frames), Telemetry, Data logs; Settings.
+Operator docs: [docs/DESKTOP.md](../../docs/DESKTOP.md).
 
 ## Architecture
 
@@ -30,25 +29,6 @@ flowchart TB
 Same Rust on both sides of the IPC bridge — no shell-out tax, the bootloader
 protocol code is reused directly. When a new adapter or a new opcode lands in
 `can-flasher`, Studio picks it up by a Cargo bump.
-
-## Tier roadmap
-
-Same shape as the VS Code extension's evolution.
-
-| Tier | Surface | Status |
-|---|---|---|
-| **0** | Adapters / Flash / Diagnostics / Live-data, persistent settings, native file pickers, Settings view | ✅ live (v0.1.0) |
-| **1** | Generic CAN bus monitor — live frame list, filter by ID, per-ID rate, pause, capture-to-file | ✅ live (v0.2.1) |
-| **2** | DBC file support — per-adapter DBC association, dedicated Signals view with live decoded values | ✅ live (v0.3.0); signal-trigger expressions deferred to v0.3.1 |
-| **3** | Frame transmitter — single-shot + cyclic + signal-triggered sends | 🔜 |
-| **4** | Record / replay sessions (candump format), multi-channel scope-style charts | 🔜 |
-
-Tier 0 wraps existing CLI capability. Tier 1 was the inflection where Studio
-became a real CAN tool — the bus monitor opens any of the five adapters in
-promiscuous mode and streams every frame to the UI, independent of the
-bootloader protocol. Tier 2 layered DBC decoding on top (per-adapter
-`.dbc` association, decoded signal stream, dedicated Signals view).
-Tier 3+ is on operator-feedback hold.
 
 ## Why Tauri
 
@@ -89,13 +69,13 @@ npm run tauri:dev          # opens the dev window, HMR for the frontend,
 
 ```bash
 npm run tauri:build        # produces a platform-native bundle in
-                           # src-tauri/target/release/bundle/
+                           # <repo root>/target/release/bundle/
 ```
 
 Outputs:
 - macOS: `bundle/macos/ISC MingoCAN.app` and `bundle/dmg/*.dmg`
 - Linux: `bundle/deb/*.deb`, `bundle/appimage/*.AppImage`, `bundle/rpm/*.rpm`
-- Windows: `bundle/msi/*.msi`, `bundle/nsis/*.exe`
+- Windows: `bundle/nsis/*.exe`
 
 ### Icon generation
 
@@ -144,7 +124,7 @@ artefact to one GitHub Release page.
 
 Studio's contribution to the release: a 3-platform matrix that produces
 the native bundles per OS — `.dmg` + `.app.tar.gz` (macOS), `.deb` +
-`.AppImage` + `.rpm` (Linux), `.msi` + `.exe` (Windows). The verify-version
+`.AppImage` + `.rpm` (Linux), `.exe` (NSIS, Windows). The verify-version
 gate at the start of the workflow checks Studio's three version-of-truth
 files (`src-tauri/Cargo.toml`, `package.json`, `src-tauri/tauri.conf.json`)
 against the pushed tag alongside the CLI's `Cargo.toml` and the VS Code
@@ -179,17 +159,26 @@ mindmap
         Sidebar.svelte
         AdaptersView.svelte
         FlashView.svelte
+        SwdFlashView.svelte
         DiagnosticsView.svelte
-        LiveDataView.svelte
         BusMonitorView.svelte
-        SignalsView.svelte
+        PitDiagView.svelte
+        DataLogsView.svelte
         SettingsView.svelte
+        AdapterStatusBar.svelte
+        NodeIdRolePicker.svelte
+        UpdateBanner.svelte
+        PlaceholderView.svelte
         settings.svelte.ts · persistent store + autosave
         flash.ts · flash command wrapper
         diagnose.ts · health / DTC wrappers
-        live_data.ts · live-data stream wrapper
         bus_monitor.ts · bus monitor + capture wrappers
         dbc.ts · DBC load + status + signals
+        pit_diag.ts · telemetry
+        logs.ts · data logs
+        swd.ts · SWD burn
+        provision.ts · node-id roles
+        updater.ts · self-update
         stores.ts · ViewId + VIEWS
         cli.ts / types.ts
     src-tauri/ — Rust backend (Tauri 2)
@@ -202,11 +191,14 @@ mindmap
         lib.rs · plugin + state registration
         flash.rs · flash + build-only commands
         diagnose.rs · health + DTC commands
-        live_data.rs · live-data stream task
+        pit_diag.rs · telemetry
+        logs.rs · LOGFS pull + decode
+        swd.rs · probe-rs burn/erase
+        provision.rs · node-id provisioning
         bus_monitor.rs · promiscuous capture + candump
         dbc.rs · can-dbc parse + bit decoder
 ```
 
 ## License
 
-MIT — see [LICENSE](../../LICENSE) at the repo root.
+MIT — declared in the crate manifests (`license = "MIT"`).
