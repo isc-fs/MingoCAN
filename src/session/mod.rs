@@ -190,6 +190,22 @@ pub enum SessionError {
     /// "garbled bus traffic".
     #[error("unexpected protocol frame: {0}")]
     Protocol(&'static str),
+
+    /// The target node has no known app-level reboot-to-bootloader
+    /// payload, so the host refuses to send a trigger: on the shared
+    /// bus another board's payload would reboot that other board.
+    /// Raised before anything is transmitted.
+    #[error(
+        "no known reboot-to-bootloader payload for node 0x{node:X}; refusing to send \
+         another board's trigger (it would reboot that board instead). Known: {}. \
+         To flash it anyway, put the board in its bootloader yourself (e.g. `send-raw \
+         0x002 <its 4-byte payload>`) and connect without the trigger (`flash \
+         --enter-bootloader never`; in the app, untick \"Reboot a running board into the \
+         bootloader\"). To support the node, add it to REBOOT_TO_BL_PAYLOADS in \
+         src/app_control.rs.",
+        crate::app_control::known_reboot_payloads()
+    )]
+    NoRebootTrigger { node: u8 },
 }
 
 /// Render the `CommandTimeout` error message. Split into a helper so
@@ -484,14 +500,14 @@ impl Session {
     /// frequently, and only re-send periodically to cover a genuinely
     /// dropped trigger.
     async fn reboot_and_connect(&self, window: Duration) -> Result<(u8, u8), SessionError> {
+        // Resolve the payload before sending anything: an unknown node is
+        // refused outright, never given another board's trigger.
+        let node = self.config.target_node;
+        let payload = reboot_to_bl_payload(node).ok_or(SessionError::NoRebootTrigger { node })?;
         let deadline = Instant::now() + window;
         let mut attempts: u32 = 0;
         loop {
-            self.send_app_frame(
-                REBOOT_TO_BL_ID,
-                &reboot_to_bl_payload(self.config.target_node),
-            )
-            .await?;
+            self.send_app_frame(REBOOT_TO_BL_ID, &payload).await?;
             let next_trigger = Instant::now() + BL_REBOOT_RETRIGGER_INTERVAL;
 
             // Probe CONNECT until it's time to re-send the trigger — or

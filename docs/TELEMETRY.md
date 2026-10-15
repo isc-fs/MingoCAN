@@ -32,8 +32,9 @@ The dedicated tabs show more than the cockpit does: firmware health, the
 inverter fault layers, per-cell detail. The cockpit is for watching; the tabs
 are for diagnosing.
 
-Arming is an explicit action on each tab. Until you arm, you're seeing the
-ungated health frame and nothing else — which is often all you need.
+Arming is an explicit action on each tab, and the app shows nothing until you
+arm. To read a board's always-on health frame *without* arming (send-silent),
+use `can-flasher pit-diag listen` or the VS Code extension's boards tree.
 
 ## Reading the ECU tab
 
@@ -85,7 +86,9 @@ is free; clearing DTCs is the one write, and it asks first.
 
 **Bus monitor** shows raw frames and decodes them into named signals when you
 load a `.dbc`. The DBC is remembered per adapter, keyed on interface + channel.
-Neither transmits.
+Both send something only when you press a button: Board health's Refresh /
+Read DTCs / Clear DTCs, and Bus monitor's ⚡ Activate telemetry (which arms the
+AMS and ECU streams). See [SAFETY.md](SAFETY.md).
 
 ---
 
@@ -106,13 +109,14 @@ transmit. Full flag reference:
 | Board | Arm ID | ACK ID | Stream range |
 |---|---|---|---|
 | AMS | `0x7F0` | `0x7F1` | `0x680`–`0x6CA` |
-| ECU | `0x7E0` | `0x7E1` | `0x700`–`0x708` |
-| uDV | `0x7DE` | `0x7DF` | `0x7A0`–`0x7A9` |
+| ECU | `0x7E0` | `0x7E1` | `0x700`–`0x70D` |
+| uDV | `0x7DE` | — (none) | `0x7A0`–`0x7A9` |
 
 The arm payload is `DE AD BE EF`; disarm is all zeros. An ACK whose first byte
 is anything other than `0x01` — including an empty payload — means **disabled**.
 `stream` disarms on exit including on Ctrl-C, and a board clears the flag on
-reboot if the tool dies first.
+reboot if the tool dies first. The uDV has no ACK and no disarm frame: once
+armed it streams until it reboots.
 
 ---
 

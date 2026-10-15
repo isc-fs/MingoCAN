@@ -142,7 +142,7 @@ const USB_PID_CANTACT: u16 = 0x6015;
 /// normaldotcom/canable-fw slcan build as shipped by **Protofusion
 /// Labs** (CANable 2.0 retail). Wire protocol is identical; only the
 /// USB descriptor differs from the canonical CANable. Discovered in
-/// the wild on an IFS08 dev bench; see fix/5-slcan-canable-forks.
+/// the wild on a dev bench; see fix/5-slcan-canable-forks.
 const USB_VID_PROTOFUSION_CANABLE: u16 = 0xAD50;
 const USB_PID_PROTOFUSION_CANABLE: u16 = 0x60C4;
 

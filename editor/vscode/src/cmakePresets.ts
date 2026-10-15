@@ -18,8 +18,7 @@
 //     uses its own default (generic `cmake -B build -S . &&
 //     cmake --build build`).
 //
-// Mirrors the same shape the Studio app's `read_cmake_presets`
-// Tauri command implements — see `apps/can-studio/src-tauri/src/flash.rs`.
+// Self-contained: the desktop app no longer reads CMake presets.
 //
 // Spec reference: https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html
 

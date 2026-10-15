@@ -12,7 +12,9 @@ Three things have to be true:
 1. **An adapter is selected** — the Adapters view, with a channel.
 2. **The bootloader is on the board.** Flash speaks the *bootloader* protocol.
    A never-programmed board has nothing listening on the bus; it needs
-   **Burn bootloader** over SWD first, exactly once in its life.
+   **Burn bootloader** over SWD first, exactly once in its life. The burn
+   always chip-erases: the application, the node-id and anything else stored
+   on the chip (e.g. pedal calibration) are wiped.
 3. **The build settings point at your firmware.** See
    [Build configuration](#build-configuration) below.
 
@@ -24,7 +26,8 @@ In the sidebar: **Program → Flash**.
    build command and the artifact path, so one control switches the whole build.
 2. Point at your **Build directory** — the firmware repo.
 3. Pick the **Target board** by role: ECU, AMS or uDV.
-4. Press **Flash**.
+4. Press **Build & Flash**. To reflash the artifact already on disk without
+   rebuilding, use **Flash (skip build)**.
 
 The app builds first, then flashes. Progress is per sector, and the log below
 the button is the same output the CLI prints.
@@ -56,8 +59,9 @@ A board running its *application* does not answer the bootloader's `CONNECT`.
 this: on a connect timeout, the host sends the app-level reboot trigger, waits
 for the bootloader to come up, and retries.
 
-> **That trigger opens the board's HV relays and then resets it.** On a car,
-> that is a real state change, not just a software reset. It is the correct
+> **That trigger resets the board into its bootloader — and the AMS opens its
+> HV relays first.** On a car, that is a real state change, not just a software
+> reset. It is the correct
 > thing to do before flashing — but it is a reason to be on stands.
 
 **The ECU can refuse.** If the car is in the drive ladder it declines the
@@ -67,7 +71,22 @@ and the refusal shows up on the ECU telemetry tab as
 power-cycle; forcing `--enter-bootloader always` will not help, because the
 refusal is the ECU's decision, not a missed trigger.
 
-To do it by hand from the CLI: `can-flasher send-raw 0x002 B0 07 AD 11`.
+**The uDV refuses outside AS OFF.** Resetting it fires the EBS, so it only
+honours the trigger with the autonomous system off. Turn the ASMS off first.
+
+To do it by hand from the CLI, the payload selects the board (all three share
+the ID):
+
+| Board | Node | Command |
+|---|---|---|
+| ECU | `0x1` | `can-flasher send-raw 0x002 B0 07 AD 12` |
+| AMS | `0x2` | `can-flasher send-raw 0x002 B0 07 AD 11` |
+| uDV | `0x3` | `can-flasher send-raw 0x002 B0 07 AD 13` |
+
+**Any other node-id is refused.** MingoCAN won't send a trigger it doesn't know
+for that board, because on the shared bus another board's payload reboots that
+other board. Put the board in its bootloader yourself, then flash with the
+reboot option off (`--enter-bootloader never`).
 
 ---
 
@@ -78,9 +97,9 @@ Set these once per firmware repo, in **Settings → Firmware build**.
 | Setting | Default | Notes |
 |---|---|---|
 | Build command | `cmake --build build --config {profile}` | Runs before flashing |
-| Build directory | *(empty)* | Where the command runs |
-| Artifact path | `build/{profile}/firmware.elf` | Relative to the build directory |
-| Build profile | `release` | Substituted for `{profile}` in both fields above |
+| Build working directory (Flash tab: Build directory) | *(empty → the artifact's folder)* | Where the build command runs |
+| Built firmware path | `build/{profile}/firmware.elf` | Use an **absolute** path. A relative path is not resolved against the build directory (only a repo's committed `iscFs.firmwareArtifact` is) |
+| Build profile (Flash tab) | Release | Substituted as `Release`/`Debug` for `{profile}` in both fields above |
 
 `{profile}` is substituted in **both** the command and the artifact path, so
 switching Release ↔ Debug on the Flash tab switches the whole build without
@@ -90,13 +109,21 @@ touching Settings.
 > generic CMake invocation, not a recommendation. If Flash fails immediately
 > with a build error, this is almost always why.
 
+> **A repo's committed config wins.** If the Build directory contains
+> `.vscode/settings.json` with `iscFs.buildCommand` and/or
+> `iscFs.firmwareArtifact` (the keys the VS Code extension uses), Flash uses
+> those instead of the Settings fields. A relative `iscFs.firmwareArtifact` is
+> resolved against that directory and is not `{profile}`-substituted. Settings →
+> Firmware build then shows *✓ Using committed config from …*. The target board
+> is never taken from the repo.
+
 ### Firmware formats
 
 | Format | Load address |
 |---|---|
 | `.elf` | Carried in the file |
 | `.hex` | Carried in the file |
-| `.bin` | **You must supply it** — a raw binary has no address of its own |
+| `.bin` | **CLI only** (`flash --address 0x08020000`). The app has no address field and rejects a `.bin` artifact |
 
 ---
 
@@ -108,7 +135,7 @@ No adapter selected. The Adapters view is the fix.
 
 ### "Set a firmware artifact path in Settings first."
 
-Settings → Firmware build → Artifact path.
+Settings → Firmware build → Built firmware path.
 
 ### The build fails before anything reaches the board
 
@@ -159,7 +186,8 @@ A board fresh off the bench is commissioned in **one SWD step**: the bootloader
 and its node ID go on together.
 
 - **App:** *Burn bootloader*, with **Provision node-id** set to the board's role.
-- **CLI:** `can-flasher swd-flash CAN_BL.elf --provision <role>` — see
+- **CLI:** `can-flasher swd-flash CAN_BL.elf --provision <role>` (needs a CLI
+  built with `--features swd`) — see
   [`swd-flash --provision`](CLI.md#swd-flash---provision-role0xn--burn-and-provision-in-one-step).
 
 The node ID is written as a provisioning seed that the bootloader adopts into

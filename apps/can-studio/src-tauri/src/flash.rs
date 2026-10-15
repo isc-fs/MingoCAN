@@ -48,7 +48,7 @@ pub struct FlashRequest {
     pub interface: String,
     pub channel: Option<String>,
     pub bitrate: u32,
-    /// Target node ID — `null` means broadcast to default 0x3.
+    /// Target node ID. Required: `null` is refused, like the CLI's flash (FMEA #271 G2).
     pub node_id: Option<u8>,
 
     /// Per-frame timeout in milliseconds.
@@ -187,9 +187,9 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
 
     let interface = parse_interface(&request.interface).map_err(|e| format!("interface: {e}"))?;
     let channel = request.channel.as_deref();
+    let target_node = require_target_node(request.node_id)?;
     let backend = open_backend(interface, channel, request.bitrate)
         .map_err(|e| format!("opening backend: {e}"))?;
-    let target_node = request.node_id.unwrap_or(0x3);
     let session = Session::attach(
         backend,
         SessionConfig {
@@ -250,132 +250,6 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
     let _ = session.disconnect().await;
 
     Ok((&report).into())
-}
-
-/// Run *only* the build step. Same shell semantics as the build
-/// phase of `flash` (login-shell on Unix so Homebrew PATH is
-/// visible, `cmd /c` on Windows), same `flash:event` build-line
-/// stream — but the IPC call returns the moment the build process
-/// exits, with no firmware load / no adapter open / no flashing.
-///
-/// Why it exists: configure-from-scratch CMake projects need to
-/// produce the `build/` directory + the artifact before flashing
-/// is even possible. Without a "build only" path, operators were
-/// forced to drop to a terminal for the very first run, which
-/// defeats the purpose of a desktop app.
-#[tauri::command]
-pub async fn build_only(
-    app: AppHandle,
-    command: String,
-    cwd: Option<String>,
-) -> Result<(), String> {
-    let cmd = command.trim();
-    if cmd.is_empty() {
-        return Err("build command is empty".into());
-    }
-    let cwd = match cwd.as_deref().map(str::trim) {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => PathBuf::from("."),
-    };
-    run_build(&app, cmd, cwd).await
-}
-
-// ---- CMake preset discovery ----
-
-/// A build preset that the operator can pick from a dropdown to
-/// fill the Build command + Firmware artifact fields in one click.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CmakePresetInfo {
-    /// Preset name as declared in `buildPresets[].name`.
-    pub name: String,
-    /// The build command we synthesise — runs both configure and
-    /// build for the named preset.
-    pub command: String,
-    /// Best-effort guess at where the .elf will land, based on the
-    /// configure preset's `binaryDir` (with `${sourceDir}` /
-    /// `${presetName}` expansion). Null when we can't tell.
-    pub artifact_hint: Option<String>,
-}
-
-/// Parse `CMakePresets.json` from the given directory (if present)
-/// and return the list of `buildPresets` so the frontend can offer
-/// them in a quick-fill dropdown.
-///
-/// Spec reference: <https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html>.
-/// We only need the fields needed to synthesise a one-click build
-/// command: `buildPresets[].name`, `buildPresets[].configurePreset`,
-/// and the chain of `configurePresets[].binaryDir` /
-/// `configurePresets[].inherits` to recover the build output path.
-#[tauri::command]
-pub fn read_cmake_presets(cwd: String) -> Result<Vec<CmakePresetInfo>, String> {
-    let cwd = cwd.trim();
-    if cwd.is_empty() {
-        return Ok(vec![]);
-    }
-    let path = PathBuf::from(cwd).join("CMakePresets.json");
-    if !path.is_file() {
-        return Ok(vec![]);
-    }
-
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read presets: {e}"))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("parse CMakePresets.json: {e}"))?;
-
-    let configure_presets: std::collections::HashMap<String, &serde_json::Value> = json
-        .get("configurePresets")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|p| {
-                    p.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|n| (n.to_string(), p))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let build_presets = match json.get("buildPresets").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Ok(vec![]),
-    };
-
-    let mut out = Vec::with_capacity(build_presets.len());
-    for bp in build_presets {
-        // Hidden presets (per the CMake spec) are scaffolding for
-        // inheritance — don't surface them in the picker.
-        if bp.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false) {
-            continue;
-        }
-        let name = match bp.get("name").and_then(|v| v.as_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let configure_preset = bp
-            .get("configurePreset")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&name)
-            .to_string();
-
-        let command = format!(
-            "cmake --preset {0} && cmake --build --preset {0}",
-            shell_quote_if_needed(&configure_preset)
-        );
-
-        let artifact_hint = resolve_binary_dir(&configure_presets, &configure_preset).map(|bd| {
-            bd.replace("${sourceDir}", cwd)
-                .replace("${presetName}", &configure_preset)
-        });
-
-        out.push(CmakePresetInfo {
-            name,
-            command,
-            artifact_hint,
-        });
-    }
-
-    Ok(out)
 }
 
 // ---- Committed per-repo flash config (`.vscode/settings.json`) ----
@@ -511,56 +385,6 @@ fn strip_jsonc_comments(input: &str) -> String {
     out
 }
 
-/// Walk the `inherits` chain to recover a configure preset's
-/// `binaryDir`. Returns None if it's not declared anywhere in the
-/// chain. We don't fully expand CMake's `${sourceDir}` /
-/// `${presetName}` macros here — the caller does that with the
-/// values it has.
-fn resolve_binary_dir(
-    configure_presets: &std::collections::HashMap<String, &serde_json::Value>,
-    name: &str,
-) -> Option<String> {
-    let mut current = configure_presets.get(name).copied()?;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    seen.insert(name.to_string());
-
-    loop {
-        if let Some(bd) = current.get("binaryDir").and_then(|v| v.as_str()) {
-            return Some(bd.to_string());
-        }
-        // Climb to the first inherited preset (CMake walks left-to-right,
-        // first match wins for fields not on the child).
-        let parent = current.get("inherits").and_then(|v| match v {
-            serde_json::Value::String(s) => Some(s.as_str()),
-            serde_json::Value::Array(arr) => arr.first().and_then(|x| x.as_str()),
-            _ => None,
-        })?;
-        if !seen.insert(parent.to_string()) {
-            // Cycle defence — malformed presets file.
-            return None;
-        }
-        current = configure_presets.get(parent).copied()?;
-    }
-}
-
-/// Light shell quoting for preset names that contain spaces or
-/// other characters that would otherwise need escaping. Preset
-/// names with shell metachars are pathological, but possible.
-fn shell_quote_if_needed(s: &str) -> String {
-    let needs_quote = s.chars().any(|c| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '"' | '\'' | '$' | '`' | '\\' | '|' | '&' | ';' | '<' | '>' | '(' | ')'
-            )
-    });
-    if !needs_quote {
-        s.to_string()
-    } else {
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-    }
-}
-
 // ---- Build step ----
 
 fn resolve_build_cwd(request: &FlashRequest) -> PathBuf {
@@ -679,6 +503,17 @@ async fn run_build(app: &AppHandle, command: &str, cwd: PathBuf) -> Result<(), S
     }
 }
 
+// ---- Target node ----
+
+/// Resolve the flash target. A missing node-id is refused rather than
+/// defaulted: guessing a board is how an operator flashes the wrong one.
+/// Mirrors the CLI's flash rule (FMEA #271 G2).
+fn require_target_node(node_id: Option<u8>) -> Result<u8, String> {
+    node_id.ok_or_else(|| {
+        "flash requires a target node-id (0x1 ECU, 0x2 AMS, 0x3 uDV); refusing to guess".into()
+    })
+}
+
 // ---- Interface parsing ----
 
 pub(crate) fn parse_interface(s: &str) -> Result<InterfaceType, String> {
@@ -695,6 +530,13 @@ pub(crate) fn parse_interface(s: &str) -> Result<InterfaceType, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flash_refuses_missing_node_id() {
+        let err = require_target_node(None).unwrap_err();
+        assert!(err.contains("target node-id"), "{err}");
+        assert_eq!(require_target_node(Some(0x2)), Ok(0x2));
+    }
 
     #[test]
     fn jsonc_strips_line_and_block_comments() {

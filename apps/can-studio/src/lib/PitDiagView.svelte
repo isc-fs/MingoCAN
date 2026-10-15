@@ -61,11 +61,7 @@
     }
     const { navigateTo }: Props = $props();
 
-    // Which ECU's pit-diag stream the view targets. Only AMS is wired
-    // end-to-end (arm handshake + 0x6C0..=0x6C8 frames). ECU / uDV are
-    // selectable so the view is "for the car", not AMS-only, but they
-    // render a placeholder until the firmware team defines a pit-diag
-    // stream + its frames in IFS08-DBCinator.
+    // Which board's pit-diag stream the view targets (AMS / ECU / uDV, or the All cockpit).
     const PROFILES: { id: PitDiagProfile; label: string }[] = [
         { id: 'all', label: 'All' },
         { id: 'ams', label: 'AMS' },
@@ -293,7 +289,7 @@
         return { shaftW, acW, accuA, dcW, motorEff: ratio(acW), totalEff: ratio(dcW) };
     });
 
-    // ---- uDV pit-diag snapshots (0x7A0..=0x7A4) ----
+    // ---- uDV pit-diag snapshots (0x7A0..=0x7A9) ----
     interface UdvStatusSnapshot {
         asState: string;
         signals: number;
@@ -1285,7 +1281,7 @@
                     ECU observer mode. Arming emits <code>0x7E0#DEADBEEF</code>;
                     the ECU replies on <code>0x7E1</code> and streams APPS,
                     brake, FSM, and inverter telemetry at 10 Hz
-                    (<code>0x700..=0x705</code>). Disarm sends the zero-payload
+                    (<code>0x700..=0x70D</code>). Disarm sends the zero-payload
                     frame; firmware also clears the flag on reboot.
                 </p>
             {:else}
@@ -1293,7 +1289,7 @@
                     uDV observer mode. Arming emits <code>0x7DE#DEADBEEF</code>
                     (sticky — no ACK, no disarm; the firmware clears it on
                     reboot); the uDV then streams AS state, RES, the /dv pipe,
-                    and health at ~10 Hz (<code>0x7A0..=0x7A4</code>).
+                    and health at ~10 Hz (<code>0x7A0..=0x7A9</code>).
                 </p>
             {/if}
         </div>

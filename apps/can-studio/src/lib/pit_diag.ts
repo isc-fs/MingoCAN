@@ -641,25 +641,6 @@ export function onPitDiagStatus(
 // ---- Display helpers ----
 
 /**
- * Snap a cell's index to its (module, slot-within-module) coords.
- * Module 0 = cells 0..18, module 1 = cells 19..37, etc.
- */
-export function cellCoords(cellIdx: number): { module: number; slot: number } {
-    return {
-        module: Math.floor(cellIdx / AMS_CELLS_PER_MODULE),
-        slot: cellIdx % AMS_CELLS_PER_MODULE,
-    };
-}
-
-/** Same idea for NTCs. */
-export function ntcCoords(ntcIdx: number): { module: number; slot: number } {
-    return {
-        module: Math.floor(ntcIdx / AMS_NTC_PER_MODULE),
-        slot: ntcIdx % AMS_NTC_PER_MODULE,
-    };
-}
-
-/**
  * Pack the four-element voltage tuple from a CellVoltage frame back
  * into the pack-wide array, skipping the sentinel. Returns the
  * cells actually written (1..=4) so the caller can update its

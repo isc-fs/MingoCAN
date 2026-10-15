@@ -148,7 +148,7 @@ pub enum Command {
     /// types the role, the host fills in the number.
     Provision(provision::ProvisionArgs),
 
-    /// List / pull the microSD data logs off a node over CAN
+    /// List / pull the microSD data logs off a node over CAN, and decode .BIN logs to CSV
     Logs(logs::LogsArgs),
 
     /// Telemetry observer (AMS / ECU / uDV) — `listen` passively, or
@@ -202,7 +202,7 @@ pub struct GlobalFlags {
     #[arg(long = "json", default_value_t = false, global = true)]
     pub json: bool,
 
-    /// Append session to audit log (SQLite)
+    /// Audit log path (accepted but currently ignored — not implemented)
     #[arg(long = "log", global = true)]
     pub log_path: Option<PathBuf>,
 
@@ -210,7 +210,7 @@ pub struct GlobalFlags {
     #[arg(long = "verbose", default_value_t = false, global = true)]
     pub verbose: bool,
 
-    /// Override operator name in audit log
+    /// Operator name for the audit log (accepted but currently ignored)
     #[arg(long = "operator", global = true)]
     pub operator: Option<String>,
 }

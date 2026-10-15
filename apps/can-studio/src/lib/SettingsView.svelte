@@ -3,13 +3,12 @@
     that's also editable in the workflow views.
 
     All fields here read/write the same `settings.*` store as the
-    Flash + Live-data views, so changes here flow to those views
+    Flash and Diagnostics views, so changes here flow to those views
     automatically and vice versa (via the autosave $effect in
     App.svelte). The view exists because some fields don't belong
     to any single workflow:
 
       - Bitrate / nodeId / frame timeout (applied to every CAN op)
-      - Live-data defaults (rate + window) for new sessions
       - About info (version, settings-file path)
 
     Adapter selection itself stays in the Adapters view — this view
@@ -256,16 +255,16 @@
             <h3>Bus parameters</h3>
         </div>
         <p class="muted small section-hint">
-            Applied to every flash, discover, diagnose, and live-data call.
+            Applied to every flash, discover, diagnose, bus-monitor and pit-diag call. (Data logs keeps its own board choice.)
         </p>
         <div class="field">
             <span class="field-label">Default target board</span>
             <NodeIdRolePicker bind:value={settings.adapter.nodeId} />
             <p class="muted small">
-                Default node-id for every flash / diagnose / live-data call.
+                Default node-id for every flash / diagnose call.
                 ECU and AMS use different reboot-to-bootloader magic, so the
-                role must match the board; the Flash tab can override it per
-                run.
+                role must match the board. The Flash tab's Target board is the
+                same setting — changing it there changes it here too.
             </p>
         </div>
         <div class="grid-two">
@@ -310,8 +309,7 @@
                 ✓ Using committed config from
                 <code>{repoFlashConfig.source}</code>. The Build directory's
                 repo defines
-                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && repoFlashConfig.artifactPath}
-                    and {/if}{#if repoFlashConfig.artifactPath}<code
+                {#if repoFlashConfig.buildCommand}<code>buildCommand</code>{/if}{#if repoFlashConfig.buildCommand && repoFlashConfig.artifactPath}{' '}and{' '}{/if}{#if repoFlashConfig.artifactPath}<code
                         >firmwareArtifact</code
                     >{/if}
                 — used when flashing, so every developer builds this repo the

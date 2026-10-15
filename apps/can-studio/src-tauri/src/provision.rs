@@ -1,5 +1,5 @@
-// Tauri command for the Flash tab's "provision after flash"
-// toggle. Mirrors the wire shape of the CLI's NVM_WRITE + CMD_RESET
+// Tauri command behind the Flash tab's post-flash "provision as <role>"
+// prompt. Mirrors the wire shape of the CLI's NVM_WRITE + CMD_RESET
 // flow exactly — same session connect → write → reset → disconnect
 // dance, same Bootloader reset mode so the board comes back up in
 // the BL with the new node-id resolved from NVM.
@@ -51,8 +51,7 @@ pub struct ProvisionRequest {
     pub interface: String,
     pub channel: Option<String>,
     pub bitrate: u32,
-    /// Target node id. `None` means use the session default
-    /// (0x3, broadcast-ish for the current bus layout). Operators
+    /// Target node id. `None` falls back to 0x3 (uDV). Operators
     /// re-provisioning an already-numbered board pass its current
     /// id so the session reaches the right device.
     pub node_id: Option<u8>,

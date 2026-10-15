@@ -31,8 +31,7 @@ export interface SignalSchema {
 
 export type DbcStatusEvent =
     | { kind: 'loaded'; path: string; messageCount: number; signalCount: number }
-    | { kind: 'unloaded' }
-    | { kind: 'error'; message: string };
+    | { kind: 'unloaded' };
 
 // ---- Live decoded values ----
 

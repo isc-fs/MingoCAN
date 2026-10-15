@@ -134,8 +134,8 @@ pub trait CanBackend: Send + Sync {
         false
     }
 
-    /// Human-readable description used in logs and the audit-log
-    /// row. Example: `"CANable 2.0 (USB 1d50:606f)"`.
+    /// Human-readable description used in logs, adapter lists and JSON
+    /// output. Example: `"CANable 2.0 (USB 1d50:606f)"`.
     fn description(&self) -> String;
 
     /// Monotonic count of adapter-reported errors since this backend

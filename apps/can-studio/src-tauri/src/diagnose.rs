@@ -135,17 +135,14 @@ pub async fn read_dtcs(request: DiagnoseRequest) -> Result<Vec<DtcSnapshot>, Str
         .map_err(|e| format!("send DTC_READ: {e}"))?;
     let _ = session.disconnect().await;
     match resp {
-        Response::Ack { payload, .. } => {
-            let mut entries: Vec<DtcSnapshot> = Vec::new();
-            let mut off = 0;
-            while off + DtcEntry::SIZE <= payload.len() {
-                let entry = DtcEntry::parse(&payload[off..off + DtcEntry::SIZE])
-                    .map_err(|e| format!("parse DtcEntry: {e}"))?;
-                entries.push((&entry).into());
-                off += DtcEntry::SIZE;
-            }
-            Ok(entries)
-        }
+        // The body is `[count_le16, entry_0, …]` — the shared parser
+        // reads the count first (it used to be read as part of entry 0
+        // here, shifting every row by two bytes).
+        Response::Ack { payload, .. } => Ok(DtcEntry::parse_list(&payload)
+            .map_err(|e| format!("parse DTC_READ: {e}"))?
+            .iter()
+            .map(DtcSnapshot::from)
+            .collect()),
         Response::Nack {
             rejected_opcode,
             code,

@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Close linked issues
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           # Live trigger context (empty on workflow_dispatch).
           PR_BODY:   ${{ github.event.pull_request.body }}

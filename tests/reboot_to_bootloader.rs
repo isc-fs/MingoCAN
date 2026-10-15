@@ -30,12 +30,20 @@ const WINDOW: Duration = Duration::from_secs(8);
 /// before it answers CONNECT. Caller drives the session, then drops
 /// `cancel` + awaits `handle` to tear the stub down.
 fn setup(reboots_needed: u32) -> (Session, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    setup_node(STUB_NODE, reboots_needed)
+}
+
+/// [`setup`] for an arbitrary node id (stub and session both target it).
+fn setup_node(
+    node: u8,
+    reboots_needed: u32,
+) -> (Session, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
     let bus = VirtualBus::new();
     let host = bus.host_backend();
     let device: Box<dyn CanBackend> = Box::new(bus.device_backend());
     drop(bus);
 
-    let mut stub = StubDevice::new(device, STUB_NODE);
+    let mut stub = StubDevice::new(device, node);
     stub.set_reboots_needed(reboots_needed);
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
@@ -43,7 +51,7 @@ fn setup(reboots_needed: u32) -> (Session, oneshot::Sender<()>, tokio::task::Joi
     });
 
     let config = SessionConfig {
-        target_node: STUB_NODE,
+        target_node: node,
         keepalive_interval: Duration::from_millis(250),
         // Deliberately huge (like the flash erase floor) to prove the
         // reboot poll loop uses its own short per-attempt timeout, not
@@ -117,4 +125,58 @@ async fn auto_gives_up_with_timeout_when_board_never_enters_bl() {
     );
     assert!(!session.is_connected());
     teardown(session, cancel, handle).await;
+}
+
+#[tokio::test]
+async fn auto_reboots_every_known_node_with_its_own_payload() {
+    // ECU 0x1, AMS 0x2, uDV 0x3: the stub only counts a trigger carrying
+    // ITS node's payload, so connecting proves the host sent the right one.
+    for node in [0x1_u8, 0x2, 0x3] {
+        let (session, cancel, handle) = setup_node(node, 1);
+        let res = session
+            .connect_entering_bootloader(BootloaderEntry::Auto, WINDOW)
+            .await;
+        assert!(
+            res.is_ok(),
+            "node 0x{node:X}: expected connect, got {res:?}"
+        );
+        teardown(session, cancel, handle).await;
+    }
+}
+
+#[tokio::test]
+async fn unknown_node_refuses_to_send_a_trigger() {
+    // Node 0x4 has no known payload. Both the auto fallback and an
+    // explicit `always` must refuse with NoRebootTrigger — never fall
+    // back to another board's payload (the old uDV → AMS bug).
+    for entry in [BootloaderEntry::Auto, BootloaderEntry::Always] {
+        let (session, cancel, handle) = setup_node(0x4, 1);
+        let err = session
+            .connect_entering_bootloader(entry, WINDOW)
+            .await
+            .expect_err("unknown node must not get a reboot trigger");
+        assert!(
+            matches!(err, SessionError::NoRebootTrigger { node: 0x4 }),
+            "{entry:?}: expected NoRebootTrigger, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("node 0x4"), "{msg}");
+        assert!(msg.contains("--enter-bootloader never"), "{msg}");
+        assert!(msg.contains("0x3 uDV (B0 07 AD 13)"), "{msg}");
+        assert!(!session.is_connected());
+        teardown(session, cancel, handle).await;
+    }
+}
+
+#[tokio::test]
+async fn unknown_node_already_in_bootloader_still_connects() {
+    // The refusal only applies when a trigger is needed: an unknown node
+    // already sitting in its bootloader answers the auto fast path, and
+    // `never` doesn't touch the trigger at all.
+    for entry in [BootloaderEntry::Auto, BootloaderEntry::Never] {
+        let (session, cancel, handle) = setup_node(0x4, 0);
+        let res = session.connect_entering_bootloader(entry, WINDOW).await;
+        assert!(res.is_ok(), "{entry:?}: expected connect, got {res:?}");
+        teardown(session, cancel, handle).await;
+    }
 }

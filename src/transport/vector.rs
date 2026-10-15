@@ -211,10 +211,18 @@ struct XLevent {
 // The XL API macro `XLAPI` expands to `__cdecl` on Windows, which
 // Rust spells `extern "C"`. On 64-bit Windows there is only one
 // calling convention for `extern "C"`, so this is unambiguous.
+//
+// Parameter names are copied from vxlapi.h (camelCase) so each alias
+// can be checked against the header line by line — hence the
+// `non_snake_case` allows.
 
+#[allow(non_snake_case)]
 type FnXlOpenDriver = unsafe extern "C" fn() -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlCloseDriver = unsafe extern "C" fn() -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlGetDriverConfig = unsafe extern "C" fn(pDriverConfig: *mut u8) -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlOpenPort = unsafe extern "C" fn(
     pPortHandle: *mut XLportHandle,
     userName: *const i8,
@@ -224,28 +232,35 @@ type FnXlOpenPort = unsafe extern "C" fn(
     xlInterfaceVersion: u32,
     busType: u32,
 ) -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlActivateChannel = unsafe extern "C" fn(
     portHandle: XLportHandle,
     accessMask: XLaccess,
     busType: u32,
     flags: u32,
 ) -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlDeactivateChannel =
     unsafe extern "C" fn(portHandle: XLportHandle, accessMask: XLaccess) -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlClosePort = unsafe extern "C" fn(portHandle: XLportHandle) -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlCanSetChannelBitrate =
     unsafe extern "C" fn(portHandle: XLportHandle, accessMask: XLaccess, bitrate: u32) -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlReceive = unsafe extern "C" fn(
     portHandle: XLportHandle,
     pEventCount: *mut u32,
     pEvents: *mut XLevent,
 ) -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlCanTransmit = unsafe extern "C" fn(
     portHandle: XLportHandle,
     accessMask: XLaccess,
     messageCount: *mut u32,
     pMessages: *mut XLevent,
 ) -> XLstatus;
+#[allow(non_snake_case)]
 type FnXlGetErrorString = unsafe extern "C" fn(err: XLstatus) -> *const i8;
 
 // ---- Loaded API ----
@@ -578,7 +593,7 @@ impl VectorBackend {
         // Open a port. We request init access (permission_mask = access_mask)
         // so we can set the bitrate; if another app holds the bus we get a
         // slave-only port and warn that the bitrate was not set.
-        let app_name = b"can-flasher\0".as_ptr() as *const i8;
+        let app_name = c"can-flasher".as_ptr();
         let mut port_handle: i64 = XL_INVALID_PORTHANDLE;
         let mut permission_mask: u64 = access_mask;
 

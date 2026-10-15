@@ -295,24 +295,7 @@ async fn run_read_dtc(global: &GlobalFlags) -> Result<()> {
         Response::Ack { payload, .. } => {
             // `Response::Ack.payload` has the opcode stripped; so
             // the record starts at byte 0: `[count_le16, entry_0, …]`.
-            if payload.len() < 2 {
-                bail!(
-                    "DTC_READ ACK too short: got {} bytes, need at least 2 for count",
-                    payload.len()
-                );
-            }
-            let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-            let mut entries = Vec::with_capacity(count);
-            for i in 0..count {
-                let off = 2 + i * DtcEntry::SIZE;
-                if off + DtcEntry::SIZE > payload.len() {
-                    bail!(
-                        "DTC_READ ACK truncated at entry {i}: payload has {} bytes",
-                        payload.len()
-                    );
-                }
-                entries.push(DtcEntry::parse(&payload[off..off + DtcEntry::SIZE])?);
-            }
+            let entries = DtcEntry::parse_list(&payload).context("parsing DTC_READ ACK")?;
             render_dtc_table(&entries, global.json)
         }
         Response::Nack {

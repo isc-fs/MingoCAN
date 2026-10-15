@@ -22,11 +22,6 @@ src-tauri/icons/128x128@2x.png
 src-tauri/icons/android/
 src-tauri/icons/ios/
 
-# Per-app npm lockfile. The workspace lockfile at the repo root is
-# the authoritative one; this one appears after `npm install` runs
-# inside the app dir.
-package-lock.json
-
 # Editor / OS noise
 .vscode/settings.json
 .DS_Store

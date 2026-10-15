@@ -6,7 +6,7 @@ install it in place, then relaunch. It uses the official
 
 ## How it works
 
-1. On launch (and from **Settings → Updates → Check for updates**) the
+1. On launch (and from **Settings → About → Check for updates**) the
    app fetches the update manifest from the endpoints in
    `apps/can-studio/src-tauri/tauri.conf.json` →
    `plugins.updater.endpoints` (tried in order):
@@ -39,9 +39,9 @@ Platform self-update support:
 
 | OS | Updater bundle | Notes |
 |----|----------------|-------|
-| macOS | `.app.tar.gz` (from the `.dmg`) | unsigned — see caveat below |
-| Windows | `.nsis.zip` (from the `.exe`) | |
-| Linux | `.AppImage.tar.gz` | **AppImage only** — the `.deb`/`.rpm` are owned by apt/dnf and can't self-update; run the AppImage build to get auto-update on Linux |
+| macOS | `.app.tar.gz` | unsigned — see caveat below |
+| Windows | the NSIS `_x64-setup.exe` itself (`.sig`) | |
+| Linux | the `.AppImage`, `.deb` or `.rpm` itself (`.sig`) | `.deb`/`.rpm` updates run `dpkg -i` / `rpm -U` and ask for admin rights (pkexec) |
 
 ## iskApps mirror — `ISKAPPS_TOKEN` secret (required)
 
@@ -51,17 +51,17 @@ as a `mingocan-vX.Y.Z` release and commits `mingocan/latest.json`
 (the same manifest, with its `url`s rewritten to the iskApps assets —
 signatures unchanged, so the baked-in pubkey still verifies).
 
-Actions' built-in `GITHUB_TOKEN` is scoped to can-flasher and **can't
+Actions' built-in `GITHUB_TOKEN` is scoped to MingoCAN and **can't
 write to iskApps**, so this needs a cross-repo token:
 
 - Create a fine-grained PAT (or GitHub App installation token) with
   **`contents: write`** on `isc-fs/iskapps`.
-- Add it to can-flasher as the repo secret **`ISKAPPS_TOKEN`**.
+- Add it to isc-fs/MingoCAN as the repo secret **`ISKAPPS_TOKEN`**.
 
 When the secret is absent the job no-ops (logs a warning, exits 0), so
 the release still succeeds — only the iskApps mirror is skipped.
 
-## One-time activation (required before the next release tag)
+## Updater signing key (already configured — for rotation only)
 
 The updater signs every bundle with a **minisign keypair** (separate
 from OS code-signing). The private key lives in CI secrets and must

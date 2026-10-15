@@ -4,23 +4,21 @@ This directory holds the reference target that our bench flow flashes,
 verifies, and jumps to end-to-end. Two artifacts live here:
 
 - **`MAIN_IFS08_DEMO/`** — full STM32CubeMX + CMake project source.
-  Compiles down to the app binary that `cf flash` deploys to the
+  Compiles down to the app binary that `can-flasher flash` deploys to the
   H733. Includes the FDCAN filter setup, the protocol-compliant
   `APP_HandleCanFrame` that accepts `send-raw`'s reboot-to-BL frame,
   and the minimal LED-toggling main loop that gives a visible "app
   is running" signal.
 - **`MAIN_IFS08_DEMO.bin`** — pre-built flat binary of the app, kept
-  alongside the source so a cold clone of `can-flasher` can exercise
+  alongside the source so a cold clone of `MingoCAN` can exercise
   the flash pipeline without the full STM32 toolchain. Rebuilt
   whenever the source changes; regenerate via the CMake flow below.
 
 ## Why the app source lives in the flasher repo
 
 The BL, the flasher, and the app all speak the same wire protocol;
-they have to stay in lockstep. Keeping the reference app here means a
-single PR can touch protocol wire-format + flasher + reference app
-together and our CI (once it grows an STM32-toolchain job) will
-fail-fast on any of the three drifting.
+they have to stay in lockstep. Keeping the reference app here lets one
+PR touch the wire format, the flasher and the reference app together.
 
 The real product application (private, hardware-specific) is not
 this one — it's in `IFS08_PRIVATE`. This demo is deliberately
@@ -55,7 +53,7 @@ payload[2] = opcode  (0x01 = APP_CMD_ENTER_BOOTLOADER)
 On receipt of `APP_CTRL / ENTER_BOOTLOADER`, the app writes the
 boot-request magic `0xB00710AD` to `RTC->BKP0R` and issues
 `NVIC_SystemReset()`. The bootloader sees the magic at power-on and
-stays in BL mode (auto-jump gated off), so the next `cf flash` just
+stays in BL mode (auto-jump gated off), so the next `can-flasher flash` just
 works without physical contact with the board.
 
 Any `msg_type` the app doesn't understand is silently dropped — the
@@ -79,19 +77,27 @@ cp build/MAIN_IFS08_DEMO.bin ../MAIN_IFS08_DEMO.bin  # update the checked-in pre
 
 ## Flashing
 
-From the `can-flasher` repo root:
+From the repo root:
 
 ```shell
 CHAN=$(ls /dev/cu.usbmodem* | head -1)
-cf --interface slcan --channel "$CHAN" --bitrate 500000 \
+can-flasher --interface slcan --channel "$CHAN" --bitrate 500000 \
    --node-id 0x1 --timeout 10000 \
    flash demo/MAIN_IFS08_DEMO.bin --address 0x08020000 --verify-after --jump
 ```
 
 ## Returning to bootloader (from a running app)
 
+The demo app implements the original ISO-TP `APP_CTRL` convention on
+`0x001`, not the `0x002` + per-node magic used by the production
+AMS/ECU apps ([docs/CLI.md § send-raw](../docs/CLI.md#send-raw--one-raw-frame)).
+`can-flasher flash`'s automatic reboot uses the latter — for node 0x1
+it sends `0x002` + `B0 07 AD 12` (`--enter-bootloader auto`), which
+the demo ignores — so with the demo app send this frame by hand
+before flashing:
+
 ```shell
-cf --interface slcan --channel "$CHAN" --bitrate 500000 \
+can-flasher --interface slcan --channel "$CHAN" --bitrate 500000 \
    send-raw 0x001 03 06 01
 # → frame: ID 0x001, PCI SF len=3, APP_CTRL(0x06), ENTER_BOOTLOADER(0x01)
 # → app ACKs on 0x011, resets, BL holds.

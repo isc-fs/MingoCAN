@@ -51,7 +51,7 @@ jobs:
       issues: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Both repos are public, so the default GITHUB_TOKEN can read the
       # ECU. No PAT to rotate.
@@ -107,7 +107,7 @@ jobs:
           grep -E '^[+-]BO_ ' drift.diff > msg-changes.txt || true
 
       - name: Sync the drift issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           DRIFTED: ${{ steps.diff.outputs.drifted }}
           AFFECTS_DECODER: ${{ steps.diff.outputs.affects_decoder }}

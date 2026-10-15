@@ -41,7 +41,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -375,11 +375,6 @@ fn hex_encode_spaced(bytes: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-
-// `replay run` needs `Path` — quiet clippy about the unused import
-// on some configurations.
-#[allow(dead_code)]
-fn _silence_path_warning(_: &Path) {}
 
 #[cfg(test)]
 mod tests {
