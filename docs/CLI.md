@@ -164,8 +164,13 @@ can-flasher --json --interface virtual \
 > retries. `always` sends it up front; `never` fails instead.
 >
 > **That trigger resets the board into its bootloader; the AMS opens its HV
-> relays first.** By hand — the payload selects the board: `can-flasher send-raw
-> 0x002 B0 07 AD 11` (AMS) or `… B0 07 AD 12` (ECU).
+> relays first.** The payload selects the board — ECU `0x1` `B0 07 AD 12`, AMS
+> `0x2` `B0 07 AD 11`, uDV `0x3` `B0 07 AD 13` (the uDV honours it only in
+> AS OFF). By hand: `can-flasher send-raw 0x002 B0 07 AD 11` (AMS).
+>
+> **A node-id with no known payload is refused**, not guessed: on the shared
+> bus another board's payload would reboot that board. Put such a board in its
+> bootloader yourself and flash with `--enter-bootloader never`.
 
 Full guide, including what to do when it fails: [FLASHING.md](FLASHING.md).
 
@@ -366,7 +371,7 @@ The generic escape hatch: app-level commands, bench probes, anything the
 protocol layer doesn't model.
 
 ```bash
-can-flasher … send-raw 0x002 B0 07 AD 11    # AMS app → bootloader (ECU: … AD 12)
+can-flasher … send-raw 0x002 B0 07 AD 11    # AMS app → bootloader (ECU: … AD 12, uDV: … AD 13)
 ```
 
 ## `replay` — record and read sessions

@@ -71,9 +71,22 @@ and the refusal shows up on the ECU telemetry tab as
 power-cycle; forcing `--enter-bootloader always` will not help, because the
 refusal is the ECU's decision, not a missed trigger.
 
-To do it by hand from the CLI, the payload selects the board (AMS and ECU share
-the ID): `can-flasher send-raw 0x002 B0 07 AD 11` for the AMS,
-`can-flasher send-raw 0x002 B0 07 AD 12` for the ECU.
+**The uDV refuses outside AS OFF.** Resetting it fires the EBS, so it only
+honours the trigger with the autonomous system off. Turn the ASMS off first.
+
+To do it by hand from the CLI, the payload selects the board (all three share
+the ID):
+
+| Board | Node | Command |
+|---|---|---|
+| ECU | `0x1` | `can-flasher send-raw 0x002 B0 07 AD 12` |
+| AMS | `0x2` | `can-flasher send-raw 0x002 B0 07 AD 11` |
+| uDV | `0x3` | `can-flasher send-raw 0x002 B0 07 AD 13` |
+
+**Any other node-id is refused.** MingoCAN won't send a trigger it doesn't know
+for that board, because on the shared bus another board's payload reboots that
+other board. Put the board in its bootloader yourself, then flash with the
+reboot option off (`--enter-bootloader never`).
 
 ---
 

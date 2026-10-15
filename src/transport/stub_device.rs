@@ -387,9 +387,10 @@ impl StubDevice {
         // real BL never sees it — it's the app that resets on a match —
         // but the stub uses it to model the running-app → bootloader
         // transition for the host's reboot-and-connect poll loop. The
-        // payload is per-node (ECU ≠ AMS), so match this stub's own.
+        // payload is per-node (ECU ≠ AMS ≠ uDV), so match this stub's own.
         if frame.id == crate::app_control::REBOOT_TO_BL_ID
-            && frame.payload() == crate::app_control::reboot_to_bl_payload(self.node_id)
+            && crate::app_control::reboot_to_bl_payload(self.node_id)
+                .is_some_and(|p| frame.payload() == p)
         {
             self.reboots_seen = self.reboots_seen.saturating_add(1);
             debug!(
