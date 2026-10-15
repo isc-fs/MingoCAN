@@ -122,7 +122,9 @@ pub struct FlashArgs {
     /// only if it times out send the app reboot-to-BL trigger, wait,
     /// and retry. `always`: send the trigger up front. `never`: don't
     /// — fail if the board isn't already in the bootloader. The
-    /// trigger opens the board's HV relays before it resets.
+    /// trigger is per node (ECU 0x1, AMS 0x2, uDV 0x3); any other
+    /// node-id is refused rather than sent another board's trigger.
+    /// The AMS opens its HV relays before it resets.
     #[arg(long = "enter-bootloader", value_enum, default_value_t = BootloaderEntry::Auto)]
     pub enter_bootloader: BootloaderEntry,
 }
@@ -197,6 +199,12 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         )
         .await
         .map_err(|e| {
+            // No known trigger for this node: nothing was sent, and the
+            // error already says how to proceed — don't append the
+            // "the host already tried the trigger" advice below.
+            if let SessionError::NoRebootTrigger { .. } = e {
+                return exit_err(ExitCodeHint::DeviceNotFound, format!("CONNECT failed: {e}"));
+            }
             exit_err(
                 ExitCodeHint::DeviceNotFound,
                 format!(
