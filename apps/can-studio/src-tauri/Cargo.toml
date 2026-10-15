@@ -1,6 +1,6 @@
 [package]
 name        = "can-studio"
-version     = "3.1.1"
+version     = "3.1.2"
 edition     = "2021"
 rust-version = "1.95"
 description = "ISC MingoCAN — desktop application for flashing, monitoring, and debugging CAN messages."
