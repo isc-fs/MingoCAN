@@ -21,11 +21,14 @@
 
     import {
         defaultSwdFlashArgs,
+        dfuFlash,
+        listDfuDevices,
         listSwdProbes,
         onSwdFlashEvent,
         swdErase,
         swdFetchBootloader,
         swdFlash,
+        type DfuDevice,
         type ProbeInfo,
         type SwdFlashArgs,
         type SwdFlashEvent,
@@ -52,6 +55,49 @@
     let probesError = $state<string | null>(null);
     let flashState = $state<FlashState>({ kind: 'idle' });
     let eraseState = $state<EraseState>({ kind: 'idle' });
+
+    // ---- Connection: ST-LINK over SWD, or the chip's own USB DFU ----
+    // DFU needs no probe: the STM32's ROM bootloader takes the image over
+    // USB (PA11/PA12) when BOOT0 is held high at reset (#645). Same burn,
+    // same verify / provisioning; the backend streams the same progress.
+    let connection = $state<'swd' | 'dfu'>('swd');
+    let dfuDevices = $state<DfuDevice[]>([]);
+    let dfuLoading = $state<boolean>(false);
+    let dfuError = $state<string | null>(null);
+    let dfuSerial = $state<string | null>(null);
+    const connLabel = $derived(connection === 'dfu' ? 'USB DFU' : 'SWD');
+
+    async function refreshDfu(): Promise<void> {
+        dfuLoading = true;
+        dfuError = null;
+        try {
+            dfuDevices = await listDfuDevices();
+            if (dfuDevices.length <= 1) dfuSerial = null;
+        } catch (err) {
+            dfuError = err instanceof Error ? err.message : String(err);
+        } finally {
+            dfuLoading = false;
+        }
+    }
+
+    function refresh(): void {
+        void (connection === 'dfu' ? refreshDfu() : refreshProbes());
+    }
+
+    function setConnection(c: 'swd' | 'dfu'): void {
+        if (c === connection) return;
+        connection = c;
+        flashState = { kind: 'idle' };
+        eraseState = { kind: 'idle' };
+        refresh();
+    }
+
+    /** The DFU device this burn will use (the only one, or the picked one). */
+    const dfuTarget = $derived(
+        dfuDevices.length === 1
+            ? dfuDevices[0]
+            : (dfuDevices.find((d) => d.serial !== null && d.serial === dfuSerial) ?? null),
+    );
 
     // ---- Provision over SWD, in the same burn ---------------------
     // The SWD burn writes the *bootloader* — the same binary on every
@@ -198,6 +244,23 @@
         try {
             // Snapshot the args at submit-time so a mid-flight edit
             // can't poison an in-progress write.
+            const provisionNodeId =
+                PROVISION_ROLES.find((r) => r.name === provisionRole)?.nodeId ?? null;
+            if (connection === 'dfu') {
+                const report = await dfuFlash({
+                    artifactPath: args.artifactPath.trim(),
+                    serial: dfuSerial,
+                    verify: args.verify,
+                    leave: args.resetAfter,
+                    provisionNodeId,
+                });
+                flashState = {
+                    kind: 'ok',
+                    durationMs: Math.round(performance.now() - startedAt),
+                    report,
+                };
+                return;
+            }
             const submitted: SwdFlashArgs = {
                 artifactPath: args.artifactPath.trim(),
                 chip: args.chip?.trim() || null,
@@ -205,8 +268,7 @@
                 base: args.base?.trim() || null,
                 verify: args.verify,
                 resetAfter: args.resetAfter,
-                provisionNodeId:
-                    PROVISION_ROLES.find((r) => r.name === provisionRole)?.nodeId ?? null,
+                provisionNodeId,
             };
             const report = await swdFlash(submitted);
             flashState = {
@@ -283,8 +345,9 @@
             <h2>Burn bootloader</h2>
             <p class="muted">
                 The team's CAN bootloader has to be programmed onto the
-                STM32H733 over SWD before any over-CAN flashing can work — a
-                bare chip can't yet speak the bootloader's wire protocol.
+                STM32H733 before any over-CAN flashing can work — a bare chip
+                can't yet speak the bootloader's wire protocol. Burn it with an
+                ST-LINK (SWD) or straight over the board's USB (DFU).
                 Burn it once when commissioning a new board; from then on,
                 every app update uses the <strong>Flash</strong> tab over CAN.
             </p>
@@ -292,15 +355,92 @@
         <button
             type="button"
             class="icon-btn"
-            onclick={refreshProbes}
-            disabled={probesLoading}
-            title="Re-enumerate attached probes"
-            aria-label="Refresh probes"
+            onclick={refresh}
+            disabled={probesLoading || dfuLoading || running}
+            title={connection === 'dfu' ? 'Look for boards in DFU mode' : 'Re-enumerate attached probes'}
+            aria-label="Refresh"
         >
-            {probesLoading ? '…' : '⟳'}
+            {probesLoading || dfuLoading ? '…' : '⟳'}
         </button>
     </header>
 
+    <section class="card">
+        <div class="card-header">
+            <h3>Connection</h3>
+        </div>
+        <div class="segmented" role="group" aria-label="Connection">
+            <button
+                type="button"
+                class="seg"
+                class:active={connection === 'swd'}
+                aria-pressed={connection === 'swd'}
+                disabled={running || erasing}
+                onclick={() => setConnection('swd')}
+            >
+                ST-LINK (SWD)
+            </button>
+            <button
+                type="button"
+                class="seg"
+                class:active={connection === 'dfu'}
+                aria-pressed={connection === 'dfu'}
+                disabled={running || erasing}
+                onclick={() => setConnection('dfu')}
+            >
+                USB (DFU)
+            </button>
+        </div>
+    </section>
+
+    {#if connection === 'dfu'}
+        <section class="card">
+            <div class="card-header">
+                <h3>Board in DFU mode</h3>
+            </div>
+            <ol class="dfu-steps small">
+                <li>Hold <strong>BOOT0</strong> high (jumper or button).</li>
+                <li>Connect the board's <strong>USB</strong> to this computer.</li>
+                <li>Reset or power-cycle the board, then press <strong>⟳</strong>.</li>
+            </ol>
+            {#if dfuError !== null}
+                <div class="banner banner-danger">
+                    <strong>Couldn't list USB devices:</strong>
+                    {dfuError}
+                </div>
+            {:else if dfuDevices.length === 0 && !dfuLoading}
+                <p class="empty muted">
+                    No board in DFU mode yet. On Windows, bind the
+                    <code>STM32 BOOTLOADER</code> device to WinUSB once with Zadig.
+                </p>
+            {:else if dfuDevices.length > 1}
+                <label class="field">
+                    <span>Board</span>
+                    <select bind:value={dfuSerial} disabled={running}>
+                        <option value={null}>(pick one)</option>
+                        {#each dfuDevices as d (d.serial ?? d.romVersion)}
+                            <option value={d.serial}>
+                                {d.serial ?? '(no serial)'} — {d.flash ?? 'layout unreadable'}
+                            </option>
+                        {/each}
+                    </select>
+                </label>
+            {/if}
+            {#if dfuTarget !== null}
+                <p class="single-probe">
+                    <span class="dot ok"></span>
+                    STM32 ROM bootloader v{dfuTarget.romVersion}
+                    {#if dfuTarget.serial}— {dfuTarget.serial}{/if}
+                    {#if dfuTarget.flash}· {dfuTarget.flash}{/if}
+                </p>
+                {#if dfuTarget.error}
+                    <div class="banner banner-warning small">
+                        <strong>Found it, but couldn't open it:</strong>
+                        {dfuTarget.error}
+                    </div>
+                {/if}
+            {/if}
+        </section>
+    {:else}
     <section class="card">
         <div class="card-header">
             <h3>Probe</h3>
@@ -338,6 +478,7 @@
             </p>
         {/if}
     </section>
+    {/if}
 
     <section class="card">
         <div class="card-header">
@@ -426,7 +567,7 @@
                 bind:checked={args.resetAfter}
                 disabled={running}
             />
-            <span>Reset target after flash</span>
+            <span>{connection === 'dfu' ? 'Start the bootloader when done' : 'Reset target after flash'}</span>
         </label>
 
         <hr class="divider" />
@@ -452,12 +593,12 @@
                 as node <code>0x1</code> — the stock bootloader's default, which is
                 the <strong>ECU's</strong> address — and collide with the ECU on a
                 shared bus until you give it an ID. Pick its role to set the
-                node-id over SWD in this burn.
+                node-id in this burn.
             </div>
         {:else}
             <p class="muted small">
                 This board will be provisioned as
-                <strong>{provisionRole.toUpperCase()}</strong> over SWD as part of
+                <strong>{provisionRole.toUpperCase()}</strong> over {connLabel} as part of
                 the burn{args.resetAfter
                     ? ''
                     : ' — with reset off, it takes the node-id on its next boot'}.
@@ -480,14 +621,16 @@
                 Burn bootloader
             {/if}
         </button>
-        <button
-            type="button"
-            class="btn btn-danger"
-            onclick={() => (eraseState = { kind: 'confirming' })}
-            disabled={running || erasing}
-        >
-            Erase chip
-        </button>
+        {#if connection === 'swd'}
+            <button
+                type="button"
+                class="btn btn-danger"
+                onclick={() => (eraseState = { kind: 'confirming' })}
+                disabled={running || erasing}
+            >
+                Erase chip
+            </button>
+        {/if}
     </div>
 
     {#if flashState.kind === 'running'}
@@ -513,7 +656,9 @@
             >
                 <div class="fill" style:width={pct !== null ? `${pct}%` : '100%'}></div>
             </div>
-            <p class="muted small no-margin">Don't unplug the probe.</p>
+            <p class="muted small no-margin">
+                {connection === 'dfu' ? "Don't unplug the USB cable." : "Don't unplug the probe."}
+            </p>
         </div>
     {:else if flashState.kind === 'ok'}
         <div class="banner banner-success">
@@ -522,8 +667,9 @@
                     .provisionedNodeId !== null}{' '}and provisioned as
                     <strong>{roleForNode(flashState.report.provisionedNodeId)}</strong>
                     (node 0x{flashState.report.provisionedNodeId.toString(16).toUpperCase()})
-                    over SWD{/if}. The chip is ready to be flashed over CAN from the
-                <strong>Flash</strong> tab.
+                    over {connLabel}{/if}. The chip is ready to be flashed over CAN from the
+                <strong>Flash</strong> tab.{#if connection === 'dfu'}{' '}Set
+                    <strong>BOOT0</strong> back low so the next reset doesn't re-enter DFU.{/if}
             </div>
             <!--
                 Verifiable fingerprint of what's on the chip. probe-rs
@@ -540,7 +686,7 @@
                 <dt>Verify</dt>
                 <dd>
                     {#if flashState.report.verified}
-                        ✓ probe-rs read-back compare
+                        ✓ {connection === 'dfu' ? 'USB' : 'probe-rs'} read-back compare
                     {:else}
                         ✗ skipped (--no-verify)
                     {/if}
@@ -609,6 +755,40 @@
          - single-probe dot indicator
          - inline spinner
     */
+
+    /* Connection switch — same segmented look as the role pickers. */
+    .segmented {
+        display: inline-flex;
+        gap: 2px;
+        padding: 2px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+    }
+    .seg {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        font: inherit;
+        font-size: var(--text-sm);
+        padding: var(--space-1) var(--space-4);
+        border-radius: calc(var(--radius-md) - 2px);
+        cursor: pointer;
+    }
+    .seg:hover:not(:disabled) {
+        color: var(--text);
+    }
+    .seg.active {
+        background: var(--accent);
+        color: var(--accent-contrast, #1a1a1a);
+        font-weight: 600;
+    }
+    .dfu-steps {
+        margin: 0 0 var(--space-2);
+        padding-left: var(--space-5);
+        color: var(--text-secondary);
+    }
 
     /* Input + right-side button row. Used by Artifact + Tag fields. */
     .input-row {

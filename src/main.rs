@@ -91,6 +91,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Adapters => cli::adapters::run(&cli.global).await,
         #[cfg(feature = "swd")]
         Command::SwdFlash(args) => cli::swd_flash::run(args, &cli.global).await,
+        #[cfg(feature = "swd")]
+        Command::DfuFlash(args) => cli::dfu_flash::run(args, &cli.global).await,
+        #[cfg(feature = "swd")]
+        Command::DfuList => cli::dfu_flash::run_list(&cli.global),
     }
 }
 

@@ -39,7 +39,7 @@ Adapters              ← pinned top; nothing else works until you pick one
 
 PROGRAM   (writes to the car)
   Flash                 Build & flash firmware over CAN
-  Burn bootloader       First-boot bootloader via SWD
+  Burn bootloader       First-boot bootloader via SWD or USB
 
 OBSERVE   (mostly listens)
   Board health          DTCs & session health

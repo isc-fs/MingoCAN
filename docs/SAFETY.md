@@ -43,12 +43,13 @@ running a corrupt app, and flashing again fixes it.
 exists for. The bootloader lives in a protected sector and an application flash
 cannot touch it — an image whose linker script tries is rejected with exit 3.
 
-## Bootloader burn (SWD)
+## Bootloader burn (SWD or USB DFU)
 
-**Burn bootloader** view · `can-flasher swd-flash`
+**Burn bootloader** view · `can-flasher swd-flash` · `can-flasher dfu-flash`
 
-First-boot only, over SWD rather than CAN. A blank board has nothing listening
-on the bus, so this is the only way in.
+First-boot only, over SWD or the board's own USB rather than CAN. A blank board
+has nothing listening on the bus, so this is the only way in. Both erase the
+whole flash first (the USB/DFU path always mass-erases).
 
 ## Chip erase (SWD)
 

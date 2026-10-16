@@ -12,7 +12,7 @@ Three things have to be true:
 1. **An adapter is selected** — the Adapters view, with a channel.
 2. **The bootloader is on the board.** Flash speaks the *bootloader* protocol.
    A never-programmed board has nothing listening on the bus; it needs
-   **Burn bootloader** over SWD first, exactly once in its life. The burn
+   **Burn bootloader** over SWD or USB first, exactly once in its life. The burn
    always chip-erases: the application, the node-id and anything else stored
    on the chip (e.g. pedal calibration) are wiped.
 3. **The build settings point at your firmware.** See
@@ -182,13 +182,16 @@ application flash.
 
 ## Commissioning a new board
 
-A board fresh off the bench is commissioned in **one SWD step**: the bootloader
-and its node ID go on together.
+A board fresh off the bench is commissioned in **one step**: the bootloader and
+its node ID go on together, over an ST-LINK (SWD) or the board's own USB (DFU).
 
-- **App:** *Burn bootloader*, with **Provision node-id** set to the board's role.
-- **CLI:** `can-flasher swd-flash CAN_BL.elf --provision <role>` (needs a CLI
+- **App:** *Burn bootloader* → pick the **Connection**, with **Provision
+  node-id** set to the board's role.
+- **CLI:** `can-flasher swd-flash CAN_BL.elf --provision <role>` or, with no
+  ST-LINK, `can-flasher dfu-flash CAN_BL.elf --provision <role>` (both need a CLI
   built with `--features swd`) — see
-  [`swd-flash --provision`](CLI.md#swd-flash---provision-role0xn--burn-and-provision-in-one-step).
+  [`swd-flash --provision`](CLI.md#swd-flash---provision-role0xn--burn-and-provision-in-one-step)
+  and [`dfu-flash`](CLI.md#dfu-flash--burn-over-usb-no-st-link).
 
 The node ID is written as a provisioning seed that the bootloader adopts into
 its NVM on first boot. This needs a bootloader built with seed support

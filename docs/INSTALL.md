@@ -212,6 +212,19 @@ which the release binaries do not enable — build with `--features swd`.
 | macOS | No driver needed — probe-rs claims the ST-LINK through IOKit/libusb. |
 | Windows | Run [Zadig](https://zadig.akeo.ie/) once: pick the **ST-Link Debug** interface, set the target driver to **WinUSB**, click **Replace Driver**. |
 
+### USB DFU (optional)
+
+The alternative to an ST-LINK: **Burn bootloader → USB (DFU)** / `dfu-flash`
+talk to the STM32's own ROM bootloader over the board's USB port. Put the board
+in DFU mode first (hold **BOOT0** high, then reset or power it with USB
+connected); it shows up as `STM32 BOOTLOADER`, USB `0483:DF11`.
+
+| OS | Setup |
+|---|---|
+| Linux | Add a udev rule so you don't need `sudo`: `SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="df11", MODE="0666"` in `/etc/udev/rules.d/50-stm32-dfu.rules`, then `sudo udevadm control --reload-rules && sudo udevadm trigger`. |
+| macOS | No driver needed. |
+| Windows | Run [Zadig](https://zadig.akeo.ie/) once with the board in DFU mode: pick **STM32 BOOTLOADER**, set the driver to **WinUSB**, click **Replace Driver**. |
+
 ---
 
 ## Check it worked
