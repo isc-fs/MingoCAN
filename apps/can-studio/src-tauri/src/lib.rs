@@ -92,6 +92,8 @@ pub fn run() {
             swd::swd_flash,
             swd::swd_fetch_bootloader,
             swd::swd_erase,
+            swd::dfu_list_devices,
+            swd::dfu_flash,
             provision::provision_node_id,
         ])
         .run(tauri::generate_context!())

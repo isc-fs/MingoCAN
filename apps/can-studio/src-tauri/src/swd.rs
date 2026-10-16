@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use can_flasher::bootloader_fetch::{self, BootloaderFormat};
+use can_flasher::dfu::{self, DfuFlashReport, DfuFlashRequest};
 use can_flasher::swd::{
     self, SwdEraseRequest, SwdFlashReport, SwdFlashRequest, SwdOperation, SwdProgress,
 };
@@ -287,6 +288,102 @@ pub async fn swd_erase(args: SwdEraseArgs) -> Result<(), String> {
 }
 
 // ---- Helpers ----
+
+// ---- USB DFU (#645) ----
+//
+// The same burn over the STM32 ROM's USB DFU instead of an ST-LINK. Reuses
+// the `swd-flash:event` progress stream, so the view's progress UI is
+// shared between the two connections.
+
+/// One STM32 waiting in DFU mode.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DfuDeviceDto {
+    pub serial: Option<String>,
+    /// ROM bootloader version, e.g. "2.0".
+    pub rom_version: String,
+    /// e.g. "1024 KiB at 0x08000000"; `None` if the layout couldn't be read.
+    pub flash: Option<String>,
+    /// A 1 MB H72x/73x — the only part node-id provisioning supports.
+    pub provisionable: bool,
+    /// Why the device couldn't be opened (e.g. no WinUSB driver on Windows).
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn dfu_list_devices() -> Result<Vec<DfuDeviceDto>, String> {
+    let devices = tokio::task::spawn_blocking(dfu::list_devices)
+        .await
+        .map_err(|e| format!("dfu-list task join: {e}"))?
+        .map_err(|e| e.to_string())?;
+    Ok(devices
+        .into_iter()
+        .map(|d| DfuDeviceDto {
+            serial: d.serial,
+            rom_version: format!("{:X}.{:X}", d.rom_version >> 8, d.rom_version & 0xFF),
+            flash: d
+                .flash
+                .as_ref()
+                .map(|l| format!("{} KiB at 0x{:08X}", l.size() / 1024, l.start)),
+            provisionable: d.flash.as_ref().is_some_and(|l| l.is_h72x_73x_1mb()),
+            error: d.open_error,
+        })
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DfuFlashArgs {
+    pub artifact_path: String,
+    pub serial: Option<String>,
+    pub verify: bool,
+    /// Leave DFU and start the bootloader when done.
+    pub leave: bool,
+    #[serde(default)]
+    pub provision_node_id: Option<u8>,
+}
+
+impl From<DfuFlashReport> for SwdFlashReportDto {
+    fn from(r: DfuFlashReport) -> Self {
+        Self {
+            verified: r.verified,
+            crc32_hex: format!("0x{:08X}", r.crc32),
+            size_bytes: r.size_bytes,
+            // No probe, no VTref over USB.
+            target_voltage_v: None,
+            provisioned_node_id: r.seeded_node_id,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn dfu_flash(app: AppHandle, args: DfuFlashArgs) -> Result<SwdFlashReportDto, String> {
+    let mut request = DfuFlashRequest::new(PathBuf::from(args.artifact_path));
+    request.serial = args.serial.filter(|s| !s.trim().is_empty());
+    request.verify = args.verify;
+    request.leave = args.leave;
+    request.seed_node_id = args.provision_node_id;
+
+    let (tx, rx) = mpsc::channel::<SwdStreamEvent>();
+    let flash_handle = tokio::task::spawn_blocking(move || {
+        dfu::flash_with_progress(&request, |progress| {
+            let _ = tx.send(progress.into());
+        })
+    });
+    let app_for_drain = app.clone();
+    let drain_handle = tokio::task::spawn_blocking(move || {
+        while let Ok(event) = rx.recv() {
+            let _ = app_for_drain.emit("swd-flash:event", &event);
+        }
+    });
+    let result = flash_handle
+        .await
+        .map_err(|e| format!("dfu-flash task join: {e}"))?;
+    let _ = drain_handle.await;
+    result
+        .map(SwdFlashReportDto::from)
+        .map_err(|e| e.to_string())
+}
 
 fn parse_hex_u64(s: &str) -> Option<u64> {
     let s = s.trim();

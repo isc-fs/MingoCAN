@@ -112,7 +112,7 @@ pub struct SwdFlashArgs {
 
 /// Resolve `--provision`: a role / firmware path (`ams`/`ecu`/`udv`)
 /// or a raw node-id (`0x1`..`0xE` / `1`..`14`).
-fn resolve_provision_node_id(raw: &str) -> Result<u8> {
+pub(super) fn resolve_provision_node_id(raw: &str) -> Result<u8> {
     if let Some((id, _src)) = super::provision::resolve_role_or_path(raw) {
         return Ok(id);
     }
@@ -235,7 +235,7 @@ fn format_report_line(report: &swd::SwdFlashReport) -> String {
     parts.join(" · ")
 }
 
-fn format_size(bytes: u64) -> String {
+pub(super) fn format_size(bytes: u64) -> String {
     if bytes >= 1_048_576 {
         format!("{:.2} MB", bytes as f64 / 1_048_576.0)
     } else if bytes >= 1_024 {
@@ -250,7 +250,7 @@ fn format_size(bytes: u64) -> String {
 /// asked us to pull from the BL release page (`--release`). Clap's
 /// `conflicts_with` already rejects "both"; we still have to
 /// handle "neither" here.
-async fn resolve_artifact(
+pub(super) async fn resolve_artifact(
     artifact: Option<PathBuf>,
     release: Option<&str>,
     format: BootloaderFormat,
@@ -300,7 +300,7 @@ async fn resolve_artifact(
 /// task finishes). Tearing the bar down ourselves means the
 /// caller doesn't have to coordinate cleanup, and a panic in the
 /// flash thread still leaves the terminal in a clean state.
-fn drive_progress_bar(rx: mpsc::Receiver<SwdProgress>) {
+pub(super) fn drive_progress_bar(rx: mpsc::Receiver<SwdProgress>) {
     let bar = ProgressBar::new(0);
     bar.set_style(
         ProgressStyle::with_template(
@@ -356,7 +356,7 @@ fn op_label(op: SwdOperation) -> &'static str {
     }
 }
 
-fn parse_format(s: &str) -> Result<BootloaderFormat, String> {
+pub(super) fn parse_format(s: &str) -> Result<BootloaderFormat, String> {
     match s.to_ascii_lowercase().as_str() {
         "elf" => Ok(BootloaderFormat::Elf),
         "hex" => Ok(BootloaderFormat::Hex),

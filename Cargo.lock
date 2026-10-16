@@ -438,6 +438,7 @@ dependencies = [
  "ihex",
  "indicatif",
  "libloading 0.8.9",
+ "nusb",
  "object 0.36.7",
  "probe-rs",
  "serde",

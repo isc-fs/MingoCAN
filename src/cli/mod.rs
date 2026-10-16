@@ -13,6 +13,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 pub mod adapters;
 pub mod config;
+#[cfg(feature = "swd")]
+pub mod dfu_flash;
 pub mod diagnose;
 pub mod discover;
 pub mod flash;
@@ -164,6 +166,16 @@ pub enum Command {
     /// that haven't run the CAN bootloader yet.
     #[cfg(feature = "swd")]
     SwdFlash(swd_flash::SwdFlashArgs),
+
+    /// (`--features swd`) Burn the bootloader over USB DFU — no
+    /// ST-LINK. The board must be in its ROM bootloader: hold BOOT0 high
+    /// and reset / power it with USB connected.
+    #[cfg(feature = "swd")]
+    DfuFlash(dfu_flash::DfuFlashArgs),
+
+    /// (`--features swd`) List STM32 boards waiting in USB DFU mode
+    #[cfg(feature = "swd")]
+    DfuList,
 }
 
 // ---- Shared global flags ----

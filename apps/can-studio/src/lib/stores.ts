@@ -57,7 +57,7 @@ export const VIEWS: ViewMeta[] = [
         label: 'Burn bootloader',
         status: 'live',
         section: 'program',
-        description: 'First-boot bootloader via SWD',
+        description: 'First-boot bootloader via SWD or USB',
     },
     {
         id: 'diagnostics',

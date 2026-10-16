@@ -16,7 +16,7 @@ Adapters              ← pinned top; start here
 
 PROGRAM   (writes to the car)
   Flash                 Build & flash firmware over CAN
-  Burn bootloader       First-boot bootloader via SWD
+  Burn bootloader       First-boot bootloader via SWD or USB
 
 OBSERVE   (mostly listens)
   Board health          DTCs & session health
@@ -102,15 +102,23 @@ skippable — routine reflashes don't need it.
 
 ### Burn bootloader
 
-First-boot only, over **SWD** rather than CAN. A board that has never been
-programmed has nothing listening on the bus, so this is the only way in.
+First-boot only, over **SWD** or the board's own **USB** rather than CAN. A
+board that has never been programmed has nothing listening on the bus, so this
+is the only way in.
 
-Three sections: **Probe** (the ST-LINK), **Firmware** (the bootloader image),
-and **Options**. Needs the ST-LINK setup from
-[INSTALL.md](INSTALL.md#st-link--swd-optional).
+Pick the **Connection** first:
+- **ST-LINK (SWD)** — sections **Probe** (the ST-LINK), **Firmware** and
+  **Options**. Needs the ST-LINK setup from
+  [INSTALL.md](INSTALL.md#st-link--swd-optional).
+- **USB (DFU)** — no probe: the STM32's ROM bootloader takes the image over USB.
+  Hold **BOOT0** high, connect USB, reset the board and press **⟳**; the
+  **Board in DFU mode** card shows it. The burn always mass-erases, so there's no
+  separate **Erase chip** here; **Start the bootloader when done** replaces
+  *Reset*. Set BOOT0 back low afterwards. Windows/Linux setup:
+  [INSTALL.md](INSTALL.md#usb-dfu-optional).
 
 Set **Provision node-id** to the board's role to commission it in the same
-burn: the node ID is written over SWD, no CAN adapter needed. This needs a
+burn: the node ID is written over SWD or USB, no CAN adapter needed. This needs a
 bootloader built with seed support; an older image is refused before anything
 is erased. Without a role, the board answers as **`0x01`** — the stock
 bootloader's default, which is the **ECU's** address — so on a shared bus it
