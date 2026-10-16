@@ -9,7 +9,7 @@ members = [
 
 [package]
 name        = "can-flasher"
-version     = "3.1.2"
+version     = "3.2.0"
 edition     = "2021"
 rust-version = "1.95"
 description = "Host-side CAN flasher for the isc-fs STM32 CAN bootloader"
@@ -50,6 +50,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # the desktop app (apps/can-studio) enables it.
 probe-rs           = { version = "0.31", optional = true }
 
+# Pure-Rust USB, for burning the bootloader over the STM32 ROM's USB DFU
+# (`dfu-flash`, #645) — no ST-LINK needed. Already in the tree through
+# probe-rs; pinned to the same 0.2 line so it isn't built twice.
+nusb               = { version = "0.2", optional = true }
+
 # Blocking HTTP client with bundled rustls TLS. Used by the
 # bootloader auto-download path (`--release` flag on `swd-flash`
 # + Studio's "Fetch from releases" toggle) to pull the right
@@ -75,7 +80,7 @@ default = []
 # database). Build with `cargo install … --features swd` or
 # `cargo build --features swd`. The CLI release archives are
 # built without it; the desktop app always enables it.
-swd = ["dep:probe-rs", "dep:ureq", "dep:dirs"]
+swd = ["dep:probe-rs", "dep:ureq", "dep:dirs", "dep:nusb"]
 
 [dev-dependencies]
 # Test-only: parse the vendored AMS DBC in the pit-diag conformance

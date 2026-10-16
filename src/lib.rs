@@ -12,6 +12,8 @@ pub mod app_control;
 #[cfg(feature = "swd")]
 pub mod bootloader_fetch;
 pub mod cli;
+#[cfg(feature = "swd")]
+pub mod dfu;
 pub mod firmware;
 pub mod flash;
 pub mod log_decode;

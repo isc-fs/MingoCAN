@@ -37,6 +37,7 @@ can-flasher [GLOBAL OPTIONS] <COMMAND> [ARGS]
 | [`send-raw`](#send-raw--one-raw-frame) | Send one raw CAN frame |
 | [`replay`](#replay--record-and-read-sessions) | Record or replay a CAN session |
 | `swd-flash` | First-boot a bare STM32 via ST-LINK *(opt-in: `--features swd`)* |
+| `dfu-flash` / `dfu-list` | First-boot a bare STM32 over its own USB (ROM DFU) — no ST-LINK *(opt-in: `--features swd`)* |
 
 ### Global options
 
@@ -67,7 +68,7 @@ no single default.
 | `logs list`, `logs pull` | **error** — the message names the flag, but the exit code is the catch-all **99** |
 | `verify`, `diagnose`, `config` | defaults to `0x3` |
 | `provision` | *target* defaults to `0x3`; the value *written* comes from the role argument |
-| `discover`, `pit-diag`, `replay`, `adapters`, `send-raw`, `logs decode`, `swd-flash` | not used — broadcast, passive, raw or offline |
+| `discover`, `pit-diag`, `replay`, `adapters`, `send-raw`, `logs decode`, `swd-flash`, `dfu-flash`, `dfu-list` | not used — broadcast, passive, raw or offline |
 
 Roles: ECU `0x01`, AMS `0x02`, uDV `0x03`. A board that has never been
 commissioned answers on the bootloader's compile-time default — **`0x01` for a
@@ -266,6 +267,35 @@ or a raw node ID `0x1`–`0xE`.
   program the neighbouring app-metadata word the bootloader later rewrites. It
   is then read back through the bootloader's own acceptance checks.
 - With `--no-reset` the board takes the node ID on its next boot.
+
+### `dfu-flash` — burn over USB, no ST-LINK
+
+The same burn as `swd-flash`, over the STM32's **own USB port** (USB_OTG_FS,
+PA11/PA12) using the chip's ROM bootloader in DFU mode. Put the board in DFU
+first: hold **BOOT0** high, then reset or power it with USB connected.
+
+```bash
+can-flasher dfu-list                                   # boards waiting in DFU mode
+can-flasher dfu-flash CAN_BL.elf --provision ams       # burn + set the node ID
+can-flasher dfu-flash --release --provision 0x2        # fetch the latest bootloader
+```
+
+| Flag | Meaning |
+|---|---|
+| `--release [TAG]` | Fetch the bootloader instead of a local file (cached, as for `swd-flash`) |
+| `--provision ROLE\|0xN` | Set the node ID in the same run — same rules and pre-checks as `swd-flash --provision` (bootloader v1.7.0+ `.elf`, 1 MB H72x/73x) |
+| `--serial S` | Pick a board when several are in DFU mode (`dfu-list` shows their serials) |
+| `--no-verify` | Skip the read-back CRC check (not recommended) |
+| `--no-leave` | Stay in DFU afterwards instead of starting the new bootloader |
+
+- It always **mass-erases** the flash first (bootloader, application, NVM).
+- The image is read back over USB and CRC-compared; a mismatch stops before the
+  board is started.
+- The provisioning seed is one 32-byte write at its reserved flash word, so no
+  neighbouring flash word is programmed (same guarantee as the SWD path).
+- Afterwards set **BOOT0** back low, or the next reset re-enters DFU.
+- Windows needs the WinUSB driver bound to the `STM32 BOOTLOADER` (`0483:DF11`)
+  device once — see [INSTALL.md](INSTALL.md#usb-dfu-optional).
 
 ## `logs` — pull microSD car-data logs
 

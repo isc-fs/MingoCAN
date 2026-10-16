@@ -129,3 +129,38 @@ export interface SwdEraseArgs {
 export function swdErase(args: SwdEraseArgs): Promise<void> {
     return invoke<void>('swd_erase', { args });
 }
+
+// ---- USB DFU (#645) ----
+// The same burn over the STM32 ROM's USB DFU instead of an ST-LINK. Progress
+// arrives on the same `swd-flash:event` stream, and the result has the same
+// shape as `swdFlash`'s (no VTref over USB).
+
+/** An STM32 waiting in USB DFU mode. */
+export interface DfuDevice {
+    serial: string | null;
+    /** ROM bootloader version, e.g. "2.0". */
+    romVersion: string;
+    /** e.g. "1024 KiB at 0x08000000"; null when the layout couldn't be read. */
+    flash: string | null;
+    /** A 1 MB STM32H72x/73x — the only part node-id provisioning supports. */
+    provisionable: boolean;
+    /** Why it couldn't be opened (e.g. no WinUSB driver on Windows). */
+    error: string | null;
+}
+
+export function listDfuDevices(): Promise<DfuDevice[]> {
+    return invoke<DfuDevice[]>('dfu_list_devices');
+}
+
+export interface DfuFlashArgs {
+    artifactPath: string;
+    serial: string | null;
+    verify: boolean;
+    /** Leave DFU and start the bootloader when done. */
+    leave: boolean;
+    provisionNodeId?: number | null;
+}
+
+export function dfuFlash(args: DfuFlashArgs): Promise<SwdFlashReport> {
+    return invoke<SwdFlashReport>('dfu_flash', { args });
+}
