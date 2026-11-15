@@ -93,7 +93,7 @@ pub async fn run(global: &GlobalFlags, args: &LogsArgs) -> Result<()> {
     match &args.command {
         LogsCommand::List => run_list(global).await,
         LogsCommand::Pull(p) => run_pull(global, p).await,
-        LogsCommand::Decode(d) => run_decode(d),
+        LogsCommand::Decode(d) => run_decode(global, d),
     }
 }
 
@@ -348,17 +348,24 @@ async fn run_list(global: &GlobalFlags) -> Result<()> {
 /// Orchestration (transport retry + mid-pull session recovery) lives in
 /// [`logfs_client::pull_file`], shared with the Studio Data logs view. The
 /// CLI is not interactive here, so it never cancels.
-async fn pull_one(session: &Session, entry: &LogEntry, verify: bool) -> Result<Vec<u8>> {
+async fn pull_one(
+    session: &Session,
+    entry: &LogEntry,
+    verify: bool,
+    show_progress: bool,
+) -> Result<Vec<u8>> {
     let name = entry.name.clone();
     let on_progress = move |received: u32, total: u32| {
-        if total > 0 {
+        if show_progress && total > 0 {
             let pct = (u64::from(received) * 100 / u64::from(total)).min(100);
             print!("\r  {name} … {pct:>3}% ({received}/{total} B)");
             let _ = std::io::stdout().flush();
         }
     };
     let result = logfs_client::pull_file(session, entry.index, verify, on_progress, || false).await;
-    println!();
+    if show_progress {
+        println!();
+    }
     let out = result.map_err(|e| anyhow::anyhow!("pulling {}: {e}", entry.name))?;
     if verify {
         debug!("crc verified");
@@ -387,15 +394,20 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
             ),
         };
         if selected.is_empty() {
-            println!("no log files on the card");
+            if global.json {
+                println!("[]");
+            } else {
+                println!("no log files on the card");
+            }
             return Ok(());
         }
 
         std::fs::create_dir_all(&args.out)
             .with_context(|| format!("creating output dir {}", args.out.display()))?;
 
+        let mut pulled = Vec::new();
         for e in selected {
-            let data = pull_one(&session, e, !args.no_verify).await?;
+            let data = pull_one(&session, e, !args.no_verify, !global.json).await?;
             let saved = if args.no_decode {
                 let path = log_decode::save_file(&args.out, &e.name, &data)
                     .with_context(|| format!("writing {} into {}", e.name, args.out.display()))?;
@@ -407,10 +419,23 @@ async fn run_pull(global: &GlobalFlags, args: &PullArgs) -> Result<()> {
                 log_decode::save_pulled(&args.out, &e.name, &data)
                     .with_context(|| format!("writing {} into {}", e.name, args.out.display()))?
             };
+            if global.json {
+                pulled.push(serde_json::json!({
+                    "index": e.index,
+                    "name": e.name,
+                    "sizeBytes": data.len(),
+                    "path": saved.path.display().to_string(),
+                    "decoded": decoded_json(saved.decoded),
+                }));
+                continue;
+            }
             println!("  saved {} ({} B)", saved.path.display(), data.len());
             if let Some(decoded) = saved.decoded {
                 report_decode(&saved.path, decoded);
             }
+        }
+        if global.json {
+            println!("{}", serde_json::Value::Array(pulled));
         }
         Ok(())
     }
@@ -443,17 +468,51 @@ fn report_decode(bin: &std::path::Path, decoded: Result<DecodedFile, String>) {
     }
 }
 
-fn run_decode(args: &DecodeArgs) -> Result<()> {
+/// `decoded` field of the `--json` pull report: the CSV, or why there is none.
+fn decoded_json(decoded: Option<Result<DecodedFile, String>>) -> serde_json::Value {
+    match decoded {
+        None => serde_json::Value::Null,
+        Some(Ok(d)) => serde_json::json!({
+            "csv": d.path.display().to_string(),
+            "records": d.records,
+            "tornBytes": d.torn_bytes,
+        }),
+        Some(Err(e)) => serde_json::json!({ "error": e }),
+    }
+}
+
+fn run_decode(global: &GlobalFlags, args: &DecodeArgs) -> Result<()> {
     let mut failed = 0usize;
+    let mut rows = Vec::new();
     for path in &args.files {
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("{}: {e}", path.display());
+                if global.json {
+                    rows.push(serde_json::json!({
+                        "file": path.display().to_string(),
+                        "error": e.to_string(),
+                    }));
+                } else {
+                    eprintln!("{}: {e}", path.display());
+                }
                 failed += 1;
                 continue;
             }
         };
+        if global.json {
+            let decoded = log_decode::decode_beside(path, &data)
+                .unwrap_or_else(|| Err("not an AMS binary log (no AMSBIN1 header)".to_string()));
+            if decoded.is_err() {
+                failed += 1;
+            }
+            let mut row = serde_json::json!({ "file": path.display().to_string() });
+            if let serde_json::Value::Object(extra) = decoded_json(Some(decoded)) {
+                row.as_object_mut().expect("object").extend(extra);
+            }
+            rows.push(row);
+            continue;
+        }
         match log_decode::decode_beside(path, &data) {
             None => {
                 eprintln!(
@@ -482,6 +541,9 @@ fn run_decode(args: &DecodeArgs) -> Result<()> {
                 failed += 1;
             }
         }
+    }
+    if global.json {
+        println!("{}", serde_json::Value::Array(rows));
     }
     if failed > 0 {
         bail!(
@@ -541,7 +603,9 @@ mod tests {
             .await
             .expect("app connect");
         let entries = list_all(&session).await.expect("list");
-        let got = pull_one(&session, &entries[0], true).await.expect("pull");
+        let got = pull_one(&session, &entries[0], true, false)
+            .await
+            .expect("pull");
         assert_eq!(got, payload, "retried reads reassemble the exact file");
 
         let _ = cancel_tx.send(());

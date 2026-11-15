@@ -444,6 +444,19 @@ per line for streaming subcommands. Schemas live in
 [REQUIREMENTS.md § Output and CI integration](../REQUIREMENTS.md#output-and-ci-integration),
 which is authoritative if anything here disagrees.
 
+With `--json`, progress bars and status lines are suppressed so stdout holds
+only the JSON. Failures still go to stderr with the usual exit code.
+
+| Command | Output (keys are camelCase) |
+|---|---|
+| `swd-flash` | `{status, via:"swd", artifact, chip, sizeBytes, crc32, verified, targetVoltageV, seededNodeId, reset}` |
+| `dfu-flash` | `{status, via:"dfu", artifact, serial, romVersion, sizeBytes, crc32, verified, seededNodeId, started}` |
+| `dfu-list` | `[{serial, product, romVersion, flashKib, flashStart, provisionable, error}]` |
+| `logs list` | `[{index, name, size, mtimeMonotonic}]` |
+| `logs pull` | `[{index, name, sizeBytes, path, decoded}]` — `decoded` is `{csv, records, tornBytes}`, `{error}`, or `null` for a non-binary log or `--no-decode` |
+| `logs decode` | `[{file, csv, records, tornBytes}]`, or `{file, error}` for a file that didn't decode (exit is non-zero if any did) |
+| `provision` | the `config nvm write` shape: `{status, key, bytes_written, reset}` |
+
 ## No hardware
 
 `--interface virtual` spins up an in-process stub bootloader. Good for CI and

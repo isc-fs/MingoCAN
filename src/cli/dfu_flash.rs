@@ -59,21 +59,26 @@ pub struct DfuFlashArgs {
     pub provision: Option<String>,
 }
 
-pub async fn run(args: DfuFlashArgs, _global: &GlobalFlags) -> Result<()> {
+pub async fn run(args: DfuFlashArgs, global: &GlobalFlags) -> Result<()> {
     let provision_id = args
         .provision
         .as_deref()
         .map(resolve_provision_node_id)
         .transpose()?;
-    let artifact_path =
-        resolve_artifact(args.artifact, args.release.as_deref(), args.release_format).await?;
+    let artifact_path = resolve_artifact(
+        args.artifact,
+        args.release.as_deref(),
+        args.release_format,
+        global.json,
+    )
+    .await?;
 
     let mut request = DfuFlashRequest::new(artifact_path);
     request.serial = args.serial;
     request.verify = !args.no_verify;
     request.leave = !args.no_leave;
     request.seed_node_id = provision_id;
-    if let Some(id) = provision_id {
+    if let (Some(id), false) = (provision_id, global.json) {
         println!("Will provision node-id 0x{id:X} in the same run.");
     }
 
@@ -84,7 +89,7 @@ pub async fn run(args: DfuFlashArgs, _global: &GlobalFlags) -> Result<()> {
             let _ = tx.send(p);
         })
     });
-    drive_progress_bar(rx);
+    drive_progress_bar(rx, !global.json);
     let report = handle
         .await
         .map_err(|e| anyhow!("dfu-flash task join: {e}"))?
@@ -100,6 +105,23 @@ pub async fn run(args: DfuFlashArgs, _global: &GlobalFlags) -> Result<()> {
             };
             exit_err(hint, anyhow!("{e}"))
         })?;
+
+    if global.json {
+        let json = serde_json::json!({
+            "status": "ok",
+            "via": "dfu",
+            "artifact": shown.artifact_path.display().to_string(),
+            "serial": report.serial,
+            "romVersion": format!("0x{:04X}", report.rom_version),
+            "sizeBytes": report.size_bytes,
+            "crc32": format!("0x{:08X}", report.crc32),
+            "verified": report.verified,
+            "seededNodeId": report.seeded_node_id,
+            "started": shown.leave,
+        });
+        println!("{json}");
+        return Ok(());
+    }
 
     println!(
         "✓ burned {} over USB DFU{}",

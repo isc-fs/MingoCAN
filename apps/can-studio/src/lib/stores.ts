@@ -7,9 +7,9 @@
 //     currently scoped to. Tier 0b's flash command will read this;
 //     Tier 0c's diagnostics commands too.
 //
-// Both are deliberately session-only for now. Tier 1.5 (or sooner)
-// adds disk persistence via `@tauri-apps/plugin-store` so a restart
-// remembers the operator's last choice.
+// Both are session state; the operator's saved defaults (adapter,
+// flash, logs, …) live in `settings.svelte.ts`, persisted to disk via
+// `@tauri-apps/plugin-store`.
 
 import type { AdapterEntry } from './types';
 

@@ -3,8 +3,7 @@
 //
 // All three are one-shot commands that emit a single JSON document
 // — perfect fit for the `runJson` helper in cli.ts. The streaming
-// `live-data` and `log` subcommands are deliberately not handled
-// here; those need a webview surface and ship in a follow-up.
+// `live-data` subcommand needs a webview and lives in liveData.ts.
 
 import * as vscode from 'vscode';
 

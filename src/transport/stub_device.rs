@@ -5,26 +5,26 @@
 //! behaviour to drive a full host-side pipeline through ISO-TP
 //! segmentation + reassembly + opcode dispatch without hardware.
 //!
-//! ## Implemented opcodes (feat/4 scope)
+//! ## Implemented opcodes
 //!
-//! - `CMD_CONNECT` — replies with ACK echoing the host's protocol
-//!   version, flips a local "session active" flag.
-//! - `CMD_DISCONNECT` — replies with ACK, clears the session flag.
-//! - `CMD_DISCOVER` — replies with `[CMD_DISCOVER, node_id, major,
-//!   minor]` as `TYPE=DISCOVER`.
+//! - Session: `CONNECT`, `DISCONNECT`, `DISCOVER`.
+//! - Diagnostics: `GET_HEALTH`, `DTC_READ`, `DTC_CLEAR`, `RESET`,
+//!   `JUMP`; `LOG_STREAM_*` / `LIVE_DATA_*` are ACKed (session-gated)
+//!   but stream nothing.
+//! - Flash: `FLASH_ERASE`, `FLASH_WRITE`, `FLASH_READ_CRC`,
+//!   `FLASH_VERIFY`, against an in-memory app region with the real
+//!   alignment rules.
+//! - Config: `OB_READ`, `OB_APPLY_WRP`, `NVM_READ`, `NVM_WRITE`,
+//!   `NVM_FORMAT`.
+//! - App control (`TYPE=APP_CTRL`): the `LOGFS_*` data-logger opcodes.
 //!
-//! Every other opcode earns `NACK(UNSUPPORTED)`. Later feat branches
-//! extend the stub as real subcommands land (feat/5 adds GET_HEALTH
-//! for the discover UI, feat/6 adds a flash pipeline, etc.).
+//! Anything else earns `NACK(UNSUPPORTED)`.
 //!
 //! ## What the stub doesn't model
 //!
 //! - 30 s session watchdog — the real bootloader drops a stale
 //!   session; the stub keeps the latch until `CMD_DISCONNECT`.
 //! - NOTIFY_HEARTBEAT / NOTIFY_LOG / NOTIFY_LIVE_DATA streams.
-//! - Flash programming of any kind.
-//!
-//! These land as the features that need them do.
 
 use std::collections::HashMap;
 use std::time::Duration;

@@ -1,0 +1,68 @@
+name: Audit
+
+# Supply-chain checks:
+#   - `cargo audit` against the RustSec advisory DB, for the whole
+#     workspace (CLI + desktop app share one Cargo.lock). Blocking;
+#     accepted exceptions live in .cargo/audit.toml with a reason each.
+#   - `npm audit` for the desktop app and the VS Code extension.
+#     Reported only (non-blocking) while we see what it turns up.
+#
+# Runs when a lockfile changes and weekly, so a new advisory against an
+# unchanged lockfile still surfaces.
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'Cargo.lock'
+      - '.cargo/audit.toml'
+      - 'apps/can-studio/package-lock.json'
+      - 'editor/vscode/package-lock.json'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - 'Cargo.lock'
+      - '.cargo/audit.toml'
+      - 'apps/can-studio/package-lock.json'
+      - 'editor/vscode/package-lock.json'
+      - '.github/workflows/audit.yml'
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  npm-audit:
+    name: npm audit (${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [apps/can-studio, editor/vscode]
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: npm audit --audit-level=high --omit=dev

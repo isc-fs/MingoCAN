@@ -119,3 +119,40 @@ async fn pulled_binary_logs_land_with_their_csv_and_csv_logs_are_untouched() {
     let _ = cancel.send(());
     let _ = handle.await;
 }
+
+/// `can-flasher --json logs decode` prints one JSON array, one row per
+/// input: the CSV and record count for a good log, an error for a bad one,
+/// and still exits non-zero when any file failed.
+#[test]
+fn logs_decode_json_reports_each_file() {
+    let dir = temp_dir("decode-json");
+    let good = dir.join("CEL0003.BIN");
+    let bad = dir.join("NOTALOG.BIN");
+    std::fs::write(&good, CEL_BIN).unwrap();
+    std::fs::write(&bad, b"definitely not a binary log").unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_can-flasher"))
+        .args(["--json", "logs", "decode"])
+        .arg(&good)
+        .arg(&bad)
+        .output()
+        .expect("run can-flasher");
+    assert!(
+        !out.status.success(),
+        "one file failed, so the exit is non-zero"
+    );
+
+    let rows: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is a single JSON document");
+    let rows = rows.as_array().expect("an array");
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0]["csv"].as_str().unwrap().ends_with("CEL0003.csv"));
+    let records = CEL_CSV.lines().count() - 1;
+    assert_eq!(rows[0]["records"], records);
+    assert!(rows[1]["error"]
+        .as_str()
+        .unwrap()
+        .contains("not an AMS binary log"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
