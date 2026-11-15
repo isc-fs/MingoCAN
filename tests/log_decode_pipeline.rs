@@ -137,7 +137,10 @@ fn logs_decode_json_reports_each_file() {
         .arg(&bad)
         .output()
         .expect("run can-flasher");
-    assert!(!out.status.success(), "one file failed, so the exit is non-zero");
+    assert!(
+        !out.status.success(),
+        "one file failed, so the exit is non-zero"
+    );
 
     let rows: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("stdout is a single JSON document");
@@ -146,7 +149,10 @@ fn logs_decode_json_reports_each_file() {
     assert!(rows[0]["csv"].as_str().unwrap().ends_with("CEL0003.csv"));
     let records = CEL_CSV.lines().count() - 1;
     assert_eq!(rows[0]["records"], records);
-    assert!(rows[1]["error"].as_str().unwrap().contains("not an AMS binary log"));
+    assert!(rows[1]["error"]
+        .as_str()
+        .unwrap()
+        .contains("not an AMS binary log"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
