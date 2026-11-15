@@ -19,7 +19,7 @@
 //!
 //! Host-side: callers build an [`Image`] via [`loader::load`], validate
 //! it fits the app region, and pass it to whichever consumer needs the
-//! numeric triple (today: `verify`; feat/17 will add `flash`).
+//! numeric triple (`verify` and `flash`).
 //!
 //! ## What this module does NOT do
 //!

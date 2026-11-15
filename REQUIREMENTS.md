@@ -1578,9 +1578,9 @@ the CAN protocol:
 
 The following host-side features are **intentionally out of scope
 for v1** and will be picked up if / when the bootloader reactivates
-Phase 5. Until then the flasher rejects the corresponding flags with
-a clear "not supported by this bootloader version" message — never a
-compile error, never a silent no-op.
+Phase 5. None of the flags or subcommands below exist in the CLI
+today — passing one fails as an unknown argument. They are listed so
+the wire surface and exit codes stay reserved.
 
 - **`sign` / `keygen` subcommands** — Ed25519 offline signing (tied
   to bootloader `feat/17-ed25519-sign`).

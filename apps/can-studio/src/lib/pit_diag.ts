@@ -50,18 +50,14 @@ export interface PitDiagRequest {
     channel: string | null;
     bitrate: number;
     /**
-     * Which ECU profile to arm. Only `"ams"` is implemented today —
-     * the AMS exposes a 0x7F0 arm handshake + the 0x6C0..=0x6C8
-     * stream. `"ecu"` / `"udv"` are selectable in the UI but have no
-     * pit-diag firmware/frames defined yet (the backend rejects them
-     * with a clean "not implemented" error), so the view shows a
-     * placeholder rather than arming.
+     * Which board(s) to arm: AMS (0x7F0 arm, 0x6C0..=0x6C8 stream),
+     * ECU (0x7E0 arm, 0x700..=0x705 stream), uDV (sticky arm, no
+     * ACK), or `"all"` (best-effort arm of every board).
      */
     profile: 'ams' | 'ecu' | 'udv' | 'all';
 }
 
-/** The ECU profiles the pit-diag view can target. Only `ams` is
- *  wired end-to-end; the others render a "not available yet" panel. */
+/** The board profiles the pit-diag view can target. */
 export type PitDiagProfile = PitDiagRequest['profile'];
 
 // ---- Streamed events ----

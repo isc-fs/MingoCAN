@@ -131,7 +131,7 @@ pub(super) fn resolve_provision_node_id(raw: &str) -> Result<u8> {
     }
 }
 
-pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
+pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
     // Resolve the node-id first: a typo should fail before any download
     // or probe I/O.
     let provision_id = args
@@ -150,8 +150,13 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
         )
     })?;
 
-    let artifact_path =
-        resolve_artifact(args.artifact, args.release.as_deref(), args.release_format).await?;
+    let artifact_path = resolve_artifact(
+        args.artifact,
+        args.release.as_deref(),
+        args.release_format,
+        global.json,
+    )
+    .await?;
 
     let mut request = SwdFlashRequest::new(artifact_path);
     request.chip = args.chip;
@@ -162,7 +167,9 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
     request.sector_erase_only = args.sector_erase;
     if let Some(id) = provision_id {
         request.seed_node_id = Some(id);
-        println!("Will provision node-id 0x{id:X} over SWD.");
+        if !global.json {
+            println!("Will provision node-id 0x{id:X} over SWD.");
+        }
     }
 
     // probe-rs is blocking; run on the blocking pool so the tokio
@@ -183,12 +190,29 @@ pub async fn run(args: SwdFlashArgs, _global: &GlobalFlags) -> Result<()> {
         })
     });
 
-    drive_progress_bar(rx);
+    drive_progress_bar(rx, !global.json);
 
     let report = flash_handle
         .await
         .map_err(|e| anyhow!("swd-flash task join: {e}"))?
         .map_err(|e| exit_err(ExitCodeHint::FlashError, anyhow!("{e}")))?;
+
+    if global.json {
+        let json = serde_json::json!({
+            "status": "ok",
+            "via": "swd",
+            "artifact": request_for_msg.artifact_path.display().to_string(),
+            "chip": request_for_msg.chip,
+            "sizeBytes": report.size_bytes,
+            "crc32": format!("0x{:08X}", report.crc32),
+            "verified": report.verified,
+            "targetVoltageV": report.target_voltage_v,
+            "seededNodeId": report.seeded_node_id,
+            "reset": request_for_msg.reset_after,
+        });
+        println!("{json}");
+        return Ok(());
+    }
 
     // Summary line + verifiable fingerprint. Format chosen so it's
     // easy to grep / paste into a bench log:
@@ -254,6 +278,7 @@ pub(super) async fn resolve_artifact(
     artifact: Option<PathBuf>,
     release: Option<&str>,
     format: BootloaderFormat,
+    json: bool,
 ) -> Result<PathBuf> {
     match (artifact, release) {
         (Some(path), _) => Ok(path),
@@ -272,7 +297,9 @@ pub(super) async fn resolve_artifact(
             .await
             .map_err(|e| anyhow!("bootloader-fetch task join: {e}"))?
             .map_err(|e| exit_err(ExitCodeHint::InputFileError, anyhow!("{e}")))?;
-            if cached.downloaded {
+            if json {
+                // Keep stdout a single JSON document.
+            } else if cached.downloaded {
                 println!(
                     "✓ downloaded {} from release {} to {}",
                     format.asset_name(),
@@ -300,7 +327,12 @@ pub(super) async fn resolve_artifact(
 /// task finishes). Tearing the bar down ourselves means the
 /// caller doesn't have to coordinate cleanup, and a panic in the
 /// flash thread still leaves the terminal in a clean state.
-pub(super) fn drive_progress_bar(rx: mpsc::Receiver<SwdProgress>) {
+pub(super) fn drive_progress_bar(rx: mpsc::Receiver<SwdProgress>, show: bool) {
+    if !show {
+        // `--json`: drain the channel so the worker never blocks, draw nothing.
+        while rx.recv().is_ok() {}
+        return;
+    }
     let bar = ProgressBar::new(0);
     bar.set_style(
         ProgressStyle::with_template(

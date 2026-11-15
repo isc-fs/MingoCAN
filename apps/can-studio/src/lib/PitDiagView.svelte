@@ -3275,7 +3275,7 @@
         font-weight: 600;
     }
 
-    /* Placeholder card for the not-yet-wired ECU / uDV profiles. */
+    /* Placeholder card shown until a board's first frame arrives. */
     .placeholder-card {
         display: flex;
         flex-direction: column;

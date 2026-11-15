@@ -1316,11 +1316,9 @@ pub async fn pit_diag_enable(
     state: State<'_, PitDiagState>,
     request: PitDiagRequest,
 ) -> Result<(), String> {
-    // Profile gate — AMS (0x7F0/0x6Cx) and ECU (0x7E0/0x70x) each have
-    // their own arm handshake + frame stream. uDV has no firmware
-    // protocol yet, so `parse` rejects it with a clean, typed message
-    // the view renders as its "not available yet" placeholder rather
-    // than attempting to arm.
+    // Profile gate — AMS (0x7F0/0x6Cx), ECU (0x7E0/0x70x) and uDV each
+    // have their own arm handshake + frame stream; `all` arms every
+    // board. Unknown strings get a clean, typed error.
     let profile = Profile::parse(&request.profile)?;
 
     // Idempotency — stop any prior session first. Mirrors bus_monitor.

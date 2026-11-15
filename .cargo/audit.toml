@@ -1,0 +1,24 @@
+# `cargo audit` config — CI runs it in .github/workflows/audit.yml.
+#
+# Every ignore below is a vulnerability in a transitive dependency that
+# no semver-compatible update fixes yet. Each one says who pulls it in
+# and why our use isn't exposed. Re-check on every dependency bump and
+# drop the entry as soon as `cargo update` can resolve it.
+
+[advisories]
+ignore = [
+    # ruzstd 0.8 — decompression bomb. Pulled in by probe-rs → object
+    # (zstd-compressed ELF sections). Only reached when the operator
+    # burns a local bootloader .elf they chose; no untrusted input.
+    "RUSTSEC-2026-0344",
+
+    # zip 4.x — four extraction flaws (symlinks, SUID bits, abort on
+    # large symlink). Pulled in by tauri-plugin-updater 2.10. The
+    # updater only extracts archives whose minisign signature checked
+    # out against our pinned public key, so an attacker can't supply
+    # the archive. Fixed by moving the updater to a release on zip 9+.
+    "RUSTSEC-2026-0429",
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]
