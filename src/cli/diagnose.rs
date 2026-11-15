@@ -384,6 +384,7 @@ fn render_dtc_table(entries: &[DtcEntry], json: bool) -> Result<()> {
 
 async fn run_clear_dtc(yes: bool, global: &GlobalFlags) -> Result<()> {
     if !yes && !confirm_prompt("This will clear every DTC entry on the device. Continue?") {
+        global.audit.cancel();
         bail!("cancelled");
     }
 

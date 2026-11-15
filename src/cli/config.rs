@@ -333,6 +333,7 @@ async fn run_ob_apply_wrp(
             global.node_id.unwrap_or(0x3)
         );
         if !confirm_prompt(&prompt) {
+            global.audit.cancel();
             bail!("cancelled");
         }
     }
@@ -621,6 +622,7 @@ async fn run_nvm_format(yes: bool, global: &GlobalFlags) -> Result<()> {
             global.node_id.unwrap_or(0x3)
         );
         if !confirm_prompt(&prompt) {
+            global.audit.cancel();
             bail!("cancelled");
         }
     }

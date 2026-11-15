@@ -59,7 +59,25 @@ pub struct ProvisionRequest {
 }
 
 #[tauri::command]
-pub async fn provision_node_id(request: ProvisionRequest) -> Result<(), String> {
+pub async fn provision_node_id(
+    app: tauri::AppHandle,
+    request: ProvisionRequest,
+) -> Result<(), String> {
+    let mut entry = crate::history::begin(&app, "provision");
+    let reached = request.node_id.unwrap_or(0x3);
+    crate::history::set_can(
+        &mut entry,
+        &request.interface,
+        request.channel.as_deref(),
+        role_to_node_id(&request.role),
+    );
+    entry.detail("previousNodeId", format!("0x{reached:X}"));
+    let result = provision_inner(&request).await;
+    crate::history::finish(entry, &result);
+    result
+}
+
+async fn provision_inner(request: &ProvisionRequest) -> Result<(), String> {
     let new_node_id = role_to_node_id(&request.role).ok_or_else(|| {
         format!(
             "unknown role {:?}; expected one of: ecu, ams, udv",

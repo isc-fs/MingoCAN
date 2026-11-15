@@ -158,13 +158,35 @@ const EVENT_NAME: &str = "flash:event";
 
 #[tauri::command]
 pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, String> {
+    // Flash log (#651): one entry per attempt, written success or not.
+    let mut entry = crate::history::begin(&app, "flash");
+    crate::history::set_can(
+        &mut entry,
+        &request.interface,
+        request.channel.as_deref(),
+        request.node_id,
+    );
+    entry.set_artifact(std::path::Path::new(&request.artifact_path));
+    entry.dry_run = request.dry_run;
+    let result = flash_inner(&app, &request, &mut entry).await;
+    crate::history::finish(entry, &result);
+    result
+}
+
+async fn flash_inner(
+    app: &AppHandle,
+    request: &FlashRequest,
+    log: &mut can_flasher::audit::Entry,
+) -> Result<JsonReport, String> {
     // ---- 1. Build step ----
 
     if let Some(cmd) = request.build_command.as_deref() {
         let cmd = cmd.trim();
         if !cmd.is_empty() {
-            let cwd = resolve_build_cwd(&request);
-            run_build(&app, cmd, cwd).await?;
+            let cwd = resolve_build_cwd(request);
+            run_build(app, cmd, cwd)
+                .await
+                .map_err(|e| format!("build failed: {e}"))?;
         }
     }
 
@@ -172,6 +194,7 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
 
     let path = PathBuf::from(&request.artifact_path);
     let image = loader::load(&path, None).map_err(|e| format!("load firmware: {e}"))?;
+    log.set_image(&image);
     image
         .validate_fits_app_region()
         .map_err(|e| format!("firmware doesn't fit app region: {e}"))?;
@@ -237,6 +260,10 @@ pub async fn flash(app: AppHandle, request: FlashRequest) -> Result<JsonReport, 
         .await
         .map_err(|e| format!("flash failed: {e}"))?;
     drop(forward_task); // event channel closed; forward task exits.
+    log.verified = (!request.dry_run).then_some(request.final_commit || request.verify_after);
+    log.detail("sectorsWritten", report.sectors_written.len());
+    log.detail("sectorsSkipped", report.sectors_skipped.len());
+    log.detail("jump", request.jump && !request.dry_run);
 
     // ---- 6. Optional JUMP ----
 

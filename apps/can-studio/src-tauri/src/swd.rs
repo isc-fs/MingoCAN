@@ -207,8 +207,51 @@ pub async fn swd_fetch_bootloader(tag: Option<String>) -> Result<FetchedBootload
     })
 }
 
+/// Flash-log entry for a bootloader burn, filled from the request.
+fn burn_entry(
+    app: &AppHandle,
+    action: &str,
+    artifact: &str,
+    serial: Option<&str>,
+    node_id: Option<u8>,
+) -> can_flasher::audit::Entry {
+    let mut entry = crate::history::begin(app, action);
+    entry.set_artifact(std::path::Path::new(artifact));
+    entry.device_serial = serial.map(str::to_string).filter(|s| !s.trim().is_empty());
+    if let Some(id) = node_id {
+        entry.set_node(id);
+    }
+    entry
+}
+
+/// Close a burn entry with its report (or error) and append it.
+fn finish_burn(mut entry: can_flasher::audit::Entry, result: &Result<SwdFlashReportDto, String>) {
+    if let Ok(r) = result {
+        entry.crc32 = Some(r.crc32_hex.clone());
+        entry.size_bytes = Some(r.size_bytes);
+        entry.verified = Some(r.verified);
+    }
+    crate::history::finish(entry, result);
+}
+
 #[tauri::command]
 pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<SwdFlashReportDto, String> {
+    let mut entry = burn_entry(
+        &app,
+        "swd-flash",
+        &args.artifact_path,
+        args.probe_serial.as_deref(),
+        args.provision_node_id,
+    );
+    if let Some(chip) = &args.chip {
+        entry.detail("chip", chip.clone());
+    }
+    let result = swd_flash_inner(app, args).await;
+    finish_burn(entry, &result);
+    result
+}
+
+async fn swd_flash_inner(app: AppHandle, args: SwdFlashArgs) -> Result<SwdFlashReportDto, String> {
     let base_addr = match args.base.as_deref().map(parse_hex_u64) {
         Some(Some(v)) => v,
         Some(None) => {
@@ -274,7 +317,18 @@ pub async fn swd_flash(app: AppHandle, args: SwdFlashArgs) -> Result<SwdFlashRep
 }
 
 #[tauri::command]
-pub async fn swd_erase(args: SwdEraseArgs) -> Result<(), String> {
+pub async fn swd_erase(app: AppHandle, args: SwdEraseArgs) -> Result<(), String> {
+    let mut entry = crate::history::begin(&app, "swd-erase");
+    entry.device_serial = args.probe_serial.clone();
+    if let Some(chip) = &args.chip {
+        entry.detail("chip", chip.clone());
+    }
+    let result = swd_erase_inner(args).await;
+    crate::history::finish(entry, &result);
+    result
+}
+
+async fn swd_erase_inner(args: SwdEraseArgs) -> Result<(), String> {
     let mut request = SwdEraseRequest::new();
     if let Some(chip) = args.chip {
         request.chip = chip;
@@ -358,6 +412,19 @@ impl From<DfuFlashReport> for SwdFlashReportDto {
 
 #[tauri::command]
 pub async fn dfu_flash(app: AppHandle, args: DfuFlashArgs) -> Result<SwdFlashReportDto, String> {
+    let entry = burn_entry(
+        &app,
+        "dfu-flash",
+        &args.artifact_path,
+        args.serial.as_deref(),
+        args.provision_node_id,
+    );
+    let result = dfu_flash_inner(app, args).await;
+    finish_burn(entry, &result);
+    result
+}
+
+async fn dfu_flash_inner(app: AppHandle, args: DfuFlashArgs) -> Result<SwdFlashReportDto, String> {
     let mut request = DfuFlashRequest::new(PathBuf::from(args.artifact_path));
     request.serial = args.serial.filter(|s| !s.trim().is_empty());
     request.verify = args.verify;

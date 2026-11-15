@@ -22,6 +22,13 @@ export interface Settings {
     busMonitor: BusMonitorSettings;
     dbc: DbcSettings;
     logs: LogsSettings;
+    history: HistorySettings;
+}
+
+export interface HistorySettings {
+    /** Name recorded in the flash history for this laptop's actions.
+     *  Empty = the OS user name. Read by the Rust side on every write. */
+    operator: string;
 }
 
 export interface AdapterSettings {
@@ -141,6 +148,9 @@ export function defaultSettings(): Settings {
             rootDir: '',
             dateFolders: true,
             kind: 'log',
+        },
+        history: {
+            operator: '',
         },
     };
 }

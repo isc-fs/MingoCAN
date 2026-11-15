@@ -349,6 +349,28 @@
         </div>
     </section>
 
+    <!-- Flash history (#651) -->
+    <section class="card">
+        <div class="card-header">
+            <h3>Flash history</h3>
+        </div>
+        <p class="muted small section-hint">
+            Every flash, bootloader burn and node-id change from this laptop is
+            recorded in Flash history, with this name. Leave it empty to use
+            the computer's user name.
+        </p>
+        <div class="field">
+            <label for="historyOperator">Operator name</label>
+            <input
+                id="historyOperator"
+                class="input"
+                type="text"
+                placeholder="(computer user name)"
+                bind:value={settings.history.operator}
+            />
+        </div>
+    </section>
+
     <!-- DBC files (per-adapter) -->
     <section class="card">
         <div class="card-header">
