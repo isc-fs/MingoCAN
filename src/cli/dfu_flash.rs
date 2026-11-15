@@ -73,6 +73,13 @@ pub async fn run(args: DfuFlashArgs, global: &GlobalFlags) -> Result<()> {
     )
     .await?;
 
+    global.audit.update(|e| {
+        e.set_artifact(&artifact_path);
+        if let Some(id) = provision_id {
+            e.set_node(id);
+        }
+    });
+
     let mut request = DfuFlashRequest::new(artifact_path);
     request.serial = args.serial;
     request.verify = !args.no_verify;
@@ -105,6 +112,14 @@ pub async fn run(args: DfuFlashArgs, global: &GlobalFlags) -> Result<()> {
             };
             exit_err(hint, anyhow!("{e}"))
         })?;
+
+    global.audit.update(|e| {
+        e.crc32 = Some(format!("0x{:08X}", report.crc32));
+        e.size_bytes = Some(report.size_bytes);
+        e.verified = Some(report.verified);
+        e.device_serial = report.serial.clone().or(e.device_serial.take());
+        e.detail("romVersion", format!("0x{:04X}", report.rom_version));
+    });
 
     if global.json {
         let json = serde_json::json!({

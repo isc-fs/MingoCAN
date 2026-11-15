@@ -156,8 +156,21 @@ pub async fn read_dtcs(request: DiagnoseRequest) -> Result<Vec<DtcSnapshot>, Str
 // ---- DTC clear ----
 
 #[tauri::command]
-pub async fn clear_dtcs(request: DiagnoseRequest) -> Result<(), String> {
-    let session = open_session(&request)?;
+pub async fn clear_dtcs(app: tauri::AppHandle, request: DiagnoseRequest) -> Result<(), String> {
+    let mut entry = crate::history::begin(&app, "clear-dtc");
+    crate::history::set_can(
+        &mut entry,
+        &request.interface,
+        request.channel.as_deref(),
+        Some(request.node_id.unwrap_or(0x3)),
+    );
+    let result = clear_dtcs_inner(&request).await;
+    crate::history::finish(entry, &result);
+    result
+}
+
+async fn clear_dtcs_inner(request: &DiagnoseRequest) -> Result<(), String> {
+    let session = open_session(request)?;
     session
         .connect()
         .await

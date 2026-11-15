@@ -62,7 +62,23 @@ fn main() -> ExitCode {
         }
     };
 
+    // Flash log (#651): commands that write to a board get an entry that
+    // the subcommand fills in and we write out below, success or not.
+    let audit_path = cli::audit_start(&cli.command, &cli.global).map(|(entry, path)| {
+        cli.global.audit.begin(entry);
+        path
+    });
+    let audit = cli.global.audit.clone();
+
     let result = runtime.block_on(run(cli));
+
+    if let (Some(path), Some(mut entry)) = (audit_path, audit.take()) {
+        match &result {
+            Ok(()) => entry.finish(None, None),
+            Err(err) => entry.finish(Some(format!("{err:#}")), Some(exit_code_of(err))),
+        }
+        can_flasher::audit::append_or_warn(&path, &entry);
+    }
 
     match result {
         Ok(()) => ExitCodeValue::Ok.into(),
@@ -71,7 +87,7 @@ fn main() -> ExitCode {
             // to attach progressively richer explanations as the call
             // stack deepens; printing the whole chain preserves that.
             eprintln!("error: {err:#}");
-            map_error_to_exit_code(&err)
+            ExitCode::from(exit_code_of(&err))
         }
     }
 }
@@ -103,11 +119,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 /// `GenericError` (99). This is how subcommands request a specific
 /// exit code without the CLI layer owning a per-subcommand error
 /// taxonomy.
-fn map_error_to_exit_code(err: &anyhow::Error) -> ExitCode {
+fn exit_code_of(err: &anyhow::Error) -> u8 {
     for cause in err.chain() {
         if let Some(hint) = cause.downcast_ref::<ExitCodeHint>() {
-            return ExitCode::from(hint.exit_code());
+            return hint.exit_code();
         }
     }
-    ExitCodeValue::GenericError.into()
+    ExitCodeValue::GenericError as u8
 }

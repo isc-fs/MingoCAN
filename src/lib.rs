@@ -9,6 +9,7 @@
 #![doc(html_root_url = "https://docs.rs/can-flasher")]
 
 pub mod app_control;
+pub mod audit;
 #[cfg(feature = "swd")]
 pub mod bootloader_fetch;
 pub mod cli;

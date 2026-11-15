@@ -158,6 +158,13 @@ pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
     )
     .await?;
 
+    global.audit.update(|e| {
+        e.set_artifact(&artifact_path);
+        if let Some(id) = provision_id {
+            e.set_node(id);
+        }
+    });
+
     let mut request = SwdFlashRequest::new(artifact_path);
     request.chip = args.chip;
     request.probe_serial = args.probe_serial;
@@ -196,6 +203,16 @@ pub async fn run(args: SwdFlashArgs, global: &GlobalFlags) -> Result<()> {
         .await
         .map_err(|e| anyhow!("swd-flash task join: {e}"))?
         .map_err(|e| exit_err(ExitCodeHint::FlashError, anyhow!("{e}")))?;
+
+    global.audit.update(|e| {
+        // The SWD report's CRC is over the file's raw bytes.
+        e.crc32 = Some(format!("0x{:08X}", report.crc32));
+        e.size_bytes = Some(report.size_bytes);
+        e.verified = Some(report.verified);
+        if let Some(v) = report.target_voltage_v {
+            e.detail("targetVoltageV", f64::from(v));
+        }
+    });
 
     if global.json {
         let json = serde_json::json!({

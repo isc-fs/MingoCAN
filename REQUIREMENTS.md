@@ -559,13 +559,13 @@ Deliberately absent:
       --node-id <ID>        Target node ID, hex `0x0A` or decimal `10`
       --timeout <MS>        Reply timeout in ms [default: 500]
       --json                Machine-readable JSON output on stdout
-      --log <PATH>          Audit log path — accepted, currently ignored (not implemented)
+      --log <PATH>          Flash-log file (default: per-user mingocan/flash-log.jsonl)
       --verbose             Trace-level logging
-      --operator <NAME>     Audit operator name — accepted, currently ignored (not implemented)
+      --operator <NAME>     Operator recorded in the flash log (default: OS user)
 ```
 
-`--log` and `--operator` are parsed but have no effect: the audit log is not
-implemented (see [§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5)).
+`--log` and `--operator` drive the flash log — one JSONL line per command that
+writes to a board, success or failure (see [§ Flash log](#flash-log)).
 
 `--timeout` is **per command**, covering a whole reassembled ISO-TP message —
 not per CAN frame. Subcommands whose transport cannot complete inside a short
@@ -1485,8 +1485,7 @@ Deliberately absent: no `src/security/` (Phase 5 is deferred) and no
 `src/debug/` (there is no `CMD_MEM_READ` / `CMD_MEM_WRITE` to wrap). The
 `output/summary` and `protection/wrp` modules from early planning drafts never
 materialised — that functionality is inlined into the subcommand that needs
-it. The `audit` module was never built; see
-[§ Deferred scope](#deferred-scope-v2-tied-to-bootloader-phase-5).
+it. The flash log lives in `src/audit.rs` (see [§ Flash log](#flash-log)).
 
 ---
 
@@ -1605,29 +1604,16 @@ the wire surface and exit codes stay reserved.
   challenge-response key derivation) the tool's `discover` table
   grows a `UID` column at that time.
 
-### Audit log — not implemented; `--log` / `--operator` are accepted but currently ignored
+### Flash log
 
-Planned, never built: no SQLite file is written and no error is raised
-when the flags are passed. The intended schema:
+Built in #651 as an append-only JSONL file instead of the SQLite table first
+planned: one self-describing JSON object per line, appendable by the CLI and
+the desktop app at once, readable with `jq` or a spreadsheet (the app exports
+CSV). Default path `<data-local-dir>/mingocan/flash-log.jsonl`; `--log`
+overrides it. Schema: `src/audit.rs` (`Entry`, `SCHEMA_VERSION = 1`), covering
+time (UTC), operator, host, tool and version, action, node-id and role, adapter
+and channel, USB/probe serial, artifact, CRC32, size, firmware product, version
+and git hash, verified, dry run, action-specific details, and the result with
+error and exit code. A failure to write the log never fails the command.
 
-```sql
-CREATE TABLE sessions (
-  id            INTEGER PRIMARY KEY,
-  timestamp     TEXT NOT NULL,
-  operation     TEXT NOT NULL,
-  adapter_type  TEXT,
-  adapter_chan  TEXT,
-  node_id       TEXT,
-  fw_hash       TEXT,
-  fw_version    TEXT,
-  result        TEXT NOT NULL,
-  error         TEXT,
-  operator      TEXT,
-  git_user      TEXT
-);
-```
-
-Also planned with it: when `GITHUB_STEP_SUMMARY` is set, a markdown
-flash report would be written automatically (adapter type + channel,
-node ID, firmware version, git hash, product name, sectors touched,
-WRP status, duration, result).
+Still not built: the `GITHUB_STEP_SUMMARY` markdown flash report.

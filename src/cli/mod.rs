@@ -33,7 +33,7 @@ pub mod verify;
 /// `main` can pick a specific exit code from the REQUIREMENTS.md
 /// table instead of falling back to 99. Wrap with
 /// [`exit_err`] / [`bail_exit!`] at the subcommand layer; `main`'s
-/// `map_error_to_exit_code` walks the error chain looking for this
+/// `exit_code_of` walks the error chain looking for this
 /// type via `downcast_ref`.
 ///
 /// Numeric values match `ExitCodeValue` in `main.rs`; keep the two
@@ -82,7 +82,7 @@ impl ExitCodeHint {
 /// human-readable message. The hint sits at the root of the chain;
 /// the message wraps it via `context` so `Display` prints the
 /// message first ("installed image differs…") and the hint second
-/// ("verification mismatch"). `main::map_error_to_exit_code` walks
+/// ("verification mismatch"). `main::exit_code_of` walks
 /// the chain via `downcast_ref::<ExitCodeHint>` and picks the code.
 pub fn exit_err(hint: ExitCodeHint, message: impl std::fmt::Display) -> anyhow::Error {
     anyhow::Error::new(hint).context(message.to_string())
@@ -214,7 +214,10 @@ pub struct GlobalFlags {
     #[arg(long = "json", default_value_t = false, global = true)]
     pub json: bool,
 
-    /// Audit log path (accepted but currently ignored — not implemented)
+    /// Flash-log file (JSONL). Every command that writes to a board
+    /// appends one line. Default: the per-user MingoCAN data dir
+    /// (`mingocan/flash-log.jsonl`); not written for `--interface virtual`
+    /// unless this flag is given
     #[arg(long = "log", global = true)]
     pub log_path: Option<PathBuf>,
 
@@ -222,9 +225,165 @@ pub struct GlobalFlags {
     #[arg(long = "verbose", default_value_t = false, global = true)]
     pub verbose: bool,
 
-    /// Operator name for the audit log (accepted but currently ignored)
+    /// Operator name recorded in the flash log (default: the OS user)
     #[arg(long = "operator", global = true)]
     pub operator: Option<String>,
+
+    /// The flash-log entry being filled in while a write command runs.
+    /// Not a flag: `main` opens it for write commands (see
+    /// [`audit_start`]), subcommands add what they learn.
+    #[arg(skip)]
+    pub audit: AuditSlot,
+}
+
+// ---- Flash log (#651) ----
+
+/// Holds the [`audit::Entry`](crate::audit::Entry) for the running
+/// command. Empty (every call a no-op) unless `main` opened it, so
+/// subcommands can record unconditionally.
+#[derive(Debug, Default, Clone)]
+pub struct AuditSlot(std::sync::Arc<std::sync::Mutex<Option<crate::audit::Entry>>>);
+
+impl AuditSlot {
+    /// Start recording `entry`.
+    pub fn begin(&self, entry: crate::audit::Entry) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(entry);
+        }
+    }
+
+    /// Add to the open entry, if any.
+    pub fn update(&self, f: impl FnOnce(&mut crate::audit::Entry)) {
+        if let Ok(mut slot) = self.0.lock() {
+            if let Some(entry) = slot.as_mut() {
+                f(entry);
+            }
+        }
+    }
+
+    /// Drop the entry: the operator declined a confirmation, so nothing
+    /// was written and there's nothing to log.
+    pub fn cancel(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+
+    /// Take the entry to write it out.
+    pub fn take(&self) -> Option<crate::audit::Entry> {
+        self.0.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
+/// If `command` writes to a board, the flash-log entry to start and the
+/// file it goes to. `None` for read-only commands, and for the virtual
+/// bus unless `--log` names a file (tests and demos stay out of the
+/// operator's history).
+pub fn audit_start(
+    command: &Command,
+    global: &GlobalFlags,
+) -> Option<(crate::audit::Entry, PathBuf)> {
+    use crate::audit::Entry;
+
+    // (action, is it a CAN action)
+    let (action, over_can) = match command {
+        Command::Flash(_) => ("flash", true),
+        Command::Provision(_) => ("provision", true),
+        Command::Diagnose(d) => match d.action {
+            diagnose::DiagnoseAction::ClearDtc { .. } => ("clear-dtc", true),
+            _ => return None,
+        },
+        Command::Config(c) => match &c.action {
+            config::ConfigAction::Ob {
+                action: config::ObAction::ApplyWrp { .. },
+            } => ("ob-apply-wrp", true),
+            config::ConfigAction::Nvm { action } => match action {
+                config::NvmAction::Write { .. } => ("nvm-write", true),
+                config::NvmAction::Erase { .. } => ("nvm-erase", true),
+                config::NvmAction::Format { .. } => ("nvm-format", true),
+                config::NvmAction::Read { .. } => return None,
+            },
+            config::ConfigAction::Ob { .. } => return None,
+        },
+        #[cfg(feature = "swd")]
+        Command::SwdFlash(_) => ("swd-flash", false),
+        #[cfg(feature = "swd")]
+        Command::DfuFlash(_) => ("dfu-flash", false),
+        _ => return None,
+    };
+
+    let path = match &global.log_path {
+        Some(p) => p.clone(),
+        None if over_can && global.interface == InterfaceType::Virtual => return None,
+        None => crate::audit::default_path()?,
+    };
+
+    let mut entry = Entry::new("cli", action);
+    if let Some(op) = global.operator.as_deref().map(str::trim) {
+        if !op.is_empty() {
+            entry.operator = Some(op.to_string());
+        }
+    }
+    if over_can {
+        entry.interface = global
+            .interface
+            .to_possible_value()
+            .map(|v| v.get_name().to_string());
+        entry.channel = global.channel.clone();
+        // `flash` refuses to run without --node-id; the others fall back
+        // to 0x3 like their subcommands do.
+        match (command, global.node_id) {
+            (_, Some(id)) => entry.set_node(id),
+            (Command::Flash(_), None) => {}
+            (_, None) => entry.set_node(0x3),
+        }
+    }
+    match command {
+        Command::Flash(args) => {
+            entry.set_artifact(&args.firmware);
+            entry.dry_run = args.dry_run;
+        }
+        Command::Provision(args) => {
+            // The board is reached at --node-id (default 0x3) and leaves
+            // as the role's id: log the new id, keep the old as a detail.
+            let reached = global.node_id.unwrap_or(0x3);
+            entry.detail("previousNodeId", format!("0x{reached:X}"));
+            if let Some((id, _)) = provision::resolve_role_or_path(&args.role) {
+                entry.set_node(id);
+            }
+        }
+        _ => {}
+    }
+    if let Command::Config(c) = command {
+        if let config::ConfigAction::Nvm { action } = &c.action {
+            match action {
+                config::NvmAction::Write { key, value, .. } => {
+                    entry.detail("key", format!("0x{key:04X}"));
+                    entry.detail("value", value.clone());
+                }
+                config::NvmAction::Erase { key } => {
+                    entry.detail("key", format!("0x{key:04X}"));
+                }
+                _ => {}
+            }
+        }
+    }
+    #[cfg(feature = "swd")]
+    if let Command::SwdFlash(args) = command {
+        if let Some(a) = &args.artifact {
+            entry.set_artifact(a);
+        }
+        entry.detail("chip", args.chip.clone());
+        entry.device_serial = args.probe_serial.clone();
+    }
+    #[cfg(feature = "swd")]
+    if let Command::DfuFlash(args) = command {
+        if let Some(a) = &args.artifact {
+            entry.set_artifact(a);
+        }
+        entry.device_serial = args.serial.clone();
+    }
+    Some((entry, path))
 }
 
 /// Backend identifier. The Linux-only `Socketcan` variant compiles on

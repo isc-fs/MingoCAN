@@ -49,8 +49,8 @@ can-flasher [GLOBAL OPTIONS] <COMMAND> [ARGS]
 | `--node-id <ID>` | Target node, hex `0x0A` or decimal `10`. See below. |
 | `--timeout <MS>` | Reply timeout *(default `500`)* |
 | `--json` | Machine-readable output on stdout |
-| `--log <PATH>` | Accepted but currently ignored — the audit log is not implemented |
-| `--operator <NAME>` | Accepted but currently ignored (see `--log`) |
+| `--log <PATH>` | Flash-log file. Default: the per-user log (see [Flash log](#flash-log)) |
+| `--operator <NAME>` | Name recorded in the flash log. Default: the OS user |
 | `--verbose` | Trace-level logging |
 
 > `--timeout` is **per command**, covering a whole reassembled ISO-TP message —
@@ -415,6 +415,34 @@ can-flasher replay run session.log
 ```
 
 ---
+
+## Flash log
+
+Every command that writes to a board appends one line to a per-user JSONL file,
+whether it succeeded or failed: `flash`, `swd-flash`, `dfu-flash`, `provision`,
+`config ob apply-wrp`, `config nvm write | erase | format`, and
+`diagnose clear-dtc`. Read-only commands, and prompts you decline, add nothing.
+The desktop app writes to the same file and shows it as **Flash history**.
+
+| OS | Default file |
+|---|---|
+| macOS | `~/Library/Application Support/mingocan/flash-log.jsonl` |
+| Linux | `$XDG_DATA_HOME/mingocan/flash-log.jsonl` (`~/.local/share/…`) |
+| Windows | `%LOCALAPPDATA%\mingocan\flash-log.jsonl` |
+
+`--log <PATH>` writes to another file instead. `--interface virtual` is not
+logged unless `--log` is given, so tests and demos stay out of the history.
+Each line records when (UTC), who (`--operator` or the OS user) and on which
+machine, the action, the board (node-id and role), the adapter, the firmware
+(path, CRC32, size, and version and git hash when the image carries a
+firmware-info record), whether it was verified, and the error and exit code on
+failure. If the log can't be written, the command still succeeds and prints a
+warning.
+
+```sh
+# Last five entries
+tail -n 5 ~/Library/Application\ Support/mingocan/flash-log.jsonl | jq -c '{ts, action, role, fwVersion, ok}'
+```
 
 ## Exit codes
 

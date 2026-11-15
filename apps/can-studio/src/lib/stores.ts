@@ -21,6 +21,7 @@ export type ViewId =
     | 'busMonitor'
     | 'pitDiag'
     | 'dataLogs'
+    | 'history'
     | 'settings';
 
 /** Sidebar grouping. Views with no section are pinned — Adapters at the
@@ -58,6 +59,13 @@ export const VIEWS: ViewMeta[] = [
         status: 'live',
         section: 'program',
         description: 'First-boot bootloader via SWD or USB',
+    },
+    {
+        id: 'history',
+        label: 'Flash history',
+        status: 'live',
+        section: 'program',
+        description: 'Who flashed what, onto which board, when',
     },
     {
         id: 'diagnostics',

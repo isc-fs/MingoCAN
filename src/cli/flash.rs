@@ -142,6 +142,7 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
             format!("could not load firmware '{}': {e}", args.firmware.display()),
         )
     })?;
+    global.audit.update(|e| e.set_image(&image));
 
     // Belt-and-braces — the loader already validated per-segment,
     // so this guard only fires if a future loader refactor forgets
@@ -252,6 +253,7 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
         );
         eprintln!("  bootloader : v{proto_major}.{proto_minor}");
         if !confirm_prompt("This erases + overwrites the app region. Continue?") {
+            global.audit.cancel();
             return Err(exit_err(
                 ExitCodeHint::Interrupted,
                 "flash cancelled at the pre-flight prompt (pass --yes to skip)",
@@ -325,6 +327,16 @@ pub async fn run(args: FlashArgs, global: &GlobalFlags) -> Result<()> {
     };
 
     let jump = !args.no_jump && args.jump;
+
+    global.audit.update(|e| {
+        // Verified = the bootloader checked the whole image's CRC (final
+        // FLASH_VERIFY commit) or every sector was read back.
+        let cfg = build_flash_config(&args);
+        e.verified = (!args.dry_run).then_some(cfg.final_commit || cfg.verify_after);
+        e.detail("sectorsWritten", report.sectors_written.len());
+        e.detail("sectorsSkipped", report.sectors_skipped.len());
+        e.detail("jump", jump);
+    });
 
     // ---- 6. Report ----
 
@@ -1156,6 +1168,7 @@ mod tests {
             log_path: None,
             verbose: false,
             operator: None,
+            audit: Default::default(),
         };
         let err = match open_session(&global, 5_000) {
             Ok(_) => panic!("missing --node-id must error"),

@@ -633,6 +633,7 @@ mod node_id_tests {
             log_path: None,
             verbose: false,
             operator: None,
+            audit: Default::default(),
         };
         let err = match open_session(&global) {
             Ok(_) => panic!("missing --node-id must error"),

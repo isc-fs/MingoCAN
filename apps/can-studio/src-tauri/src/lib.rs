@@ -13,6 +13,7 @@ mod bus_monitor;
 mod dbc;
 mod diagnose;
 mod flash;
+mod history;
 mod logs;
 mod pit_diag;
 mod provision;
@@ -95,6 +96,8 @@ pub fn run() {
             swd::dfu_list_devices,
             swd::dfu_flash,
             provision::provision_node_id,
+            history::history_read,
+            history::history_export_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the ISC MingoCAN Tauri app");

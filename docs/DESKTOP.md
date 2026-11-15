@@ -129,6 +129,20 @@ The bootloader image can be a local file or fetched by tag from
 `isc-fs/stm32-can-bootloader` releases (**Fetch**; blank = latest). **Erase
 chip** wipes everything — see [SAFETY.md](SAFETY.md).
 
+### Flash history
+
+Every action that wrote to a board from this laptop is listed here, newest
+first. That covers flashes, bootloader burns, chip erases, node-id changes and
+cleared DTCs, from the app or the command line, which share the same log (see
+[CLI.md § Flash log](CLI.md#flash-log)). Each row shows when, the action, the
+board, the firmware (file, version and git hash), the result and who did it.
+Click a row for the full details, including the error of a failed attempt.
+
+Filter by board, show only failures, or search by file, version, operator or
+error. **Export CSV** saves the rows you're looking at. The name recorded is
+the **Operator name** in Settings, or the computer's user name. The virtual
+adapter isn't recorded.
+
 ---
 
 ## Observe
@@ -191,7 +205,7 @@ power-cycle, and a full card is a coffee break rather than a pause.
 
 ## Settings
 
-Five sections. Changes save automatically 250 ms after you stop typing — there
+Six sections. Changes save automatically 250 ms after you stop typing — there
 is no Save button, and that is not an oversight.
 
 | Section | What's in it |
@@ -199,6 +213,7 @@ is no Save button, and that is not an oversight.
 | **Selected adapter** | Which adapter is active, mirrored from the Adapters view |
 | **Bus parameters** | Default target board, bitrate, frame timeout |
 | **Firmware build** | Build command, build working directory, built firmware path (the Release/Debug choice is on the Flash tab) |
+| **Flash history** | Operator name recorded in the flash history |
 | **DBC files (per-adapter)** | The interface+channel → `.dbc` associations |
 | **About** | Version, links, update check |
 

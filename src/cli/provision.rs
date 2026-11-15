@@ -123,6 +123,7 @@ pub async fn run(args: ProvisionArgs, global: &GlobalFlags) -> Result<()> {
             );
         }
         if !confirm_prompt("Continue?") {
+            global.audit.cancel();
             bail!("cancelled");
         }
     }

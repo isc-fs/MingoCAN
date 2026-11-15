@@ -62,13 +62,15 @@ nusb               = { version = "0.2", optional = true }
 # as probe-rs — only operators on the SWD path pay the size cost.
 ureq               = { version = "2.10", default-features = false, features = ["tls", "json"], optional = true }
 
-# Platform-correct cache directory resolution
-# (~/Library/Caches on macOS, $XDG_CACHE_HOME / ~/.cache on Linux,
-# %LOCALAPPDATA% on Windows). Used by `bootloader_fetch` to pick
-# a sensible spot for the downloaded `.elf`. Tiny dependency
-# (~200 LoC of platform conditionals); still gated to keep the
-# default-feature binary unchanged.
-dirs               = { version = "5.0", optional = true }
+# Platform-correct cache / data directory resolution
+# (~/Library/… on macOS, XDG dirs on Linux, %LOCALAPPDATA% on Windows).
+# `bootloader_fetch` caches the downloaded `.elf` there and the flash
+# log (`audit`, #651) lives there. Tiny (~200 LoC of conditionals).
+dirs               = "5.0"
+
+# Machine name for the flash log's `host` field (#651).
+gethostname        = "1"
+
 
 [features]
 # Default feature set — everything that ships in the existing
@@ -80,7 +82,7 @@ default = []
 # database). Build with `cargo install … --features swd` or
 # `cargo build --features swd`. The CLI release archives are
 # built without it; the desktop app always enables it.
-swd = ["dep:probe-rs", "dep:ureq", "dep:dirs", "dep:nusb"]
+swd = ["dep:probe-rs", "dep:ureq", "dep:nusb"]
 
 [dev-dependencies]
 # Test-only: parse the vendored AMS DBC in the pit-diag conformance
